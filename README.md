@@ -71,7 +71,7 @@ Svindows is intended for educational and research purposes.
 - 32-bpp framebuffer
 - PS/2 keyboard and mouse input
 - User-mode `cmd.exe` with PATH lookup, variables, batch files, redirection,
-  pipelines, history and filesystem commands
+  pipelines, history, arrow-key recall, in-line editing and filesystem commands
 - Character console subsystem with screen buffers, colors, cursor and modes
 
 ### Compatibility

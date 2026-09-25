@@ -142,42 +142,141 @@ static int execute_line(char *line);
 #include "cmd/shell_features.inc"
 #include "cmd/syntax.inc"
 
-static int read_line(char *out, unsigned capacity)
+static void copy_str(char *dst, const char *src)
 {
-    unsigned n = 0;
+    unsigned i = 0;
+    while (src[i] && i + 1 < CMD_LINE_MAX) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+/* Read one byte, blocking until one is available. */
+static int read_byte(char *out)
+{
+    DWORD got = 0;
+    while (!ReadFile(g_in, out, 1, &got, 0) || !got)
+        ;
+    return 1;
+}
+
+/* Repaint the edit line in place: carriage-return to the prompt, rewrite the
+ * buffer, blank any stale tail, then move the caret back to `pos`. */
+static void redraw_line(const char *prompt, const char *buf, unsigned n,
+                        unsigned pos, unsigned *rendered)
+{
+    write_s("\r");
+    write_s(prompt);
+    write_n(buf, n);
+    for (unsigned i = n; i < *rendered; i++)
+        write_s(" ");
+    *rendered = n;
+    for (unsigned i = n; i > pos; i--)
+        write_s("\b");
+}
+
+static void line_insert(char *out, unsigned *n, unsigned *pos, char c)
+{
+    for (unsigned i = *n; i > *pos; i--)
+        out[i] = out[i - 1];
+    out[*pos] = c;
+    (*n)++;
+    (*pos)++;
+}
+
+static int read_line(const char *prompt, char *out, unsigned capacity)
+{
+    unsigned n = 0, pos = 0, rendered = 0;
+    int hist_pos = -1; /* -1 while editing a fresh line */
+    static char draft[CMD_LINE_MAX];
+    (void)capacity;
+    out[0] = 0;
+    draft[0] = 0;
+    write_s(prompt);
+
     for (;;) {
         char c;
-        DWORD got = 0;
-        if (!ReadFile(g_in, &c, 1, &got, 0) || !got)
+        if (!read_byte(&c))
             continue;
+
+        if (c == 27) { /* ESC: an ANSI CSI sequence from arrows/Home/End/Del */
+            char b;
+            if (!read_byte(&b))
+                continue;
+            if (b != '[') {
+                c = b; /* not a CSI sequence; reprocess the byte */
+            } else {
+                if (!read_byte(&b))
+                    continue;
+                if (b == 'A') { /* Up: older history */
+                    if (g_history_count && hist_pos != 0) {
+                        if (hist_pos < 0) {
+                            out[n] = 0;
+                            copy_str(draft, out);
+                            hist_pos = (int)g_history_count;
+                        }
+                        hist_pos--;
+                        copy_str(out, g_history[hist_pos]);
+                        n = slen(out); pos = n;
+                        redraw_line(prompt, out, n, pos, &rendered);
+                    }
+                } else if (b == 'B') { /* Down: newer history, then draft */
+                    if (hist_pos >= 0) {
+                        hist_pos++;
+                        if (hist_pos >= (int)g_history_count) {
+                            hist_pos = -1;
+                            copy_str(out, draft);
+                        } else {
+                            copy_str(out, g_history[hist_pos]);
+                        }
+                        n = slen(out); pos = n;
+                        redraw_line(prompt, out, n, pos, &rendered);
+                    }
+                } else if (b == 'C') { /* Right */
+                    if (pos < n) { pos++; redraw_line(prompt, out, n, pos, &rendered); }
+                } else if (b == 'D') { /* Left */
+                    if (pos) { pos--; redraw_line(prompt, out, n, pos, &rendered); }
+                } else if (b == 'H') { /* Home */
+                    pos = 0; redraw_line(prompt, out, n, pos, &rendered);
+                } else if (b == 'F') { /* End */
+                    pos = n; redraw_line(prompt, out, n, pos, &rendered);
+                } else if (b == '3') { /* Delete: ESC [ 3 ~ */
+                    char tilde;
+                    if (read_byte(&tilde) && tilde == '~' && pos < n) {
+                        for (unsigned i = pos; i < n; i++)
+                            out[i] = out[i + 1];
+                        n--;
+                        redraw_line(prompt, out, n, pos, &rendered);
+                    }
+                }
+                continue;
+            }
+        }
+
         if (c == '\r')
             continue;
         if (c == '\n') {
-            write_s("\r\n");
             out[n] = 0;
+            write_s("\r\n");
             return 1;
         }
         if (c == '\b') {
-            if (n) {
-                n--;
-                write_s("\b \b");
+            if (pos) {
+                for (unsigned i = pos - 1; i < n; i++)
+                    out[i] = out[i + 1];
+                pos--; n--;
+                redraw_line(prompt, out, n, pos, &rendered);
             }
-            continue;
-        }
-        if (c == 27) {
-            while (n) { write_s("\b \b"); n--; }
             continue;
         }
         if (c == '\t') {
             do {
-                if (n + 1 < capacity) out[n++] = ' ';
-                write_s(" ");
+                if (n + 1 < capacity) line_insert(out, &n, &pos, ' ');
             } while (n % 4);
+            redraw_line(prompt, out, n, pos, &rendered);
             continue;
         }
         if ((BYTE)c >= 32 && n + 1 < capacity) {
-            out[n++] = c;
-            write_n(&c, 1);
+            line_insert(out, &n, &pos, c);
+            redraw_line(prompt, out, n, pos, &rendered);
         }
     }
 }
@@ -467,14 +566,24 @@ static int dispatch(char *line)
 int main(void)
 {
     char line[CMD_LINE_MAX];
+    char prompt[280];
     g_in = GetStdHandle(STD_INPUT_HANDLE);
     g_out = GetStdHandle(STD_OUTPUT_HANDLE);
     g_err = g_out;
     write_s("Svindows Command Processor [Version 0.6.0]\r\n"
             "Type HELP for a list of commands.\r\n\r\n");
     for (;;) {
-        if (g_echo) { write_s(g_current_directory); write_s(">"); }
-        if (!read_line(line, sizeof(line))) break;
+        prompt[0] = 0;
+        if (g_echo) {
+            unsigned i = 0;
+            while (g_current_directory[i] && i + 2 < sizeof(prompt)) {
+                prompt[i] = g_current_directory[i];
+                i++;
+            }
+            prompt[i++] = '>';
+            prompt[i] = 0;
+        }
+        if (!read_line(prompt, line, sizeof(line))) break;
         if (*line) {
             unsigned slot;
             if (g_history_count < CMD_HISTORY_COUNT) {

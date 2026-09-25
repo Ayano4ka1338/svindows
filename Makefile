@@ -360,7 +360,9 @@ run-gui: all
 test: all
 	$(PYTHON) tools/qemu_test.py --name regression \
 		--wait-for 'C:\>' \
-		--send $$'dir\rabitest.exe\rsehtest.exe\rsehframe.exe\rcpptest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\rconsole.exe\rfiletest.exe\rfetch.exe\r' \
+		--send $$'set V=RECALL_OK\recho %V%: PASS\r\x1b[A\recho ARROW_EDIT: PASX\x1b[D\x1b[3~S\rdir\rabitest.exe\rsehtest.exe\rsehframe.exe\rcpptest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\rconsole.exe\rfiletest.exe\rfetch.exe\r' \
+		--expect-count 'RECALL_OK: PASS=2' \
+		--expect 'ARROW_EDIT: PASS' \
 		--expect 'MESSAGE.TXT' \
 		--expect 'ABI_TEST: PASS' \
 		--expect 'MUTANT_TEST: PASS' \
