@@ -20,8 +20,23 @@
 #define IMAGE_DIRECTORY_ENTRY_EXPORT     0
 #define IMAGE_DIRECTORY_ENTRY_IMPORT     1
 #define IMAGE_DIRECTORY_ENTRY_BASERELOC  5
+#define IMAGE_DIRECTORY_ENTRY_TLS        9
 #define IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG 10
 #define IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT 13
+
+/* The PE TLS directory. A module's static thread-local variables live in its
+ * .tls section; Start/End bracket the template that is copied into every
+ * thread's TLS block, AddressOfIndex names the DWORD the loader fills with
+ * this module's TLS index, and AddressOfCallBacks points at the null-terminated
+ * callback array (DLL_THREAD_* / DLL_PROCESS_* notifications). */
+typedef struct PACKED _IMAGE_TLS_DIRECTORY64 {
+    UINT64 StartAddressOfRawData;
+    UINT64 EndAddressOfRawData;
+    UINT64 AddressOfIndex;
+    UINT64 AddressOfCallBacks;
+    UINT32 SizeOfZeroFill;
+    UINT32 Characteristics;
+} IMAGE_TLS_DIRECTORY64, *PIMAGE_TLS_DIRECTORY64;
 
 #define IMAGE_ORDINAL_FLAG64 0x8000000000000000ULL
 

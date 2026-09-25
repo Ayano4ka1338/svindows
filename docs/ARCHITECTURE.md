@@ -177,6 +177,20 @@ image, resolves its imports, and appends a new `LDR_DATA_TABLE_ENTRY` to the
 same `PEB->Ldr` region — after which `GetProcAddress` resolves the freshly
 loaded module's exports, exactly as a plugin load works on Windows.
 
+**Static thread-local storage.** A module that declares thread-local variables
+carries an `IMAGE_TLS_DIRECTORY64` (DataDirectory 9) naming its `.tls` template,
+the `_tls_index` DWORD the loader must fill, and an optional callback array.
+`LdrpRegisterTls` (`ldr/pe/tls.inc`) runs as each module is cached: it assigns
+the module a TLS index and writes it to `AddressOfIndex`. Once every module is
+known, `LdrApplyThreadTls` gives each thread a block vector at
+`TEB.ThreadLocalStoragePointer` (`gs:[0x58]`) — one block per module, zero-filled
+and copied from that module's template — from a bump region above the loader
+init page. The index space starts at 0 for static TLS and `PEB->LdrpTlsNextIndex`
+publishes the next free index, so kernel32's `TlsAlloc` continues after the
+static indices instead of colliding with them. The callback arrays are collected
+into the loader init block, and ntdll's ring-3 `LdrInitializeProcess` walks them
+first — calling each with `DLL_PROCESS_ATTACH` before any `DllMain`.
+
 SSE is enabled at boot (`CR0.MP`/`CR4.OSFXSR`), since compiler-emitted XMM use —
 pervasive in real Windows binaries — would otherwise fault, and the context
 switch preserves each thread's x87/SSE state with FXSAVE/FXRSTOR (`KiSchedule`

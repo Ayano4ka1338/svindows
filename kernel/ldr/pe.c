@@ -33,6 +33,24 @@ typedef struct _LDR_LOADED {
 
 #define MAX_LOADED_MODULES 64
 
+/* One module's static TLS directory (see ldr/pe/tls.inc). */
+typedef struct _LDR_TLS_MODULE {
+    UINT64  ModuleBase;         /* load base, passed to callbacks as hModule */
+    UINT64  TemplateStart;      /* VA of the initialized template           */
+    UINT64  TemplateEnd;        /* VA one past the template                 */
+    UINT64  AddressOfIndex;     /* VA of the module's `_tls_index` DWORD    */
+    UINT64  AddressOfCallBacks; /* VA of the null-terminated callback array */
+    UINT32  SizeOfZeroFill;     /* extra zero bytes past the template       */
+    UINT32  Index;              /* the TLS index assigned to this module    */
+    BOOLEAN Valid;
+} LDR_TLS_MODULE;
+
+#define MAX_TLS_MODULES 64
+
+/* Fixed user region the loader bump-allocates per-thread TLS vectors and data
+ * blocks from (above the LDR_INIT_BLOCK page at 0x90000). */
+#define LDR_TLS_VA_BASE 0x00000000000A0000ULL
+
 struct _LDR_PROCESS_CONTEXT {
     LDR_LOADED Loaded[MAX_LOADED_MODULES];
     UINT64 DynamicImageNext;
@@ -43,10 +61,15 @@ struct _LDR_PROCESS_CONTEXT {
     PPEB_LDR_DATA PebLdr;
     UINT8 *LdrCursor;
     UINT8 *LdrEnd;
+    LDR_TLS_MODULE TlsModules[MAX_TLS_MODULES];
+    UINT32 TlsIndexNext;
+    UINT32 TlsPad;
+    UINT64 TlsRegionNext;
 };
 
 static LDR_PROCESS_CONTEXT g_early_context = {
     .DynamicImageNext = 0x0000000400000000ULL,
+    .TlsRegionNext = 0x00000000000A0000ULL,
 };
 
 static PLDR_PROCESS_CONTEXT LdrpCurrentContext(void)
@@ -69,6 +92,7 @@ PLDR_PROCESS_CONTEXT LdrCreateProcessContext(void)
         return NULL;
     memset(context, 0, sizeof(*context));
     context->DynamicImageNext = 0x0000000400000000ULL;
+    context->TlsRegionNext = LDR_TLS_VA_BASE;
     KeLog("[ldr]  created process context %p\n", context);
     return context;
 }
@@ -136,5 +160,10 @@ static PIMAGE_SECTION_HEADER first_section(PIMAGE_NT_HEADERS64 nt)
 
 
 #include "pe/image_mapping.inc"
+
+/* Defined in pe/tls.inc, called while caching modules in pe/imports.inc. */
+static void LdrpRegisterTls(UINT64 base);
+
 #include "pe/imports.inc"
+#include "pe/tls.inc"
 #include "pe/process_modules.inc"

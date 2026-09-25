@@ -94,6 +94,7 @@ SEHTEST    := $(BUILD)/sehtest.exe
 SEHCRASH   := $(BUILD)/sehcrash.exe
 SEHFRAME   := $(BUILD)/sehframe.exe
 CPPTEST    := $(BUILD)/cpptest.exe
+TLSTEST    := $(BUILD)/tlstest.exe
 FETCH      := $(BUILD)/fetch.exe
 CMD        := $(BUILD)/cmd.exe
 EXTRA      := $(BUILD)/extra.dll
@@ -291,6 +292,15 @@ $(CPPTEST): user/cpptest.cpp $(CRT0) $(NTDLL)
 	           /out:$@ $(BUILD)/cpptest.obj $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
 	@echo "  PE    $@"
 
+# tlstest.exe: a C++ program with static thread-local storage, proving the
+# loader builds a per-thread TLS block from the module's .tls template.
+$(TLSTEST): user/tlstest.cpp $(CRT0) $(KERNEL32) $(NTDLL)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -x c++ -fno-rtti -c user/tlstest.cpp -o $(BUILD)/tlstest.obj
+	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
+	           /out:$@ $(BUILD)/tlstest.obj $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
+	@echo "  PE    $@"
+
 $(FETCH): user/fetch.c user/fetch_cpu.asm $(CRT0) $(KERNEL32) $(NTDLL)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/fetch.c -o $(BUILD)/fetch.obj
@@ -311,7 +321,7 @@ $(CMD): user/cmd.c $(CMD_PARTS) $(CRT0) $(KERNEL32) $(NTDLL)
 
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): Makefile $(TESTAPP) $(HELLO) $(FILETEST) $(CAT) $(CONSOLETEST) $(ABITEST) $(SEHTEST) $(SEHCRASH) $(SEHFRAME) $(CPPTEST) $(FETCH) $(CMD) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA) user/message.txt
+$(DISK): Makefile $(TESTAPP) $(HELLO) $(FILETEST) $(CAT) $(CONSOLETEST) $(ABITEST) $(SEHTEST) $(SEHCRASH) $(SEHFRAME) $(CPPTEST) $(TLSTEST) $(FETCH) $(CMD) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA) user/message.txt
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v SVINDOWS ::
@@ -325,6 +335,7 @@ $(DISK): Makefile $(TESTAPP) $(HELLO) $(FILETEST) $(CAT) $(CONSOLETEST) $(ABITES
 	mcopy -i $(DISK) $(SEHCRASH) ::SEHCRASH.EXE
 	mcopy -i $(DISK) $(SEHFRAME) ::SEHFRAME.EXE
 	mcopy -i $(DISK) $(CPPTEST) ::CPPTEST.EXE
+	mcopy -i $(DISK) $(TLSTEST) ::TLSTEST.EXE
 	mcopy -i $(DISK) $(FETCH) ::FETCH.EXE
 	mcopy -i $(DISK) $(CMD) ::CMD.EXE
 	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
@@ -360,7 +371,7 @@ run-gui: all
 test: all
 	$(PYTHON) tools/qemu_test.py --name regression \
 		--wait-for 'C:\>' \
-		--send $$'set V=RECALL_OK\recho %V%: PASS\r\x1b[A\recho ARROW_EDIT: PASX\x1b[D\x1b[3~S\rdir\rabitest.exe\rsehtest.exe\rsehframe.exe\rcpptest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\rconsole.exe\rfiletest.exe\rfetch.exe\r' \
+		--send $$'set V=RECALL_OK\recho %V%: PASS\r\x1b[A\recho ARROW_EDIT: PASX\x1b[D\x1b[3~S\rdir\rabitest.exe\rsehtest.exe\rsehframe.exe\rcpptest.exe\rtlstest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\rconsole.exe\rfiletest.exe\rfetch.exe\r' \
 		--expect-count 'RECALL_OK: PASS=2' \
 		--expect 'ARROW_EDIT: PASS' \
 		--expect 'MESSAGE.TXT' \
@@ -371,6 +382,7 @@ test: all
 		--expect 'SEH_FRAME_TEST: PASS' \
 		--expect 'SEH_FINALLY_TEST: PASS' \
 		--expect 'CPP_EH_TEST: PASS' \
+		--expect 'TLS_TEST: PASS' \
 		--expect 'UNHANDLED_TEST: PASS' \
 		--expect 'CONSOLE_TEST: PASS' \
 		--expect 'FAT32_TEST: PASS' \
@@ -383,10 +395,11 @@ test-release:
 test-exceptions: all
 	$(PYTHON) tools/qemu_test.py --name exceptions \
 		--wait-for 'C:\>' \
-		--send $$'sehtest.exe\rsehframe.exe\rcpptest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\r' \
+		--send $$'sehtest.exe\rsehframe.exe\rcpptest.exe\rtlstest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\r' \
 		--expect 'SEH_TEST: PASS' --expect 'SEH_FRAME_TEST: PASS' \
 		--expect 'SEH_FINALLY_TEST: PASS' \
 		--expect 'CPP_EH_TEST: PASS' \
+		--expect 'TLS_TEST: PASS' \
 		--expect 'UNHANDLED_TEST: PASS'
 
 test-fs-reboot: all

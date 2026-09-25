@@ -78,4 +78,12 @@ UINT64 LdrLoadLibrary(const char *name);
 BOOLEAN LdrDescribeUserAddress(UINT64 addr, const char **name_out,
                                UINT64 *base_out);
 
+/* Number of static TLS indices the process's loaded modules claimed. */
+UINT32 LdrTlsIndexCount(void);
+
+/* Build the thread's TLS block vector (one block per TLS module, copied from
+ * each module's .tls template) and hang it off TEB.ThreadLocalStoragePointer at
+ * @teb_va + 0x58. Must run with the process address space active. */
+void LdrApplyThreadTls(UINT64 teb_va);
+
 #endif /* _SVINDOWS_LDR_H_ */

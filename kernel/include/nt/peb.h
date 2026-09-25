@@ -81,6 +81,11 @@ typedef struct PACKED _PEB {
     PVOID  ProcessHeap;                /* 0x30 */
     UINT8  PaddingToGdiTable[0xC0];    /* 0x38..0xF7 */
     PVOID  GdiSharedHandleTable;       /* 0xF8 */
+    /* SVINDOWS extension: the static TLS index space. The loader allocates
+     * one index per module that carries a PE TLS directory and publishes the
+     * next free index so kernel32's TlsAlloc shares the same space. */
+    ULONG  LdrpTlsNextIndex;           /* 0x100 */
+    ULONG  LdrpTlsSlotCount;           /* 0x104 */
 } PEB, *PPEB;
 
 #endif /* _NT_PEB_H_ */

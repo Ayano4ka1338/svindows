@@ -15,23 +15,63 @@ default rel
 section .text
 
 ; Process bootstrap used by the kernel loader. RCX points to:
-;   +0  final executable entry
-;   +8  DLL count
-;   +16 repeated { module base, DLL entry point }
-; Dependencies are supplied in initialization order. Each entry is called as
+;   +0    final executable entry
+;   +8    DLL count
+;   +16   repeated { module base, DLL entry point } (64 slots reserved)
+;   +1040 TLS callback count
+;   +1048 repeated { module base, callback array } (64 slots reserved)
+; TLS callbacks run first (DLL_PROCESS_ATTACH), then each DLL entry is called as
 ; DllMain(base, DLL_PROCESS_ATTACH, NULL), then control jumps to the EXE entry
 ; with the original process-entry stack restored.
 extern LdrpRegisterWowHandlers
 extern RtlDispatchException
+
+; LDR_INIT_BLOCK fixed layout (see kernel/ldr/pe/process_modules.inc).
+%define LDR_BLOCK_ENTRIES     16
+%define LDR_BLOCK_TLS_COUNT   1040
+%define LDR_BLOCK_TLS_ARRAYS  1048
 
 global LdrInitializeProcess
 LdrInitializeProcess:
     push    rbx
     push    rsi
     push    rdi
+    push    rbp
+    push    r12
     mov     rbx, rcx
+
+    ; --- TLS callbacks: for each {base, array}, walk the null-terminated
+    ; array and call callback(base, DLL_PROCESS_ATTACH, NULL). Loop state uses
+    ; callee-saved registers so the callbacks cannot clobber it.
+    mov     rsi, [rbx + LDR_BLOCK_TLS_COUNT]
+    lea     rdi, [rbx + LDR_BLOCK_TLS_ARRAYS]
+.tls_loop:
+    test    rsi, rsi
+    jz      .dll_start
+    mov     r12, [rdi]              ; module base
+    mov     rbp, [rdi + 8]          ; callback array
+    test    rbp, rbp
+    jz      .tls_next
+.tls_cb_loop:
+    mov     rax, [rbp]
+    test    rax, rax
+    jz      .tls_next
+    mov     rcx, r12                ; hModule
+    mov     edx, 1                  ; DLL_PROCESS_ATTACH
+    xor     r8d, r8d
+    sub     rsp, 0x20               ; Win64 shadow space
+    call    rax
+    add     rsp, 0x20
+    add     rbp, 8
+    jmp     .tls_cb_loop
+.tls_next:
+    add     rdi, 16
+    dec     rsi
+    jmp     .tls_loop
+
+.dll_start:
     mov     rsi, [rbx + 8]
-    lea     rdi, [rbx + 16]
+    lea     rdi, [rbx + LDR_BLOCK_ENTRIES]
 .dll_loop:
     test    rsi, rsi
     jz      .start_exe
@@ -62,6 +102,8 @@ LdrInitializeProcess:
     ; handshake; do it here so RegisterClassW passes its validation.
     call    LdrpRegisterWowHandlers
     mov     rax, [rbx]
+    pop     r12
+    pop     rbp
     pop     rdi
     pop     rsi
     pop     rbx

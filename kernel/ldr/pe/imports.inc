@@ -527,6 +527,7 @@ static void remember_module(const char *name, UINT64 base)
         g_loaded[i].Name[j] = 0;
         g_loaded[i].Base = base;
         g_loaded[i].Valid = TRUE;
+        LdrpRegisterTls(base);
         return;
     }
 }

@@ -156,6 +156,13 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
     teb->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)PROCESS_CLIENT_ID;
     teb->ClientId.UniqueThread = (HANDLE)(ULONG_PTR)1;
 
+    /* Static TLS: allocate this thread's block vector now that every module
+     * (and so every TLS index) is known, and publish the index count so
+     * kernel32's TlsAlloc continues the same space. */
+    LdrApplyThreadTls(USER_TEB_VA);
+    peb->LdrpTlsNextIndex = LdrTlsIndexCount();
+    peb->LdrpTlsSlotCount = 64;
+
     KeLog("[ps]   process '%s': PEB @ %p (ImageBase %p), TEB @ %p\n",
           name, (void *)USER_PEB_VA, (void *)image_base, (void *)USER_TEB_VA);
 

@@ -26,6 +26,21 @@ __declspec(dllexport) HANDLE GetCurrentThread(void)    { return (HANDLE)(ULONGLO
 
 static volatile ULONGLONG g_tls_bitmap;
 
+/* The kernel allocates static TLS indices (one per module carrying a PE TLS
+ * directory) from 0 upward and publishes the next free index in the PEB. Mark
+ * those bits used so TlsAlloc continues after them instead of handing a
+ * static index to a caller. */
+static ULONGLONG tls_static_mask(void)
+{
+    PEB *peb = NtCurrentPeb();
+    if (!peb)
+        return 0;
+    DWORD next = *(volatile DWORD *)((BYTE *)peb + 0x100);
+    if (next > TLS_MINIMUM_AVAILABLE)
+        next = TLS_MINIMUM_AVAILABLE;
+    return next >= 64 ? ~(ULONGLONG)0 : (((ULONGLONG)1 << next) - 1);
+}
+
 static void **tls_slots(BOOL create)
 {
     void **slots = (void **)(ULONGLONG)read_gs_qword(0x58);
@@ -45,14 +60,16 @@ static void **tls_slots(BOOL create)
 
 __declspec(dllexport) DWORD TlsAlloc(void)
 {
+    ULONGLONG reserved = tls_static_mask();
     for (;;) {
         ULONGLONG old = g_tls_bitmap;
-        if (old == ~(ULONGLONG)0) {
+        ULONGLONG combined = old | reserved;
+        if (combined == ~(ULONGLONG)0) {
             SetLastError(8); /* ERROR_NOT_ENOUGH_MEMORY */
             return TLS_OUT_OF_INDEXES;
         }
         DWORD index = 0;
-        while (old & ((ULONGLONG)1 << index))
+        while (combined & ((ULONGLONG)1 << index))
             index++;
         ULONGLONG updated = old | ((ULONGLONG)1 << index);
         if (__sync_bool_compare_and_swap(&g_tls_bitmap, old, updated)) {

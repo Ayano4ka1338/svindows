@@ -109,6 +109,13 @@ static NTSTATUS build_environment(PROCESS_OBJECT *object, const char *command,
     teb->NtTib.StackBase = (PVOID)CHILD_STACK_TOP;
     teb->NtTib.StackLimit = (PVOID)stack_base;
 
+    /* Static TLS: allocate this thread's block vector now that every module
+     * (and so every TLS index) is known, and publish the index count so
+     * kernel32's TlsAlloc continues the same space. */
+    LdrApplyThreadTls(PROCESS_MAIN_TEB_VA);
+    peb->LdrpTlsNextIndex = LdrTlsIndexCount();
+    peb->LdrpTlsSlotCount = 64;
+
     PKTHREAD thread = KeCreateUserThreadForProcess(
         &object->Process, object->Name, entry, CHILD_STACK_TOP,
         PROCESS_MAIN_TEB_VA, argument, 8);
