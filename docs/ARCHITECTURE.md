@@ -203,9 +203,16 @@ serial/VGA path and therefore do not overwrite the user console screen.
 The 8042 PS/2 controller (`hal/ps2.c`) multiplexes a keyboard (IRQ1) and the
 mouse (IRQ12). The keyboard driver (`hal/keyboard.c`) translates set-1
 scancodes to ASCII, tracking shift/caps, into a ring buffer that `KbdReadChar`
-drains. The mouse driver (`hal/mouse.c`) reassembles the 3-byte movement
-packets into a screen-clamped `MouseState` (position + buttons), bumping a
-sequence counter on each change.
+drains. The 0xE0-prefixed navigation keys become the same ANSI escape
+sequences a serial terminal emits (`ESC [ A` for Up, and so on), so the console
+sees arrows identically from the PS/2 keyboard and COM1. The mouse driver
+(`hal/mouse.c`) reassembles the 3-byte movement packets into a screen-clamped
+`MouseState` (position + buttons), bumping a sequence counter on each change.
+
+`cmd.exe`'s line editor consumes those sequences: Up/Down walk the command
+history (keeping the in-progress line as a draft), Left/Right, Home and End move
+the caret, and Backspace/Delete edit mid-line, redrawing the prompt and buffer
+in place.
 
 A kernel **input thread** (`InputWorker` in `ke/ke_main.c`) drains serial and
 PS/2 input into both the console event queue and USER message queues. The

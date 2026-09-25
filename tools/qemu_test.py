@@ -16,14 +16,25 @@ def parse_args():
     parser.add_argument("--wait-for", default="")
     parser.add_argument("--send", default="")
     parser.add_argument("--expect", action="append", default=[])
+    parser.add_argument("--expect-count", action="append", default=[],
+                        help="MARKER=COUNT: require at least COUNT occurrences")
     parser.add_argument("--fail", action="append", default=[])
     parser.add_argument("--iso", default="build/svindows.iso")
     parser.add_argument("--disk", default="build/disk.img")
     return parser.parse_args()
 
 
+def parse_counts(entries):
+    counts = []
+    for entry in entries:
+        marker, _, value = entry.rpartition("=")
+        counts.append((marker, int(value)))
+    return counts
+
+
 def main():
     args = parse_args()
+    expected_counts = parse_counts(args.expect_count)
     command = [
         "qemu-system-x86_64", "-m", "1024M", "-no-reboot",
         "-no-shutdown", "-boot", "d", "-cdrom", args.iso,
@@ -64,11 +75,17 @@ def main():
             if failed:
                 print(f"\n[{args.name}] FAIL: saw {failed!r}", file=sys.stderr)
                 return 1
-            if sent and all(marker in text for marker in args.expect):
+            counts_met = all(text.count(marker) >= count
+                             for marker, count in expected_counts)
+            if sent and counts_met and \
+                    all(marker in text for marker in args.expect):
                 print(f"\n[{args.name}] PASS")
                 return 0
         text = output.decode("utf-8", errors="replace")
         missing = [marker for marker in args.expect if marker not in text]
+        missing += [f"{marker} x{count} (saw {text.count(marker)})"
+                    for marker, count in expected_counts
+                    if text.count(marker) < count]
         reason = f"missing markers: {missing}" if missing else "QEMU exited"
         print(f"\n[{args.name}] FAIL: {reason}", file=sys.stderr)
         return 1

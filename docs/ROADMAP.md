@@ -30,7 +30,8 @@ programs do not define the architecture.
 
 - FAT long-name creation, complete sharing rules and crash-consistent updates.
 - Full NT directory File objects and `NtQueryDirectoryFile`.
-- Rich command-line editing and a complete Windows `cmd.exe` grammar.
+- A complete Windows `cmd.exe` grammar (arrow-key recall and in-line editing
+  are in place).
 - Multiple independently allocatable console instances and resize support.
 
 ## Compatibility work

@@ -76,5 +76,6 @@ clean build and a QEMU smoke test before work proceeds to the next stage.
 - [ ] Enforce the complete Windows file-sharing matrix across concurrent opens.
 - [ ] Add FAT32 fault-injection/out-of-space tests and crash-consistent updates.
 - [ ] Add FAT long-name creation (existing VFAT long names are readable).
-- [ ] Add arrow-key recall and richer in-line command editing.
+- [x] Add arrow-key recall and richer in-line command editing (history up/down,
+      Home/End, Delete and mid-line insert on both PS/2 and serial input).
 - [ ] Support multiple independently allocated console instances and resize.
