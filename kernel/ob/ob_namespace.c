@@ -5,9 +5,9 @@
  * contain. The root directory ("\") anchors the tree; absolute paths like
  * "\Device\Serial0" are resolved segment by segment.
  */
-#include <ntos/ob.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/ob.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
 #include "obp.h"
 
 POBJECT_TYPE ObpDirectoryType;

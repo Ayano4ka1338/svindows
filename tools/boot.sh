@@ -10,22 +10,22 @@
 set -u
 
 SECS=${1:-25}
-PROGRAM=${2:-explorer.exe}
+PROGRAM=${2:-cmd.exe}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 1
 
 LOG=build/serial.log
 SHOT=build/screen.ppm
-MON=$(mktemp -u /tmp/ntos-mon.XXXXXX)
+MON=$(mktemp -u /tmp/svindows-mon.XXXXXX)
 # The QEMU monitor splits arguments on whitespace, so the screendump target has
 # to be a path without spaces; the project root contains one.
-RAWSHOT=$(mktemp -u /tmp/ntos-shot.XXXXXX).ppm
+RAWSHOT=$(mktemp -u /tmp/svindows-shot.XXXXXX).ppm
 
 make -s PROGRAM="$PROGRAM" iso build/disk.img >/dev/null || exit 1
 rm -f "$LOG" "$SHOT"
 
 qemu-system-x86_64 -m 1024M -no-reboot -no-shutdown -boot d \
-    -cdrom build/ntos.iso \
+    -cdrom build/svindows.iso \
     -drive file=build/disk.img,format=raw,if=ide,index=0,media=disk \
     -serial "file:$LOG" -display none \
     -monitor "unix:$MON,server,nowait" &

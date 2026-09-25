@@ -1,6 +1,6 @@
-/* stddef.h - minimal, for NTOS user programs. */
-#ifndef _NTOS_STDDEF_H_
-#define _NTOS_STDDEF_H_
+/* stddef.h - minimal, for SVINDOWS user programs. */
+#ifndef _SVINDOWS_STDDEF_H_
+#define _SVINDOWS_STDDEF_H_
 typedef unsigned long long size_t;
 #ifndef NULL
 #define NULL ((void *)0)

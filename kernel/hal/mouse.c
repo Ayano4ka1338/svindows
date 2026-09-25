@@ -6,8 +6,8 @@
  * button bitmask. Consumers poll MouseState (watching MouseState.Seq for
  * motion) and draw the cursor.
  */
-#include <ntos/input.h>
-#include <ntos/hal.h>
+#include <svindows/input.h>
+#include <svindows/hal.h>
 #include "ps2.h"
 
 MOUSE_STATE MouseState;

@@ -1,38 +1,40 @@
 /*
- * ob/ob_handle.c - the kernel handle table.
+ * ob/ob_handle.c - process-local kernel handle tables.
  *
- * A handle is an index into a table of (object, granted-access) pairs, encoded
- * as (index + 1) * 4 so that the NULL handle (0) is always invalid and handle
- * values are multiples of four, matching NT. There is one global table for now;
- * per-process handle tables arrive with the process manager (Ps).
- *
- * A handle holds one pointer reference on its object, plus a handle count.
- * Closing the handle (or the object's last handle going away) releases them.
+ * A handle is an index into the current process's table of
+ * (object, granted-access) pairs. It is encoded as (index + 1) * 4. Before the
+ * scheduler exists, bootstrap code uses a dedicated table which later becomes
+ * the System process table.
  */
-#include <ntos/ob.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/ob.h>
+#include <svindows/ex.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
 #include "obp.h"
 
 #define OB_MAX_HANDLES 4096
 
 typedef struct _HANDLE_ENTRY {
-    POBJECT     Object;   /* NULL when the slot is free */
+    POBJECT     Object;
     ACCESS_MASK GrantedAccess;
 } HANDLE_ENTRY;
 
-static HANDLE_ENTRY g_handles[OB_MAX_HANDLES];
+struct _OB_HANDLE_TABLE {
+    BOOLEAN      ExhaustionReported;
+    HANDLE_ENTRY Entries[OB_MAX_HANDLES];
+};
+
+static POB_HANDLE_TABLE g_bootstrap_table;
 
 static ALWAYS_INLINE HANDLE index_to_handle(UINT32 index)
 {
     return (HANDLE)(ULONG_PTR)((index + 1) * 4);
 }
 
-/* Returns TRUE and the index on success. */
 static BOOLEAN handle_to_index(HANDLE handle, UINT32 *out_index)
 {
     ULONG_PTR value = (ULONG_PTR)handle;
-    if (value == 0 || (value & 3) != 0)
+    if (!value || (value & 3))
         return FALSE;
     ULONG_PTR index = value / 4 - 1;
     if (index >= OB_MAX_HANDLES)
@@ -41,105 +43,184 @@ static BOOLEAN handle_to_index(HANDLE handle, UINT32 *out_index)
     return TRUE;
 }
 
+static POB_HANDLE_TABLE current_handle_table(void)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    if (thread && thread->Process && thread->Process->HandleTable)
+        return thread->Process->HandleTable;
+    return g_bootstrap_table;
+}
+
+POB_HANDLE_TABLE ObCreateHandleTable(void)
+{
+    POB_HANDLE_TABLE table = ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(OB_HANDLE_TABLE), 'TbHO');
+    if (table)
+        memset(table, 0, sizeof(*table));
+    return table;
+}
+
+POB_HANDLE_TABLE ObGetBootstrapHandleTable(void)
+{
+    return g_bootstrap_table;
+}
+
 void ObInitializeHandleTable(void)
 {
-    memset(g_handles, 0, sizeof(g_handles));
-    KeLog("[ob]   handle table: %u slots\n", (unsigned)OB_MAX_HANDLES);
+    g_bootstrap_table = ObCreateHandleTable();
+    if (!g_bootstrap_table)
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "cannot allocate bootstrap handle table");
+    KeLog("[ob]   bootstrap handle table: %u slots\n",
+          (unsigned)OB_MAX_HANDLES);
+}
+
+static void release_handle_entry(HANDLE_ENTRY *entry)
+{
+    POBJECT object = entry->Object;
+    POBJECT_HEADER header = ObHeaderFromObject(object);
+    entry->Object = NULL;
+    entry->GrantedAccess = 0;
+    InterlockedDecrement(&header->HandleCount);
+    if (header->Type->TotalHandles)
+        header->Type->TotalHandles--;
+    ObDereferenceObject(object);
+}
+
+void ObDestroyHandleTable(POB_HANDLE_TABLE table)
+{
+    if (!table || table == g_bootstrap_table)
+        return;
+    for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
+        if (table->Entries[i].Object)
+            release_handle_entry(&table->Entries[i]);
+    }
+    ExFreePool(table);
+}
+
+static void report_exhaustion(POB_HANDLE_TABLE table)
+{
+    if (table->ExhaustionReported)
+        return;
+    table->ExhaustionReported = TRUE;
+    KeLog("[ob]   process handle table exhausted (%u slots); census:\n",
+          (unsigned)OB_MAX_HANDLES);
+    for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
+        POBJECT_TYPE type = ObHeaderFromObject(table->Entries[i].Object)->Type;
+        BOOLEAN counted = FALSE;
+        for (UINT32 j = 0; j < i; j++) {
+            if (ObHeaderFromObject(table->Entries[j].Object)->Type == type) {
+                counted = TRUE;
+                break;
+            }
+        }
+        if (counted)
+            continue;
+        UINT32 count = 0;
+        for (UINT32 j = 0; j < OB_MAX_HANDLES; j++) {
+            if (ObHeaderFromObject(table->Entries[j].Object)->Type == type)
+                count++;
+        }
+        KeLog("[ob]     %s: %u handle(s)\n", type->Name, (unsigned)count);
+    }
+}
+
+NTSTATUS ObCreateHandleInTable(POB_HANDLE_TABLE table, POBJECT object,
+                               ACCESS_MASK access, HANDLE *out_handle)
+{
+    if (!object || !out_handle || !table)
+        return STATUS_INVALID_PARAMETER;
+
+    UINT64 flags = KiIrqSave();
+    for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
+        HANDLE_ENTRY *entry = &table->Entries[i];
+        if (!entry->Object) {
+            POBJECT_HEADER header = ObHeaderFromObject(object);
+            entry->Object = object;
+            entry->GrantedAccess = access;
+            ObReferenceObject(object);
+            InterlockedIncrement(&header->HandleCount);
+            header->Type->TotalHandles++;
+            *out_handle = index_to_handle(i);
+            KiIrqRestore(flags);
+            return STATUS_SUCCESS;
+        }
+    }
+    report_exhaustion(table);
+    KiIrqRestore(flags);
+    return STATUS_INSUFFICIENT_RESOURCES;
 }
 
 NTSTATUS ObCreateHandle(POBJECT object, ACCESS_MASK access, HANDLE *out_handle)
 {
-    if (!object || !out_handle)
-        return STATUS_INVALID_PARAMETER;
+    return ObCreateHandleInTable(current_handle_table(), object, access,
+                                 out_handle);
+}
 
-    for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
-        if (g_handles[i].Object == NULL) {
-            POBJECT_HEADER header = ObHeaderFromObject(object);
-
-            g_handles[i].Object = object;
-            g_handles[i].GrantedAccess = access;
-
-            ObReferenceObject(object);                 /* handle's pointer ref */
-            InterlockedIncrement(&header->HandleCount);
-            header->Type->TotalHandles++;
-
-            *out_handle = index_to_handle(i);
-            return STATUS_SUCCESS;
-        }
-    }
-    /* Exhaustion is a silent killer: every later Nt*Create/Open returns a NULL
-     * handle and the caller behaves as if the object never existed. Report it
-     * once, with a per-type census so the leaking object type is obvious. */
-    static BOOLEAN reported;
-    if (!reported) {
-        reported = TRUE;
-        KeLog("[ob]   handle table exhausted (%u slots); census:\n",
-              (unsigned)OB_MAX_HANDLES);
-        for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
-            POBJECT_TYPE type = ObHeaderFromObject(g_handles[i].Object)->Type;
-            BOOLEAN counted = FALSE;
-            for (UINT32 j = 0; j < i; j++)
-                if (ObHeaderFromObject(g_handles[j].Object)->Type == type)
-                    counted = TRUE;
-            if (counted)
-                continue;
-            UINT32 n = 0;
-            for (UINT32 j = 0; j < OB_MAX_HANDLES; j++)
-                if (ObHeaderFromObject(g_handles[j].Object)->Type == type)
-                    n++;
-            KeLog("[ob]     %s: %u handle(s)\n", type->Name, (unsigned)n);
-        }
-    }
-    return STATUS_INSUFFICIENT_RESOURCES;
+NTSTATUS ObDuplicateHandleToTable(HANDLE source,
+                                  POB_HANDLE_TABLE destination,
+                                  HANDLE *out_handle)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(source, 0, NULL, &object);
+    if (!NT_SUCCESS(status))
+        return status;
+    UINT32 index;
+    ACCESS_MASK access = GENERIC_ALL;
+    POB_HANDLE_TABLE source_table = current_handle_table();
+    if (source_table && handle_to_index(source, &index))
+        access = source_table->Entries[index].GrantedAccess;
+    status = ObCreateHandleInTable(destination, object, access, out_handle);
+    ObDereferenceObject(object);
+    return status;
 }
 
 NTSTATUS ObReferenceObjectByHandle(HANDLE handle, ACCESS_MASK desired,
                                    POBJECT_TYPE type, POBJECT *out_object)
 {
     UINT32 index;
-    if (!out_object || !handle_to_index(handle, &index))
+    POB_HANDLE_TABLE table = current_handle_table();
+    if (!out_object || !table || !handle_to_index(handle, &index))
         return STATUS_INVALID_HANDLE;
 
-    HANDLE_ENTRY *entry = &g_handles[index];
-    if (entry->Object == NULL)
+    UINT64 flags = KiIrqSave();
+    HANDLE_ENTRY *entry = &table->Entries[index];
+    if (!entry->Object) {
+        KiIrqRestore(flags);
         return STATUS_INVALID_HANDLE;
-
+    }
     POBJECT_HEADER header = ObHeaderFromObject(entry->Object);
-    if (type && header->Type != type)
+    if (type && header->Type != type) {
+        KiIrqRestore(flags);
         return STATUS_OBJECT_TYPE_MISMATCH;
-
-    /* Until per-type GENERIC_MAPPING exists, treat GENERIC_ALL as full access. */
+    }
     ACCESS_MASK granted = entry->GrantedAccess;
     if (granted & GENERIC_ALL)
         granted = (ACCESS_MASK)~0u;
-    if (desired && (granted & desired) != desired)
+    if (desired && (granted & desired) != desired) {
+        KiIrqRestore(flags);
         return STATUS_ACCESS_DENIED;
-
+    }
     ObReferenceObject(entry->Object);
     *out_object = entry->Object;
+    KiIrqRestore(flags);
     return STATUS_SUCCESS;
 }
 
 NTSTATUS ObCloseHandle(HANDLE handle)
 {
     UINT32 index;
-    if (!handle_to_index(handle, &index))
+    POB_HANDLE_TABLE table = current_handle_table();
+    if (!table || !handle_to_index(handle, &index))
         return STATUS_INVALID_HANDLE;
 
-    HANDLE_ENTRY *entry = &g_handles[index];
-    POBJECT object = entry->Object;
-    if (object == NULL)
+    UINT64 flags = KiIrqSave();
+    HANDLE_ENTRY *entry = &table->Entries[index];
+    if (!entry->Object) {
+        KiIrqRestore(flags);
         return STATUS_INVALID_HANDLE;
-
-    POBJECT_HEADER header = ObHeaderFromObject(object);
-
-    entry->Object = NULL;
-    entry->GrantedAccess = 0;
-
-    InterlockedDecrement(&header->HandleCount);
-    if (header->Type->TotalHandles)
-        header->Type->TotalHandles--;
-
-    ObDereferenceObject(object); /* release the handle's pointer ref */
+    }
+    release_handle_entry(entry);
+    KiIrqRestore(flags);
     return STATUS_SUCCESS;
 }

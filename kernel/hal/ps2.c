@@ -6,7 +6,7 @@
  * read/write handshake helpers the two drivers use.
  */
 #include "ps2.h"
-#include <ntos/hal.h>
+#include <svindows/hal.h>
 
 void Ps2WaitInput(void)
 {

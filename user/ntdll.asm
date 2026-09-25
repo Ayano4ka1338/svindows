@@ -1,5 +1,5 @@
 ; ============================================================================
-; user/ntdll.asm - the NTOS user-mode system library (ntdll.dll).
+; user/ntdll.asm - the SVINDOWS user-mode system library (ntdll.dll).
 ;
 ; Each exported Nt* function is the canonical Windows syscall stub: move the
 ; first argument from RCX (Windows calling convention) to R10 (because SYSCALL
@@ -22,6 +22,7 @@ section .text
 ; DllMain(base, DLL_PROCESS_ATTACH, NULL), then control jumps to the EXE entry
 ; with the original process-entry stack restored.
 extern LdrpRegisterWowHandlers
+extern RtlDispatchException
 
 global LdrInitializeProcess
 LdrInitializeProcess:
@@ -50,7 +51,7 @@ LdrInitializeProcess:
     ; diagnosed without losing the original fault site.
     mov     rcx, [rdi]
     mov     r10, rcx
-    mov     eax, 0xF1           ; NTOS-private NtDisplayNumber
+    mov     eax, 0xF1           ; SVINDOWS-private NtDisplayNumber
     syscall
 .next_dll:
     add     rdi, 16
@@ -66,6 +67,36 @@ LdrInitializeProcess:
     pop     rbx
     xor     ecx, ecx
     jmp     rax
+
+; void RtlCaptureContext(PCONTEXT Context /*rcx*/)
+;   Fills the integer/control prefix of an AMD64 CONTEXT with the caller's
+;   register state, so a software-raised exception can be unwound from the
+;   point of the raise exactly like a CPU fault. RIP is the return address and
+;   RSP is the value after the call; the non-volatile registers are captured
+;   verbatim. ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER.
+global RtlCaptureContext
+RtlCaptureContext:
+    mov     [rcx+0x78], rax
+    mov     [rcx+0x80], rcx
+    mov     [rcx+0x88], rdx
+    mov     [rcx+0x90], rbx
+    lea     rax, [rsp+8]
+    mov     [rcx+0x98], rax          ; Rsp
+    mov     [rcx+0xA0], rbp
+    mov     [rcx+0xA8], rsi
+    mov     [rcx+0xB0], rdi
+    mov     [rcx+0xB8], r8
+    mov     [rcx+0xC0], r9
+    mov     [rcx+0xC8], r10
+    mov     [rcx+0xD0], r11
+    mov     [rcx+0xD8], r12
+    mov     [rcx+0xE0], r13
+    mov     [rcx+0xE8], r14
+    mov     [rcx+0xF0], r15
+    mov     rax, [rsp]
+    mov     [rcx+0xF8], rax          ; Rip = return address
+    mov     dword [rcx+0x30], 0x00100003 ; CONTEXT_CONTROL | CONTEXT_INTEGER
+    ret
 
 ; PIMAGE_NT_HEADERS RtlImageNtHeader(PVOID Base)
 global RtlImageNtHeader
@@ -171,8 +202,68 @@ global %1
     ret
 %endmacro
 
+; Kernel exception entry: RCX=EXCEPTION_RECORD, RDX=CONTEXT.  Vectored
+; handlers may edit the context and request continuation.  NtContinue below
+; acknowledges the dispatch in the kernel and restores the integer/control
+; prefix of the native AMD64 CONTEXT directly in ring 3.
+global KiUserExceptionDispatcher
+KiUserExceptionDispatcher:
+    push    rbx
+    push    rsi
+    mov     rsi, rcx                    ; exception record
+    mov     rbx, rdx                    ; context
+    sub     rsp, 0x38                   ; shadow + EXCEPTION_POINTERS + align
+    mov     [rsp + 0x20], rsi
+    mov     [rsp + 0x28], rbx
+    lea     rcx, [rsp + 0x20]
+    call    RtlDispatchException
+    test    eax, eax
+    jz      .unhandled_exception
+    mov     rcx, rbx
+    xor     edx, edx
+    call    NtContinue                  ; successful continuation never returns
+.unhandled_exception:
+    xor     ecx, ecx
+    mov     edx, [rsi]                  ; exception code -> thread exit status
+    call    NtTerminateThread
+    ud2
+
+global NtContinue
+NtContinue:
+    push    rbx
+    mov     rbx, rcx                    ; context survives the syscall
+    mov     r10, rcx
+    mov     eax, 0x194
+    syscall
+    test    eax, eax
+    jnz     .continue_failed
+    mov     r11, rbx
+    push    qword [r11 + 68]            ; EFlags
+    popfq
+    mov     rsp, [r11 + 152]
+    push    qword [r11 + 248]           ; target RIP, consumed by ret
+    mov     rax, [r11 + 120]
+    mov     rcx, [r11 + 128]
+    mov     rdx, [r11 + 136]
+    mov     rbx, [r11 + 144]
+    mov     rbp, [r11 + 160]
+    mov     rsi, [r11 + 168]
+    mov     rdi, [r11 + 176]
+    mov     r8,  [r11 + 184]
+    mov     r9,  [r11 + 192]
+    mov     r10, [r11 + 200]
+    mov     r12, [r11 + 216]
+    mov     r13, [r11 + 224]
+    mov     r14, [r11 + 232]
+    mov     r15, [r11 + 240]
+    mov     r11, [r11 + 208]
+    ret
+.continue_failed:
+    pop     rbx
+    ret
+
 ; Service numbers target Windows 7 SP1 x64 (public NT syscall-number tables);
-; the kernel's KiServiceTable is indexed by the same values. Private NTOS-only
+; the kernel's KiServiceTable is indexed by the same values. Private SVINDOWS-only
 ; services (no Windows equivalent) sit above the real range at 0xF0+.
 SYSCALL_STUB NtWaitForSingleObject,   0x01
 SYSCALL_STUB NtSetEvent,              0x02
@@ -181,6 +272,8 @@ SYSCALL_STUB NtWriteFile,             0x05
 SYSCALL_STUB NtClose,                 0x0C
 SYSCALL_STUB NtOpenKey,               0x0F
 SYSCALL_STUB NtAllocateVirtualMemory, 0x15
+SYSCALL_STUB NtFreeVirtualMemory,     0x1B
+SYSCALL_STUB NtQueryVirtualMemory,    0x20
 SYSCALL_STUB NtProtectVirtualMemory,  0x4D
 SYSCALL_STUB NtQueryValueKey,         0x17
 SYSCALL_STUB NtCreateKey,             0x1A
@@ -202,6 +295,35 @@ SYSCALL_STUB NtResetEvent,            0xF7
 SYSCALL_STUB NtCreateSemaphore,       0xF8
 SYSCALL_STUB NtReleaseSemaphore,      0xF9
 SYSCALL_STUB NtQueryInformationProcess,0xFA
+SYSCALL_STUB NtCreateUserProcessSimple,0xFD
+SYSCALL_STUB NtFileSystemControlSimple,0xFE
+SYSCALL_STUB NtSetFileSizeSimple,     0xFF
+SYSCALL_STUB NtCreatePipeSimple,      0x100
+SYSCALL_STUB NtConsoleControlSimple,  0x101
+SYSCALL_STUB NtEnumerateDirectorySimple, 0x102
+
+; Private ABI-regression probes. Probe N accepts exactly N Win64 arguments;
+; the kernel validates both the register and stack argument slots.
+SYSCALL_STUB NtAbiProbe0,            0x180
+SYSCALL_STUB NtAbiProbe1,            0x181
+SYSCALL_STUB NtAbiProbe2,            0x182
+SYSCALL_STUB NtAbiProbe3,            0x183
+SYSCALL_STUB NtAbiProbe4,            0x184
+SYSCALL_STUB NtAbiProbe5,            0x185
+SYSCALL_STUB NtAbiProbe6,            0x186
+SYSCALL_STUB NtAbiProbe7,            0x187
+SYSCALL_STUB NtAbiProbe8,            0x188
+SYSCALL_STUB NtAbiProbe9,            0x189
+SYSCALL_STUB NtAbiProbe10,           0x18A
+SYSCALL_STUB NtAbiProbe11,           0x18B
+SYSCALL_STUB NtAbiProbe12,           0x18C
+SYSCALL_STUB NtAbiProbe13,           0x18D
+SYSCALL_STUB NtAbiProbe14,           0x18E
+SYSCALL_STUB NtAbiProbe15,           0x18F
+SYSCALL_STUB NtAbiProbe16,           0x190
+SYSCALL_STUB NtAbiShadowProbe,       0x191
+SYSCALL_STUB NtCreateMutant,         0x192
+SYSCALL_STUB NtReleaseMutant,        0x193
 
 section .data
 align 8

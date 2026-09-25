@@ -7,10 +7,10 @@
  * the arena. Blocks are tracked by an address-ordered doubly linked list, so a
  * freed block coalesces with whichever physical neighbours are also free.
  */
-#include <ntos/ex.h>
-#include <ntos/mm.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/ex.h>
+#include <svindows/mm.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
 
 /* Per-block header. Kept 16-byte sized so the payload that follows is
  * 16-aligned. `requested` is what the caller asked for; the bytes between

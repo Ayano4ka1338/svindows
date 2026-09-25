@@ -5,8 +5,8 @@
  * afterwards) and sequences the three stages: parse the firmware memory map,
  * start the physical allocator, then install the kernel's own page tables.
  */
-#include <ntos/mm.h>
-#include <ntos/ke.h>
+#include <svindows/mm.h>
+#include <svindows/ke.h>
 
 /* 0 => identity map (early boot); becomes MM_DIRECT_MAP_BASE once VMM is up. */
 UINT64 MmDirectMapBase = 0;

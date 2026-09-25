@@ -1,6 +1,6 @@
-# NTOS architecture
+# SVINDOWS architecture
 
-NTOS is organized to mirror the Windows NT executive. This keeps a clear path
+SVINDOWS is organized to mirror the Windows NT executive. This keeps a clear path
 toward NT binary compatibility: each NT subsystem has a home, and the public
 native API (`Nt*` / `Zw*` system services) can eventually be implemented on top
 of the same component boundaries the real kernel uses.
@@ -47,17 +47,18 @@ KiSystemStartup (C, ke/ke_main.c)
 A user thread enters ring 3 by `iretq`. It calls back into the kernel with the
 `syscall` instruction, whose entry (`arch/x86_64/syscall_entry.asm`) does the
 `swapgs` + kernel-stack switch through a per-CPU block (KPCR) reached via GS,
-then dispatches through `KiServiceTable` in `ke/syscall.c`. The user ABI mirrors
-System V with R10 replacing RCX (RCX/R11 are consumed by `syscall`): service
-number in RAX, arguments in RDI/RSI/RDX/R10/R8, result in RAX. `SYSRET` returns
-to ring 3. On every context switch the scheduler repoints TSS.RSP0 and the
+then dispatches through `KiServiceTable` in `ke/syscall.c`. The user boundary
+uses the Windows x64 ABI: the service number is in RAX, argument one is copied
+from RCX to R10 by the ntdll stub, arguments two through four use RDX/R8/R9,
+and later arguments live above the caller's shadow space. `SYSRET` returns to
+ring 3. On every context switch the scheduler repoints TSS.RSP0 and the
 KPCR's kernel stack at the incoming thread, so a syscall or interrupt taken from
 ring 3 always lands on that thread's own kernel stack.
 
 **The argument ABI.** The entry marshals the full Windows syscall argument set
 into an array on the kernel stack — arguments 1-4 from `R10`/`RDX`/`R8`/`R9`,
 and arguments 5+ from the user stack at `[user_rsp+0x28]` (past the ntdll stub's
-return address and the four-slot home space), up to 11 — and passes its address
+return address and the four-slot home space), up to 16 — and passes its address
 to `KiSystemServiceDispatch(number, args)`. That lets a service carry its true
 NT signature: `NtCreateFile` reads a `POBJECT_ATTRIBUTES` (whose `UNICODE_STRING`
 names the target) and reports via an `IO_STATUS_BLOCK`, `NtReadFile`/
@@ -65,7 +66,7 @@ names the target) and reports via an `IO_STATUS_BLOCK`, `NtReadFile`/
 6-argument form. The service table (`ke/syscall.c`) is a sparse array indexed by
 the **real Windows 7 SP1 x64 syscall numbers** — the same numbers the ntdll
 stubs issue — so aligning to a real build's numbering is what would let a
-genuine `ntdll` drive this kernel. NTOS-only services (no Windows equivalent)
+genuine `ntdll` drive this kernel. SVINDOWS-only services (no Windows equivalent)
 sit above the real range at `0xF0+`.
 
 **GS and the TEB/PEB.** In ring 3 the GS base points at the thread's TEB, so
@@ -99,7 +100,36 @@ kernel memory so the service works on a stable copy. `NtCreateFile`, the registr
 services, and the thread/event services probe their inputs and capture their
 names up front, returning `STATUS_ACCESS_VIOLATION` on a bad pointer rather than
 faulting the kernel. There is no kernel SEH yet, so these are range +
-page-presence checks, not fault-safe probes; adding SEH is future work.
+page-presence checks, not fault-safe probes. Ring-3 CPU faults are separate:
+`trap.c` converts them to `EXCEPTION_RECORD` plus the integer/control portion
+of an AMD64 `CONTEXT` and redirects execution to ntdll's
+`KiUserExceptionDispatcher`. Vectored handlers can edit the context and resume
+through `NtContinue`; unhandled faults terminate only the affected process.
+The ntdll dispatcher reads each loaded image's exception directory, searches
+its `RUNTIME_FUNCTION` table and interprets the common AMD64 unwind opcodes.
+C `__try/__except` scopes dispatch through `__C_specific_handler`; when one
+accepts, `RtlDispatchException` runs a second pass that walks the frames again
+with `EXCEPTION_UNWINDING` set so `__finally` handlers and (in C++ functions)
+destructors run before control resumes at the handler.
+
+**C++ exceptions.** `_CxxThrowException` raises status `0xE06D7363` with the
+thrown object and its module `_ThrowInfo`; `RtlRaiseException` captures the
+caller's `CONTEXT` with `RtlCaptureContext` and dispatches it exactly like a CPU
+fault, so `RaiseException` needs no separate kernel path. `__CxxFrameHandler3`
+reads the function's MSVC x64 `FuncInfo` (unwind map, try/catch map and
+IP-to-state map) through the unwind-info handler data, matches a catch by its
+RTTI type-descriptor name (or a type-less catch-all), stores the exception
+object for the handler, and enters the catch funclet; on the second pass it
+consumes the unwind map to destroy locals. `ntdll.dll` must carry its own
+`.pdata`, and the compile flags include `-funwind-tables`, so the unwinder can
+see through the `RaiseException`/`_CxxThrowException` frames that live inside
+the native library.
+
+**32-bit stack arguments.** The syscall entry marshals every stack argument as a
+full 64-bit slot, but the upper half of a slot holding a 32-bit parameter is
+undefined under the Win64 ABI. Services whose parameters sit at argument 5 or
+later therefore truncate them to their declared width (for example
+`NtWriteFile` reads `Length` as a `UINT32`) rather than trusting the full slot.
 
 ## Loading executables
 
@@ -153,14 +183,12 @@ request tag (`arch/x86_64/boot.asm`). At boot, `mm/multiboot.c` reads the
 framebuffer info tag — physical address, pitch, dimensions, and the RGB field
 positions — into `GfxFramebuffer`. `GfxInitialize` (`hal/framebuffer.c`) maps
 the framebuffer (which lives above RAM) into the direct map, and the graphics
-primitives — put-pixel, filled rectangle, screen clear, and an 8×16 bitmap font
-(`hal/font8x16.c`, generated from a monospace TTF) — draw straight into it.
+primitives — put-pixel, filled rectangle, screen clear, and a 9x20 antialiased
+font (`hal/font9x20.c`) — draw straight into it.
 
-The earlier scrolling framebuffer console and kernel-composed mock desktop were
-removed after graphics bring-up was validated. `ke/ke_main.c` now clears the
-framebuffer and leaves it unowned so the Windows-compatible USER/GDI stack can
-be the only producer of visible windows and, eventually, the Explorer desktop.
-Kernel diagnostics remain on serial and the early VGA text backend.
+The character console owns a character/attribute screen buffer and renders user
+output to serial plus the linear framebuffer. Kernel diagnostics use the early
+serial/VGA path and therefore do not overwrite the user console screen.
 
 ## Input and the cursor
 
@@ -171,11 +199,10 @@ drains. The mouse driver (`hal/mouse.c`) reassembles the 3-byte movement
 packets into a screen-clamped `MouseState` (position + buttons), bumping a
 sequence counter on each change.
 
-A kernel **input thread** (`InputWorker` in `ke/ke_main.c`) drains typed input
-and moves the arrow **cursor** when the mouse sequence changes.
-`GfxMoveCursor` (`hal/framebuffer.c`) saves the pixels under the sprite and
-restores them on the next move. A USER/win32k input queue and window compositor
-come next (see the roadmap).
+A kernel **input thread** (`InputWorker` in `ke/ke_main.c`) drains serial and
+PS/2 input into both the console event queue and USER message queues. The
+console subsystem (`io/console.c`) applies cooked/raw modes and owns the text
+cursor; mouse events remain independent for USER/win32k consumers.
 
 ## The registry
 
@@ -219,7 +246,7 @@ atomics and locking a threaded program expects.
 
 ## Running a standard program
 
-A program does not need NTOS-specific glue to run. The linker's default console
+A program does not need SVINDOWS-specific glue to run. The linker's default console
 entry is the CRT startup `mainCRTStartup` (`user/crt0.c`), which parses
 `argc`/`argv` from the command line, calls `int main(argc, argv, envp)`, and
 calls `ExitProcess` with its return value. So a plain, portable C program —
@@ -228,7 +255,7 @@ calls `ExitProcess` with its return value. So a plain, portable C program —
 compiles the ordinary way and runs unchanged (`user/hello.c` → `hello.exe`).
 `testapp.exe` is entered the same way. This is the foundation for eventually
 loading ready-made Windows binaries: grow the reimplemented DLLs and the loader
-(TLS, load-config, SEH, ...) until real programs' imports and startup are all
+(TLS, load-config, complete second-pass SEH unwind, ...) until real programs' imports and startup are all
 satisfied.
 
 ## Executive components

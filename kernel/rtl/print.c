@@ -9,7 +9,7 @@
  * Supported: %c %s %% and integers %d %i %u %x %X %p %b, with an optional
  * field width, '0' zero-padding, and the l / ll / z length modifiers.
  */
-#include <ntos/rtl.h>
+#include <svindows/rtl.h>
 
 typedef struct {
     char  *buf;

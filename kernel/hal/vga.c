@@ -5,8 +5,8 @@
  * framebuffer is reached through MmPhysToVirt so this keeps working once the
  * identity map is replaced by a real direct map.
  */
-#include <ntos/hal.h>
-#include <ntos/mm.h>
+#include <svindows/hal.h>
+#include <svindows/mm.h>
 
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25

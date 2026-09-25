@@ -1,5 +1,5 @@
 /*
- * user/testapp.c - a normal Win32 console program for NTOS.
+ * user/testapp.c - a normal Win32 console program for SVINDOWS.
  *
  * It uses only the Win32 API (kernel32) - no raw system calls - just as a
  * program written for Windows would. It reads a file, prints to the console,
@@ -255,23 +255,23 @@ static void demo_registry(void)
     print("\n-- registry (advapi32 Reg* over Nt*Key) --\n");
 
     HKEY hk;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\NTOS", 0, KEY_READ, &hk) == 0) {
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\SVINDOWS", 0, KEY_READ, &hk) == 0) {
         char ver[64];
         DWORD sz = sizeof(ver), type = 0;
         if (RegQueryValueExA(hk, "Version", 0, &type, (BYTE *)ver, &sz) == 0) {
-            print("  HKLM\\Software\\NTOS\\Version = ");
+            print("  HKLM\\Software\\SVINDOWS\\Version = ");
             print(ver);
             print("\n");
         }
         DWORD build = 0, bsz = sizeof(build);
         if (RegQueryValueExA(hk, "BuildNumber", 0, &type, (BYTE *)&build, &bsz) == 0) {
-            print("  HKLM\\Software\\NTOS\\BuildNumber = ");
+            print("  HKLM\\Software\\SVINDOWS\\BuildNumber = ");
             print_dec(build);
             print("\n");
         }
         RegCloseKey(hk);
     } else {
-        print("  (could not open HKLM\\Software\\NTOS)\n");
+        print("  (could not open HKLM\\Software\\SVINDOWS)\n");
     }
 
     HKEY hk2;

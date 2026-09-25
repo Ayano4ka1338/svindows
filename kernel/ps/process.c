@@ -5,12 +5,12 @@
  * a PEB carrying the image base, and a TEB (reached via GS in ring 3) whose
  * self-pointer and PEB pointer sit at the canonical offsets (0x30 and 0x60).
  */
-#include <ntos/ps.h>
-#include <ntos/mm.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
-#include <ntos/ldr.h>
-#include <ntos/win32k.h>
+#include <svindows/ps.h>
+#include <svindows/mm.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
+#include <svindows/ldr.h>
+#include <svindows/win32k.h>
 #include <nt/peb.h>
 
 /* Fixed user addresses for the single process we currently support (shared with

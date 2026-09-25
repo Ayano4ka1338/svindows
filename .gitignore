@@ -10,3 +10,9 @@
 *.swp
 .DS_Store
 compile_commands.json
+
+# Local tooling config (may hold API keys)
+opencode.json
+.claude/
+.agents/
+.codex/

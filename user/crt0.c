@@ -10,6 +10,11 @@
 
 typedef unsigned long DWORD;
 
+/* MSVC RTTI type descriptors reference the type_info vftable. C++ programs
+ * that use exceptions need the symbol even though Svindows does not implement
+ * typeid/dynamic_cast; one shared empty table satisfies the reference. */
+const void *__cxx_type_info_vftable __asm__("??_7type_info@@6B@") = 0;
+
 extern char *GetCommandLineA(void);       /* kernel32 */
 extern void  ExitProcess(DWORD code);     /* kernel32 */
 

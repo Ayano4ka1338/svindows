@@ -5,8 +5,8 @@
  * state, translates make codes to ASCII, and pushes characters into a small
  * ring buffer that KbdReadChar drains.
  */
-#include <ntos/input.h>
-#include <ntos/hal.h>
+#include <svindows/input.h>
+#include <svindows/hal.h>
 #include "ps2.h"
 
 /* US-QWERTY set-1 make-code -> ASCII, unshifted and shifted. Index by the
@@ -47,7 +47,6 @@ static void kbd_irq(void)
 {
     UINT8 sc = __inbyte(PS2_DATA);
 
-    /* 0xE0 introduces an extended code; we ignore the follow-up byte for now. */
     if (sc == 0xE0)
         return;
 

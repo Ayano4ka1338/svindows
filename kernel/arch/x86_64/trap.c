@@ -8,10 +8,13 @@
  * into process/thread teardown rather than a kernel bugcheck.
  */
 #include <nt/ntdef.h>
-#include <ntos/ke.h>
-#include <ntos/hal.h>
-#include <ntos/mm.h>
-#include <ntos/ldr.h>
+#include <nt/ntstatus.h>
+#include <nt/exception.h>
+#include <svindows/ke.h>
+#include <svindows/hal.h>
+#include <svindows/mm.h>
+#include <svindows/ldr.h>
+#include <svindows/rtl.h>
 
 static const char *const g_exception_names[32] = {
     "#DE Divide-by-Zero",
@@ -48,10 +51,81 @@ static UINT64 read_cr2(void)
     return v;
 }
 
+static NTSTATUS exception_status(UINT64 vector)
+{
+    switch (vector) {
+    case 0:  return STATUS_INTEGER_DIVIDE_BY_ZERO;
+    case 4:  return STATUS_INTEGER_OVERFLOW;
+    case 6:  return STATUS_ILLEGAL_INSTRUCTION;
+    case 13:
+    case 14: return STATUS_ACCESS_VIOLATION;
+    default: return STATUS_UNSUCCESSFUL;
+    }
+}
+
+/* Turn a ring-3 CPU trap into a normal user-mode exception-dispatch call. */
+static BOOLEAN dispatch_user_exception(PKTRAP_FRAME f)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || thread->ExceptionActive)
+        return FALSE;
+
+    UINT64 ntdll = LdrGetModuleBase("ntdll.dll");
+    UINT64 dispatcher = ntdll ?
+        LdrGetProcAddress(ntdll, "KiUserExceptionDispatcher") : 0;
+    if (!dispatcher || !MmIsUserAddress(dispatcher))
+        return FALSE;
+
+    UINT64 context_va = (f->rsp - sizeof(CONTEXT_AMD64)) & ~15ULL;
+    UINT64 record_va = (context_va - sizeof(EXCEPTION_RECORD64)) & ~15ULL;
+    UINT64 dispatch_rsp = (record_va - 0x30) & ~15ULL;
+    dispatch_rsp -= 8; /* Win64 function-entry alignment. */
+    if (!MmProbeForWrite(dispatch_rsp, context_va + sizeof(CONTEXT_AMD64) -
+                                      dispatch_rsp))
+        return FALSE;
+
+    PCONTEXT_AMD64 c = (PCONTEXT_AMD64)context_va;
+    PEXCEPTION_RECORD64 r = (PEXCEPTION_RECORD64)record_va;
+    memset(c, 0, sizeof(*c));
+    memset(r, 0, sizeof(*r));
+
+    c->ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    c->SegCs = (UINT16)f->cs; c->SegSs = (UINT16)f->ss;
+    c->EFlags = (UINT32)f->rflags;
+    c->Rax = f->rax; c->Rcx = f->rcx; c->Rdx = f->rdx; c->Rbx = f->rbx;
+    c->Rsp = f->rsp; c->Rbp = f->rbp; c->Rsi = f->rsi; c->Rdi = f->rdi;
+    c->R8 = f->r8; c->R9 = f->r9; c->R10 = f->r10; c->R11 = f->r11;
+    c->R12 = f->r12; c->R13 = f->r13; c->R14 = f->r14; c->R15 = f->r15;
+    c->Rip = f->rip;
+
+    r->ExceptionCode = exception_status(f->vector);
+    r->ExceptionAddress = f->rip;
+    if (f->vector == 14) {
+        r->NumberParameters = 2;
+        r->ExceptionInformation[0] = (f->error_code & 16) ? 8 :
+                                     ((f->error_code & 2) ? 1 : 0);
+        r->ExceptionInformation[1] = read_cr2();
+    }
+
+    *(UINT64 *)dispatch_rsp = 0;
+    thread->ExceptionActive = TRUE;
+    f->rip = dispatcher;
+    f->rsp = dispatch_rsp;
+    f->rcx = record_va;
+    f->rdx = context_va;
+    KeLog("[seh] dispatch code=0x%08lx address=%p tid=%lu\n",
+          (unsigned long)(UINT32)r->ExceptionCode,
+          (void *)r->ExceptionAddress,
+          (unsigned long)thread->ThreadId);
+    return TRUE;
+}
+
 static void dump_frame(PKTRAP_FRAME f)
 {
     const char *name = f->vector < 32 ? g_exception_names[f->vector]
                                       : "(external interrupt)";
+    PKTHREAD thread = KeGetCurrentThread();
+    PKPROCESS process = thread ? thread->Process : NULL;
 
     KeLog("\n=== TRAP: vector %lu (%s), error_code=0x%lx ===\n",
           (unsigned long)f->vector, name, (unsigned long)f->error_code);
@@ -60,8 +134,32 @@ static void dump_frame(PKTRAP_FRAME f)
           (void *)f->rip, (unsigned long)f->cs, (unsigned long)f->rflags);
     KeLog("RSP=%p  SS=0x%lx\n", (void *)f->rsp, (unsigned long)f->ss);
 
-    if (f->vector == 14) /* #PF: CR2 holds the faulting linear address */
-        KeLog("CR2=%p (faulting address)\n", (void *)read_cr2());
+    KeLog("process=%s pid=%lu thread=%s tid=%lu\n",
+          process && process->Name ? process->Name : "?",
+          process ? (unsigned long)process->ProcessId : 0ul,
+          thread && thread->Name ? thread->Name : "?",
+          thread ? (unsigned long)thread->ThreadId : 0ul);
+
+    if ((f->cs & 3) == 3) {
+        const char *module = NULL;
+        UINT64 base = 0;
+        if (LdrDescribeUserAddress(f->rip, &module, &base))
+            KeLog("location=%s+0x%lx\n", module,
+                  (unsigned long)(f->rip - base));
+    }
+
+    if (f->vector == 14) { /* #PF: CR2 holds the faulting linear address */
+        UINT64 error = f->error_code;
+        KeLog("CR2=%p page-fault=%s %s %s%s%s%s%s\n",
+              (void *)read_cr2(),
+              error & 1 ? "protection" : "not-present",
+              error & 2 ? "write" : "read",
+              error & 4 ? "user" : "supervisor",
+              error & 8 ? " reserved-bit" : "",
+              error & 16 ? " instruction-fetch" : "",
+              error & 32 ? " protection-key" : "",
+              error & 64 ? " shadow-stack" : "");
+    }
 
     KeLog("RAX=%p RBX=%p RCX=%p RDX=%p\n",
           (void *)f->rax, (void *)f->rbx, (void *)f->rcx, (void *)f->rdx);
@@ -115,10 +213,10 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
         return;
     }
 
-    /* Never let a bad or incomplete Win32 component take down the kernel. We
-     * do not have user-mode SEH dispatch yet, so an unhandled ring-3 exception
-     * terminates the faulting thread after preserving a full diagnostic dump. */
+    /* Deliver first-chance ring-3 exceptions through ntdll. */
     if (frame->vector < 32) {
+        if ((frame->cs & 3) == 3 && dispatch_user_exception(frame))
+            return;
         dump_frame(frame);
         if ((frame->cs & 3) == 3) {
             const UINT64 cfg_trace_va = 0x0000000000088ff8ULL;

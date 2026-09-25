@@ -5,7 +5,7 @@
  * struct assignments and the like, so these must exist even though we also use
  * them directly. Simple byte-at-a-time implementations; correctness over speed.
  */
-#include <ntos/rtl.h>
+#include <svindows/rtl.h>
 
 void *memcpy(void *dst, const void *src, SIZE_T n)
 {

@@ -5,12 +5,12 @@
  * bitmap-font glyphs, and a scrolling text console the kernel log renders into
  * once graphics are up.
  */
-#include <ntos/gfx.h>
-#include <ntos/mm.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/gfx.h>
+#include <svindows/mm.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
 
-extern const UINT8 Font8x16[95][16];
+extern const UINT8 Font9x20[95][20][5];
 
 GFX_FRAMEBUFFER GfxFramebuffer;
 
@@ -82,14 +82,35 @@ void GfxDrawChar(UINT32 x, UINT32 y, char c, UINT32 fg, UINT32 bg)
     if (!GfxAvailable())
         return;
     UINT8 uc = (UINT8)c;
-    const UINT8 *glyph = (uc >= 32 && uc < 127) ? Font8x16[uc - 32] : Font8x16[0];
+    const UINT8 (*glyph)[5] =
+        (uc >= 32 && uc < 127) ? Font9x20[uc - 32] : Font9x20[0];
+
+    /* Expanding the sixteen possible coverage levels once per glyph keeps
+     * the inner pixel loop small while still giving curved strokes smooth
+     * edges on the 32-bpp framebuffer. */
+    UINT32 shades[16];
+    UINT32 fr = (fg >> GfxFramebuffer.RedShift) & 0xff;
+    UINT32 fgreen = (fg >> GfxFramebuffer.GreenShift) & 0xff;
+    UINT32 fb = (fg >> GfxFramebuffer.BlueShift) & 0xff;
+    UINT32 br = (bg >> GfxFramebuffer.RedShift) & 0xff;
+    UINT32 bgreen = (bg >> GfxFramebuffer.GreenShift) & 0xff;
+    UINT32 bb = (bg >> GfxFramebuffer.BlueShift) & 0xff;
+    for (UINT32 alpha = 0; alpha < 16; alpha++) {
+        UINT32 r = (fr * alpha + br * (15 - alpha) + 7) / 15;
+        UINT32 green =
+            (fgreen * alpha + bgreen * (15 - alpha) + 7) / 15;
+        UINT32 b = (fb * alpha + bb * (15 - alpha) + 7) / 15;
+        shades[alpha] = GfxColor((UINT8)r, (UINT8)green, (UINT8)b);
+    }
 
     UINT32 sp = stride_px();
     for (UINT32 row = 0; row < GFX_FONT_H; row++) {
-        UINT8 bits = glyph[row];
         UINT32 *dst = GfxFramebuffer.Base + (y + row) * sp + x;
-        for (UINT32 col = 0; col < GFX_FONT_W; col++)
-            dst[col] = (bits & (1u << col)) ? fg : bg;
+        for (UINT32 col = 0; col < GFX_FONT_W; col++) {
+            UINT8 packed = glyph[row][col / 2];
+            UINT8 alpha = (col & 1) ? packed >> 4 : packed & 0x0f;
+            dst[col] = shades[alpha];
+        }
     }
 }
 

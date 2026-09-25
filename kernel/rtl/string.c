@@ -1,7 +1,7 @@
 /*
  * rtl/string.c - freestanding C string helpers.
  */
-#include <ntos/rtl.h>
+#include <svindows/rtl.h>
 
 SIZE_T strlen(const char *s)
 {

@@ -7,34 +7,31 @@
  */
 #include <nt/ntdef.h>
 #include <nt/ntstatus.h>
-#include <ntos/ke.h>
-#include <ntos/hal.h>
-#include <ntos/mm.h>
-#include <ntos/ex.h>
-#include <ntos/ob.h>
-#include <ntos/ldr.h>
-#include <ntos/ps.h>
-#include <ntos/io.h>
-#include <ntos/cm.h>
-#include <ntos/gfx.h>
-#include <ntos/win32k.h>
-#include <ntos/input.h>
-#include <ntos/rtl.h>
+#include <svindows/ke.h>
+#include <svindows/hal.h>
+#include <svindows/mm.h>
+#include <svindows/ex.h>
+#include <svindows/ob.h>
+#include <svindows/ldr.h>
+#include <svindows/ps.h>
+#include <svindows/io.h>
+#include <svindows/console.h>
+#include <svindows/cm.h>
+#include <svindows/gfx.h>
+#include <svindows/win32k.h>
+#include <svindows/input.h>
+#include <svindows/rtl.h>
 
-#define NTOS_VERSION "0.6.0"
+#define SVINDOWS_VERSION "0.6.0"
 
 /* Set by the top-level Makefile (PROGRAM=...).  This keeps the boot path the
  * same for built-in test PEs and a real PE supplied in the repository root. */
-#ifndef NTOS_BOOT_PROGRAM
-#define NTOS_BOOT_PROGRAM "testapp.exe"
+#ifndef SVINDOWS_BOOT_PROGRAM
+#define SVINDOWS_BOOT_PROGRAM "testapp.exe"
 #endif
-#ifndef NTOS_BOOT_COMMAND_LINE
-#define NTOS_BOOT_COMMAND_LINE NTOS_BOOT_PROGRAM
+#ifndef SVINDOWS_BOOT_COMMAND_LINE
+#define SVINDOWS_BOOT_COMMAND_LINE SVINDOWS_BOOT_PROGRAM
 #endif
-
-/* User stack for the loaded program (grows down from the top). */
-#define USER_STACK_TOP   0x0000000010010000ULL
-#define USER_STACK_PAGES 16
 
 /* A demo kernel thread: print a few iterations with busy work in between so the
  * timer preempts it and it interleaves with the user program. */
@@ -61,11 +58,23 @@ static void InputWorker(PVOID context)
     KeLog("[input] keyboard + mouse ready; move the mouse and type.\n");
 
     for (;;) {
-        /* Echo any typed characters. */
+        /* Headless `make run-serial` uses COM1 as the keyboard. */
+        while (HalSerialDataAvailable()) {
+            char c = HalSerialReadChar();
+            if (c == '\r') c = '\n';
+            if ((UINT8)c == 127) c = '\b';
+            if (c) {
+                IoConsoleInputCharacter(c);
+                KiUserQueueCharacter((UINT8)c);
+            }
+        }
+
+        /* Deliver each key to both console input and the USER message queue.
+         * Echo belongs to the console application so GUI input stays silent. */
         while (KbdDataAvailable()) {
             char c = KbdReadChar();
             if (c) {
-                KeLog("%c", c);
+                IoConsoleInputCharacter(c);
                 KiUserQueueCharacter((UINT8)c);
             }
         }
@@ -79,21 +88,10 @@ static void InputWorker(PVOID context)
             KiUserQueueMouse(MouseState.X, MouseState.Y, MouseState.Buttons);
         }
 
+        ConUpdateCursor(KeGetTickCount());
+
         KeYield();
     }
-}
-
-/* Map a user stack and return its (16-byte aligned) top. */
-static UINT64 SetupUserStack(void)
-{
-    UINT64 base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
-    for (UINT64 i = 0; i < USER_STACK_PAGES; i++) {
-        UINT64 pa = MmAllocatePage();
-        if (pa == MM_INVALID_PHYS)
-            KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "no memory for user stack");
-        MmMapPage(base + i * PAGE_SIZE, pa, PTE_USER | PTE_WRITE);
-    }
-    return USER_STACK_TOP;
 }
 
 /* Delete procedure for the demo "Event" object type. */
@@ -157,8 +155,8 @@ static void print_banner(void)
 {
     HalVgaSetColor(VGA_COLOR(VGA_LCYAN, VGA_BLACK));
     KeLog("\n");
-    KeLog("  NTOS - NT-compatible operating system for x86-64\n");
-    KeLog("  version %s\n", NTOS_VERSION);
+    KeLog("  SVINDOWS - NT-compatible operating system for x86-64\n");
+    KeLog("  version %s\n", SVINDOWS_VERSION);
     HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
     KeLog("  --------------------------------------------------\n\n");
 }
@@ -261,20 +259,14 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     if (!NT_SUCCESS(io))
         KeLog("[io]   WARNING: no filesystem (status 0x%08x)\n", (unsigned)io);
 
-    KeLog("[test] --- loading %s from disk ---\n", NTOS_BOOT_PROGRAM);
+    KeLog("[test] --- loading %s from disk ---\n", SVINDOWS_BOOT_PROGRAM);
     KeInitializeScheduler();
 
-    UINT64 pe_entry, pe_base, pe_arg;
-    NTSTATUS st = LdrLoadExecutable(NTOS_BOOT_PROGRAM, &pe_entry, &pe_base,
-                                    &pe_arg);
-    if (NT_SUCCESS(st)) {
-        UINT64 stack_top = SetupUserStack();
-        UINT64 stack_base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
-        PsCreateUserProcess(NTOS_BOOT_PROGRAM, NTOS_BOOT_COMMAND_LINE,
-                            pe_entry, pe_base, stack_base, stack_top, pe_arg);
-    } else {
+    NTSTATUS st = PsCreateInitialProcess(SVINDOWS_BOOT_PROGRAM,
+                                         SVINDOWS_BOOT_COMMAND_LINE);
+    if (!NT_SUCCESS(st)) {
         KeLog("[test] failed to load %s: status 0x%08x\n",
-              NTOS_BOOT_PROGRAM, (unsigned)st);
+              SVINDOWS_BOOT_PROGRAM, (unsigned)st);
     }
 
     KeCreateThread("KWorker", DemoWorker, (PVOID)"KWorker", 8);

@@ -4,9 +4,9 @@
  * Formats with the Rtl engine into a fixed stack buffer and pushes the result
  * to the HAL console. Long lines are truncated to the buffer size.
  */
-#include <ntos/ke.h>
-#include <ntos/hal.h>
-#include <ntos/rtl.h>
+#include <svindows/ke.h>
+#include <svindows/hal.h>
+#include <svindows/rtl.h>
 
 #define KE_LOG_BUFFER_SIZE 512
 

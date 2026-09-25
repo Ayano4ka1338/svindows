@@ -7,7 +7,7 @@
  * catastrophic faults run on the IST1 stack from the TSS.
  */
 #include <nt/ntdef.h>
-#include <ntos/ke.h>
+#include <svindows/ke.h>
 
 #define IDT_ENTRIES 256
 #define SEL_KCODE   0x08
