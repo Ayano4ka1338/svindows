@@ -56,10 +56,26 @@ typedef struct _DISPATCHER_CONTEXT64 {
     void *HistoryTable;
     DWORD ScopeIndex;
     DWORD Fill0;
+    /* C++ unwind target override: when CxxTargetValid is set, the frame's
+     * C++ personality unwinds down to CxxTargetState instead of deriving the
+     * target from TargetIp. Used for the frame that is about to enter a catch,
+     * so only its enclosing try block's locals are destroyed. */
+    INT32  CxxTargetState;
+    UINT32 CxxTargetValid;
 } DISPATCHER_CONTEXT64;
 
 typedef LONG (*LANGUAGE_HANDLER64)(NT_EXCEPTION_RECORD64 *, U64,
                                    NT_CONTEXT64 *, DISPATCHER_CONTEXT64 *);
+
+/* A language handler's return value beyond 0/1: the C++ personality matched a
+ * catch and has recorded a pending catch for RtlDispatchException to unwind to
+ * and then enter. */
+#define CXX_DISPOSITION_CATCH 2
+
+/* Defined with the C++ personality below; consumed by RtlDispatchException to
+ * defer entering a catch until after the unwinder has run. */
+static int cxx_take_pending_catch(U64 frame, U64 *funclet, U64 *object,
+                                  INT32 *try_low);
 
 static BYTE *rtl_image_for_address(U64 address, DWORD *size_out)
 {
@@ -281,7 +297,8 @@ __declspec(dllexport) LONG __C_specific_handler(
 
 static void rtl_unwind_termination(NT_EXCEPTION_RECORD64 *record,
                                    const NT_CONTEXT64 *start,
-                                   U64 target_frame, U64 target_ip)
+                                   U64 target_frame, U64 target_ip,
+                                   INT32 catch_state)
 {
     NT_EXCEPTION_RECORD64 unwind_record = *record;
     unwind_record.ExceptionFlags |= 2; /* EXCEPTION_UNWINDING */
@@ -314,6 +331,12 @@ static void rtl_unwind_termination(NT_EXCEPTION_RECORD64 *record,
             dispatch.ContextRecord = &walk;
             dispatch.LanguageHandler = language;
             dispatch.HandlerData = handler_data;
+            /* The frame that is about to enter a catch unwinds only its
+             * enclosing try block, not its whole state chain. */
+            if (catch_state >= 0 && establisher == target_frame) {
+                dispatch.CxxTargetState = catch_state;
+                dispatch.CxxTargetValid = 1;
+            }
             ((LANGUAGE_HANDLER64)language)(&unwind_record, establisher, &walk,
                                            &dispatch);
         }
@@ -366,10 +389,28 @@ BOOL RtlDispatchException(NT_EXCEPTION_POINTERS64 *pointers)
             U64 control_before_handler = walk.Rip;
             LONG disposition = ((LANGUAGE_HANDLER64)language)(
                 pointers->ExceptionRecord, establisher, &walk, &dispatch);
+            if (disposition == CXX_DISPOSITION_CATCH) {
+                /* The C++ personality matched a catch but did not enter it.
+                 * Unwind (intermediate frames and this frame's try block) and
+                 * only then call the catch funclet, so local destructors run
+                 * before the catch body as MSVC guarantees. */
+                U64 funclet = 0, object = 0;
+                INT32 try_low = -1;
+                if (cxx_take_pending_catch(establisher, &funclet, &object,
+                                           &try_low)) {
+                    rtl_unwind_termination(pointers->ExceptionRecord, &original,
+                                           establisher, funclet, try_low);
+                    walk.Rip = ((U64 (*)(void *, U64))funclet)((void *)object,
+                                                               establisher);
+                    walk.Rsp = establisher;
+                    *pointers->ContextRecord = walk;
+                    return TRUE;
+                }
+            }
             if (disposition == 0) {
                 if (walk.Rip != control_before_handler)
                     rtl_unwind_termination(pointers->ExceptionRecord, &original,
-                                           establisher, walk.Rip);
+                                           establisher, walk.Rip, -1);
                 *pointers->ContextRecord = walk;
                 return TRUE;
             }
@@ -401,14 +442,16 @@ typedef struct _CXX_TYPE_DESCRIPTOR {
     char    Name[1];
 } CXX_TYPE_DESCRIPTOR;
 
+/* x64 _CatchableType (28 bytes). The offset of the catchable subobject inside
+ * the thrown object sits at +8, ahead of the destructor RVA. */
 typedef struct _CXX_CATCHABLE_TYPE {
     UINT32 Properties;
-    UINT32 Type;        /* RVA -> CXX_TYPE_DESCRIPTOR */
-    UINT32 CopyCtor;    /* RVA */
-    UINT32 Dtor;        /* RVA */
-    UINT32 Size;
-    UINT32 Offset;
-    UINT32 VBaseDtor;
+    UINT32 Type;        /* +4  RVA -> CXX_TYPE_DESCRIPTOR */
+    UINT32 Offset;      /* +8  subobject offset within the thrown object */
+    UINT32 Dtor;        /* +12 RVA */
+    UINT32 SizeOrOffset;/* +16 */
+    UINT32 Size;        /* +20 */
+    UINT32 VBaseDtor;   /* +24 RVA */
 } CXX_CATCHABLE_TYPE;
 
 typedef struct _CXX_CATCHABLE_TYPE_ARRAY {
@@ -496,13 +539,26 @@ static INT32 cxx_ip_to_state(CXX_FUNC_INFO *info, U64 image_base, UINT32 rva)
     return state;
 }
 
-/* Resolve the thrown object's RTTI name from the exception record. */
-static const char *cxx_thrown_name(NT_EXCEPTION_RECORD64 *record, U64 *object)
+/* The object pointer a software C++ raise carries. */
+static U64 cxx_thrown_object(NT_EXCEPTION_RECORD64 *record)
 {
     if (record->ExceptionCode != (NTSTATUS)CXX_EXCEPTION_CODE ||
         record->NumberParameters < 3)
         return 0;
-    *object = record->ExceptionInformation[1];
+    return record->ExceptionInformation[1];
+}
+
+/* Match a catch type against every RTTI descriptor the thrown object is
+ * convertible to. MSVC lists the thrown type and its bases in the throw
+ * module's CatchableTypeArray, so `catch (Base&)` matches a derived throw.
+ * `adjusted` receives the thrown object offset to the matched subobject. */
+static int cxx_match_thrown(NT_EXCEPTION_RECORD64 *record, const char *catch_name,
+                            U64 *adjusted)
+{
+    if (!catch_name ||
+        record->ExceptionCode != (NTSTATUS)CXX_EXCEPTION_CODE ||
+        record->NumberParameters < 3)
+        return 0;
 
     U64 info_va = record->ExceptionInformation[2];
     DWORD size = 0;
@@ -514,10 +570,15 @@ static const char *cxx_thrown_name(NT_EXCEPTION_RECORD64 *record, U64 *object)
         return 0;
     CXX_CATCHABLE_TYPE_ARRAY *array =
         (CXX_CATCHABLE_TYPE_ARRAY *)(base + info->CatchableTypeArray);
-    if (!array->Count)
-        return 0;
-    CXX_CATCHABLE_TYPE *type = (CXX_CATCHABLE_TYPE *)(base + array->Types[0]);
-    return cxx_type_name((U64)base, type->Type);
+    for (UINT32 i = 0; i < array->Count; ++i) {
+        CXX_CATCHABLE_TYPE *type =
+            (CXX_CATCHABLE_TYPE *)(base + array->Types[i]);
+        if (cxx_name_eq(cxx_type_name((U64)base, type->Type), catch_name)) {
+            *adjusted = record->ExceptionInformation[1] + type->Offset;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static CXX_FUNC_INFO *cxx_func_info(DISPATCHER_CONTEXT64 *dispatch)
@@ -550,6 +611,64 @@ static void cxx_run_unwind_map(CXX_FUNC_INFO *info, U64 image_base,
     }
 }
 
+/* The catch a first-pass match selects, held until RtlDispatchException has
+ * unwound the stack and is ready to enter it. One slot per thread, since an
+ * exception is dispatched synchronously on the thread that raised it. */
+#define CXX_MAX_PENDING 16
+typedef struct _CXX_PENDING_CATCH {
+    UINT32 Active;
+    UINT32 ThreadId;
+    U64    Frame;
+    U64    Funclet;
+    U64    Object;
+    INT32  TryLow;
+    UINT32 Pad;
+} CXX_PENDING_CATCH;
+
+static CXX_PENDING_CATCH g_cxx_pending[CXX_MAX_PENDING];
+
+static UINT32 cxx_thread_id(void)
+{
+    UINT32 id;
+    __asm__ volatile("movl %%gs:0x48, %0" : "=r"(id)); /* TEB ClientId.UniqueThread */
+    return id;
+}
+
+static CXX_PENDING_CATCH *cxx_pending_slot(void)
+{
+    UINT32 id = cxx_thread_id();
+    CXX_PENDING_CATCH *free_slot = 0;
+    for (int i = 0; i < CXX_MAX_PENDING; ++i) {
+        if (g_cxx_pending[i].Active && g_cxx_pending[i].ThreadId == id)
+            return &g_cxx_pending[i];
+        if (!g_cxx_pending[i].Active && !free_slot)
+            free_slot = &g_cxx_pending[i];
+    }
+    if (!free_slot)
+        free_slot = &g_cxx_pending[0];
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->Active = 1;
+    free_slot->ThreadId = id;
+    return free_slot;
+}
+
+static int cxx_take_pending_catch(U64 frame, U64 *funclet, U64 *object,
+                                  INT32 *try_low)
+{
+    UINT32 id = cxx_thread_id();
+    for (int i = 0; i < CXX_MAX_PENDING; ++i) {
+        CXX_PENDING_CATCH *p = &g_cxx_pending[i];
+        if (p->Active && p->ThreadId == id && p->Frame == frame) {
+            *funclet = p->Funclet;
+            *object = p->Object;
+            *try_low = p->TryLow;
+            p->Active = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 __declspec(dllexport) LONG __CxxFrameHandler3(
     NT_EXCEPTION_RECORD64 *record, U64 frame, NT_CONTEXT64 *context,
     DISPATCHER_CONTEXT64 *dispatch)
@@ -562,21 +681,24 @@ __declspec(dllexport) LONG __CxxFrameHandler3(
     INT32 state = cxx_ip_to_state(info, image_base, control_rva);
 
     if (record->ExceptionFlags & 6) { /* UNWINDING | EXIT_UNWIND */
-        /* When the target lies in this same function, control is about to
-         * enter a catch here: destroy only the locals of the enclosing try
-         * block, down to the state it was entered in. Any other frame is an
-         * intermediate one and unwinds completely. */
+        /* The frame about to enter a catch unwinds only its enclosing try
+         * block (CxxTargetState); every intermediate frame unwinds fully. */
         INT32 target_state = -1;
-        RUNTIME_FUNCTION64 *fn = dispatch->FunctionEntry;
-        if (fn && dispatch->TargetIp >= image_base + fn->BeginAddress &&
-            dispatch->TargetIp < image_base + fn->EndAddress &&
-            info->TryBlockMap) {
-            CXX_TRY_BLOCK_MAP_ENTRY *blocks =
-                (CXX_TRY_BLOCK_MAP_ENTRY *)(image_base + info->TryBlockMap);
-            for (UINT32 t = 0; t < info->NumTryBlocks; ++t) {
-                if (state >= blocks[t].TryLow && state <= blocks[t].TryHigh) {
-                    target_state = blocks[t].TryLow;
-                    break;
+        if (dispatch->CxxTargetValid) {
+            target_state = dispatch->CxxTargetState;
+        } else {
+            RUNTIME_FUNCTION64 *fn = dispatch->FunctionEntry;
+            if (fn && dispatch->TargetIp >= image_base + fn->BeginAddress &&
+                dispatch->TargetIp < image_base + fn->EndAddress &&
+                info->TryBlockMap) {
+                CXX_TRY_BLOCK_MAP_ENTRY *blocks =
+                    (CXX_TRY_BLOCK_MAP_ENTRY *)(image_base + info->TryBlockMap);
+                for (UINT32 t = 0; t < info->NumTryBlocks; ++t) {
+                    if (state >= blocks[t].TryLow &&
+                        state <= blocks[t].TryHigh) {
+                        target_state = blocks[t].TryLow;
+                        break;
+                    }
                 }
             }
         }
@@ -588,8 +710,6 @@ __declspec(dllexport) LONG __CxxFrameHandler3(
         return 1;
     CXX_TRY_BLOCK_MAP_ENTRY *blocks =
         (CXX_TRY_BLOCK_MAP_ENTRY *)(image_base + info->TryBlockMap);
-    U64 object = 0;
-    const char *thrown = cxx_thrown_name(record, &object);
 
     for (UINT32 t = 0; t < info->NumTryBlocks; ++t) {
         if (state < blocks[t].TryLow || state > blocks[t].TryHigh)
@@ -600,25 +720,29 @@ __declspec(dllexport) LONG __CxxFrameHandler3(
             CXX_HANDLER_TYPE *handler = &handlers[h];
             /* catch (...) has no type descriptor; some encodings also set the
              * catch-all adjective bit. */
-            int match = handler->Type == 0 ||
-                        (handler->Adjectives & CXX_ADJECTIVE_CATCH_ALL) != 0;
-            if (!match && thrown)
-                match = cxx_name_eq(cxx_type_name(image_base, handler->Type),
-                                    thrown);
-            if (!match)
+            int catch_all = handler->Type == 0 ||
+                            (handler->Adjectives & CXX_ADJECTIVE_CATCH_ALL) != 0;
+            U64 adjusted = cxx_thrown_object(record);
+            if (!catch_all &&
+                !cxx_match_thrown(record,
+                                  cxx_type_name(image_base, handler->Type),
+                                  &adjusted))
                 continue;
             if (handler->DispCatchObj)
-                *(U64 *)(frame + handler->DispCatchObj) = object;
-            CXX_CATCH_FUNCLET funclet =
-                (CXX_CATCH_FUNCLET)(image_base + handler->AddressOfHandler);
-            /* The catch funclet runs its catch body and returns the address to
-             * continue at. RtlDispatchException then runs the second pass that
-             * destroys the try block's locals; real MSVC destroys them before
-             * entering the catch, so a future revision should defer the funclet
-             * through a trampoline to fix the ordering. */
-            context->Rip = (U64)funclet((void *)object, frame);
+                *(U64 *)(frame + handler->DispCatchObj) = adjusted;
+
+            /* Record the catch and return to RtlDispatchException, which runs
+             * the unwind (destroying try-block locals) and then calls the
+             * funclet. Entering it here would run the catch body before the
+             * destructors, which MSVC does not. */
+            CXX_PENDING_CATCH *pending = cxx_pending_slot();
+            pending->Frame = frame;
+            pending->Funclet = image_base + handler->AddressOfHandler;
+            pending->Object = adjusted;
+            pending->TryLow = blocks[t].TryLow;
+            context->Rip = pending->Funclet; /* signal a catch was chosen */
             context->Rsp = frame;
-            return 0; /* ExceptionContinueExecution */
+            return CXX_DISPOSITION_CATCH;
         }
     }
     return 1; /* ExceptionContinueSearch */

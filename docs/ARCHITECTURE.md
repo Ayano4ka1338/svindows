@@ -117,13 +117,21 @@ thrown object and its module `_ThrowInfo`; `RtlRaiseException` captures the
 caller's `CONTEXT` with `RtlCaptureContext` and dispatches it exactly like a CPU
 fault, so `RaiseException` needs no separate kernel path. `__CxxFrameHandler3`
 reads the function's MSVC x64 `FuncInfo` (unwind map, try/catch map and
-IP-to-state map) through the unwind-info handler data, matches a catch by its
-RTTI type-descriptor name (or a type-less catch-all), stores the exception
-object for the handler, and enters the catch funclet; on the second pass it
-consumes the unwind map to destroy locals. `ntdll.dll` must carry its own
-`.pdata`, and the compile flags include `-funwind-tables`, so the unwinder can
-see through the `RaiseException`/`_CxxThrowException` frames that live inside
-the native library.
+IP-to-state map) through the unwind-info handler data. A catch matches when the
+handler has no type (a catch-all) or when any entry of the thrown object's
+`CatchableTypeArray` names the handler's RTTI descriptor — so a `catch (Base&)`
+matches a derived throw and receives the base subobject at its recorded offset.
+
+The catch is entered in two steps, as MSVC guarantees. On the first pass the
+personality only records the selected catch (funclet, frame, adjusted object and
+the enclosing try block's entry state) and returns a private disposition.
+`RtlDispatchException` then runs the termination pass from the raise site,
+destroying intermediate frames and the catch frame's own try-block locals, and
+only afterwards calls the catch funclet and resumes at the continuation it
+returns. That is what makes a try-block destructor run before its catch body.
+`ntdll.dll` must carry its own `.pdata`, and the compile flags include
+`-funwind-tables`, so the unwinder can see through the
+`RaiseException`/`_CxxThrowException` frames that live inside the native library.
 
 **32-bit stack arguments.** The syscall entry marshals every stack argument as a
 full 64-bit slot, but the upper half of a slot holding a 32-bit parameter is
