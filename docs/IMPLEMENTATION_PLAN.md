@@ -70,6 +70,12 @@ clean build and a QEMU smoke test before work proceeds to the next stage.
       catch funclet) so try-block destructors run before the catch body.
 - [x] Match C++ catches through the full `CatchableTypeArray`, including base
       subobjects at a non-zero offset.
+- [x] Implement static PE TLS: read each module's `IMAGE_TLS_DIRECTORY64`,
+      assign an index, and give every thread a block vector (template-copied)
+      at `TEB.ThreadLocalStoragePointer`; continue the index space from
+      kernel32's `TlsAlloc`.
+- [x] Run PE TLS callbacks with `DLL_PROCESS_ATTACH` from the ring-3 bootstrap
+      before any `DllMain`.
 - [ ] Cover chained unwind records and remaining prolog/epilog edge cases.
 - [ ] Copy complex thrown objects (copy constructors and `vbaseDtor` handling)
       and honour `pForwardCompat` for cross-module C++ catches.

@@ -53,6 +53,7 @@ Svindows is intended for educational and research purposes.
 - Writable FAT32 disk image support with subdirectories
 - Import resolution
 - Windows-compatible PEB/TEB structures
+- Static PE thread-local storage and `DLL_PROCESS_ATTACH` TLS callbacks
 - NT file I/O
 - Events, semaphores, threads and waits
 - Registry APIs

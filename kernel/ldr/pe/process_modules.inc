@@ -12,6 +12,10 @@ void LdrResetProcessContext(void)
     g_ldr_depth = 0;
     g_peb_ldr = NULL;
     g_ldr_cursor = g_ldr_end = NULL;
+    memset(LdrpCurrentContext()->TlsModules, 0,
+           sizeof(LdrpCurrentContext()->TlsModules));
+    LdrpCurrentContext()->TlsIndexNext = 0;
+    LdrpCurrentContext()->TlsRegionNext = LDR_TLS_VA_BASE;
 }
 
 /* Append one cached module to the PEB->Ldr lists (bump-allocated from the Ldr
@@ -148,10 +152,21 @@ typedef struct _LDR_INIT_ENTRY {
     UINT64 EntryPoint;
 } LDR_INIT_ENTRY;
 
+typedef struct _LDR_INIT_TLS_ENTRY {
+    UINT64 ModuleBase;
+    UINT64 CallbackArray;
+} LDR_INIT_TLS_ENTRY;
+
+/* The ring-3 bootstrap (ntdll!LdrInitializeProcess) reads this page: the EXE
+ * entry, one entry per DLL to attach, then the TLS callback arrays to invoke
+ * with DLL_PROCESS_ATTACH before any DllMain. ntdll.asm hardcodes these
+ * offsets, so keep the layout fixed. */
 typedef struct _LDR_INIT_BLOCK {
-    UINT64 FinalEntry;
-    UINT64 Count;
-    LDR_INIT_ENTRY Entries[MAX_LOADED_MODULES];
+    UINT64 FinalEntry;                                 /* +0    */
+    UINT64 Count;                                      /* +8    */
+    LDR_INIT_ENTRY Entries[MAX_LOADED_MODULES];        /* +16   */
+    UINT64 TlsCallbackCount;                           /* +1040 */
+    LDR_INIT_TLS_ENTRY TlsCallbacks[MAX_TLS_MODULES];  /* +1048 */
 } LDR_INIT_BLOCK;
 
 #define LDR_INIT_BLOCK_VA 0x0000000000090000ULL
@@ -210,6 +225,23 @@ static NTSTATUS LdrpBuildInitBlock(UINT64 executable_entry,
     for (int i = 1; i < MAX_LOADED_MODULES; i++)
         if (g_loaded[i].Valid && state[i] == 0)
             LdrpAppendInitDfs(i, state, block);
+
+    /* TLS callbacks run before DLL initialization (DLL_PROCESS_ATTACH). The
+     * ring-3 bootstrap walks this list and calls each callback with its module
+     * base. */
+    PLDR_PROCESS_CONTEXT context = LdrpCurrentContext();
+    for (int i = 0; i < MAX_TLS_MODULES; i++) {
+        LDR_TLS_MODULE *module = &context->TlsModules[i];
+        if (!module->Valid || !module->AddressOfCallBacks)
+            continue;
+        if (block->TlsCallbackCount >= MAX_TLS_MODULES)
+            break;
+        UINT64 t = block->TlsCallbackCount++;
+        block->TlsCallbacks[t].ModuleBase = module->ModuleBase;
+        block->TlsCallbacks[t].CallbackArray = module->AddressOfCallBacks;
+        KeLog("[ldr]  tls callback module %p array %p\n",
+              (void *)module->ModuleBase, (void *)module->AddressOfCallBacks);
+    }
 
     UINT64 ntdll = lookup_module("ntdll.dll");
     UINT64 thunk = ntdll ? LdrGetProcAddress(ntdll, "LdrInitializeProcess") : 0;

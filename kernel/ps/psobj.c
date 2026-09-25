@@ -13,6 +13,7 @@
 #include <svindows/ke.h>
 #include <svindows/mm.h>
 #include <svindows/rtl.h>
+#include <svindows/ldr.h>
 #include <nt/ntstatus.h>
 #include <nt/ntobject.h>
 #include <nt/peb.h>
@@ -487,6 +488,10 @@ UINT64 NtCreateThreadEx(UINT64 *a)
     teb->ProcessEnvironmentBlock = (PVOID)PROCESS_PEB_VA;
     teb->ClientId.UniqueProcess =
         (HANDLE)(ULONG_PTR)(process ? process->ProcessId : PROCESS_CLIENT_ID);
+
+    /* Give the new thread its own static TLS blocks (fresh copies of each
+     * module's .tls template). */
+    LdrApplyThreadTls(teb_va);
 
     /* Waitable thread object (signaled on exit). */
     POBJECT obj;

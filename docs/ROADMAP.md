@@ -36,7 +36,8 @@ programs do not define the architecture.
 
 ## Compatibility work
 
-- PE TLS directories and callbacks, load-config and security cookies.
+- Load-config and security cookies (static PE TLS and `DLL_PROCESS_ATTACH` TLS
+  callbacks are in place).
 - Finish the x64 exception surface: chained unwind records, the remaining
   prolog/epilog edge cases, and C++ catch-object copying (copy constructors and
   virtual-base teardown). Second-pass unwind, `__finally`, base-class and
