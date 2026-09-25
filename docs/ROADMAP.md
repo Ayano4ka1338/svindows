@@ -37,10 +37,10 @@ programs do not define the architecture.
 
 - PE TLS directories and callbacks, load-config and security cookies.
 - Finish the x64 exception surface: chained unwind records, the remaining
-  prolog/epilog edge cases, and RTTI-accurate C++ catch matching for base and
-  polymorphic types (second-pass unwind, `__finally`, `__CxxFrameHandler3`,
-  `_CxxThrowException`, C `__try/__except`, vectored handlers and `NtContinue`
-  are in place).
+  prolog/epilog edge cases, and C++ catch-object copying (copy constructors and
+  virtual-base teardown). Second-pass unwind, `__finally`, base-class and
+  catch-all matching through `__CxxFrameHandler3`/`_CxxThrowException`, C
+  `__try/__except`, vectored handlers and `NtContinue` are in place.
 - Broader NT and Win32 APIs driven by small, redistributable test programs.
 - Persistent registry hives and a device/driver/IRP I/O model.
 

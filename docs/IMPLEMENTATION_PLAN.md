@@ -65,11 +65,14 @@ clean build and a QEMU smoke test before work proceeds to the next stage.
 - [x] Dispatch C++ exceptions: `_CxxThrowException` raises 0xE06D7363 and
       `__CxxFrameHandler3` matches typed and catch-all handlers from the MSVC
       x64 `FuncInfo` maps, running destructors on the way.
+- [x] Enter C++ catches only after the unwind (the first pass records the
+      catch, `RtlDispatchException` runs the termination pass, then calls the
+      catch funclet) so try-block destructors run before the catch body.
+- [x] Match C++ catches through the full `CatchableTypeArray`, including base
+      subobjects at a non-zero offset.
 - [ ] Cover chained unwind records and remaining prolog/epilog edge cases.
-- [ ] Enter C++ catches only after unwinding (defer the catch funclet through a
-      trampoline) so try-block destruction order matches MSVC.
-- [ ] Match C++ catches through the full `CatchableTypeArray` so base and
-      polymorphic types (not just exact names) are caught.
+- [ ] Copy complex thrown objects (copy constructors and `vbaseDtor` handling)
+      and honour `pForwardCompat` for cross-module C++ catches.
 - [ ] Enforce the complete Windows file-sharing matrix across concurrent opens.
 - [ ] Add FAT32 fault-injection/out-of-space tests and crash-consistent updates.
 - [ ] Add FAT long-name creation (existing VFAT long names are readable).
