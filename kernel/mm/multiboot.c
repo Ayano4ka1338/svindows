@@ -6,9 +6,9 @@
  * copied into the caller's MM_MEMORY_MAP, after which the boot block can be
  * reused as ordinary RAM.
  */
-#include <ntos/mm.h>
-#include <ntos/multiboot2.h>
-#include <ntos/gfx.h>
+#include <svindows/mm.h>
+#include <svindows/multiboot2.h>
+#include <svindows/gfx.h>
 
 const char *MmRegionTypeName(MM_REGION_TYPE type)
 {

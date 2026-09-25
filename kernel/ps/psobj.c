@@ -8,11 +8,11 @@
  * PEB) with its own stack and TEB, wrapped in a waitable Thread object that is
  * signaled when the thread exits.
  */
-#include <ntos/ps.h>
-#include <ntos/ob.h>
-#include <ntos/ke.h>
-#include <ntos/mm.h>
-#include <ntos/rtl.h>
+#include <svindows/ps.h>
+#include <svindows/ob.h>
+#include <svindows/ke.h>
+#include <svindows/mm.h>
+#include <svindows/rtl.h>
 #include <nt/ntstatus.h>
 #include <nt/ntobject.h>
 #include <nt/peb.h>
@@ -25,9 +25,8 @@ typedef struct _THREAD_OBJECT {
 static POBJECT_TYPE g_event_type;
 static POBJECT_TYPE g_thread_type;
 static POBJECT_TYPE g_semaphore_type;
+static POBJECT_TYPE g_mutant_type;
 
-/* Bump allocator for per-thread user stacks and TEBs. */
-static UINT64 g_thread_va = 0x0000000030000000ULL;
 #define THREAD_STACK_PAGES 16
 
 void PsInitialize(void)
@@ -35,6 +34,7 @@ void PsInitialize(void)
     g_event_type = ObCreateObjectType("Event", NULL);
     g_thread_type = ObCreateObjectType("Thread", NULL);
     g_semaphore_type = ObCreateObjectType("Semaphore", NULL);
+    g_mutant_type = ObCreateObjectType("Mutant", NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -181,6 +181,47 @@ UINT64 NtReleaseSemaphore(UINT64 *a)
 }
 
 /* ------------------------------------------------------------------ */
+/* Mutants                                                            */
+/* ------------------------------------------------------------------ */
+
+UINT64 NtCreateMutant(UINT64 *a)
+{
+    PHANDLE out = (PHANDLE)a[0];
+    if (!MmProbeForWrite((UINT64)out, sizeof(HANDLE)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    POBJECT object;
+    NTSTATUS status = ObCreateObject(g_mutant_type, sizeof(KMUTANT), &object);
+    if (!NT_SUCCESS(status))
+        return (UINT64)status;
+    KeInitializeMutant((PKMUTANT)object, (BOOLEAN)a[3]);
+
+    HANDLE handle;
+    status = ObCreateHandle(object, GENERIC_ALL, &handle);
+    ObDereferenceObject(object);
+    if (!NT_SUCCESS(status))
+        return (UINT64)status;
+    *out = handle;
+    return (UINT64)STATUS_SUCCESS;
+}
+
+UINT64 NtReleaseMutant(UINT64 *a)
+{
+    POBJECT object;
+    if (!NT_SUCCESS(ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)a[0], 0,
+                                              g_mutant_type, &object)))
+        return (UINT64)STATUS_INVALID_HANDLE;
+    LONG previous = 0;
+    BOOLEAN released = KeReleaseMutant((PKMUTANT)object, &previous);
+    LONG *previous_out = (LONG *)a[1];
+    if (released && previous_out &&
+        MmProbeForWrite((UINT64)previous_out, sizeof(*previous_out)))
+        *previous_out = previous;
+    ObDereferenceObject(object);
+    return released ? (UINT64)STATUS_SUCCESS : (UINT64)STATUS_ACCESS_DENIED;
+}
+
+/* ------------------------------------------------------------------ */
 /* Waiting                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -217,7 +258,8 @@ static NTSTATUS reference_waitable(HANDLE handle, POBJECT *object,
 
     POBJECT_TYPE type = ObHeaderFromObject(obj)->Type;
     if (type != g_event_type && type != g_thread_type &&
-        type != g_semaphore_type) {
+        type != g_semaphore_type && type != g_mutant_type &&
+        !PsIsProcessObjectType(type)) {
         ObDereferenceObject(obj);
         return STATUS_OBJECT_TYPE_MISMATCH;
     }
@@ -267,7 +309,7 @@ UINT64 NtWaitForSingleObject(UINT64 *a)
     return (UINT64)st;
 }
 
-/* NTOS-private service used by kernel32 until the native system-service table
+/* SVINDOWS-private service used by kernel32 until the native system-service table
  * is switched to a specific Windows build's NtWaitForMultipleObjects number.
  * Arguments mirror the native routine closely: count, handle array, WaitType
  * (0=all, 1=any), alertable, timeout. */
@@ -361,13 +403,32 @@ UINT64 NtQueryInformationProcess(UINT64 *a)
                          sizeof(PROCESS_BASIC_INFORMATION_LOCAL)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
 
+    PKPROCESS process = NULL;
+    POBJECT referenced = NULL;
+    HANDLE handle = (HANDLE)(ULONG_PTR)a[0];
+    if ((ULONG_PTR)handle == ~(ULONG_PTR)0) {
+        PKTHREAD thread = KeGetCurrentThread();
+        process = thread ? thread->Process : NULL;
+    } else if (NT_SUCCESS(ObReferenceObjectByHandle(handle, 0, NULL,
+                                                    &referenced))) {
+        process = PsGetProcessFromObject(referenced);
+    }
+    if (!process) {
+        if (referenced)
+            ObDereferenceObject(referenced);
+        return (UINT64)STATUS_INVALID_HANDLE;
+    }
+
     PROCESS_BASIC_INFORMATION_LOCAL *info = buffer;
     memset(info, 0, sizeof(*info));
-    info->ExitStatus = STATUS_PENDING;
+    info->ExitStatus = process->ExitStatus;
     info->PebBaseAddress = (PVOID)PROCESS_PEB_VA;
     info->AffinityMask = 1;
     info->BasePriority = 8;
-    info->UniqueProcessId = 1;
+    info->UniqueProcessId = process->ProcessId;
+    info->InheritedFromUniqueProcessId = process->ParentProcessId;
+    if (referenced)
+        ObDereferenceObject(referenced);
     return (UINT64)STATUS_SUCCESS;
 }
 
@@ -375,16 +436,18 @@ UINT64 NtQueryInformationProcess(UINT64 *a)
 /* Thread creation                                                    */
 /* ------------------------------------------------------------------ */
 
-static UINT64 map_user_pages(SIZE_T pages)
+static UINT64 map_user_pages(PKPROCESS process, SIZE_T pages)
 {
-    UINT64 base = g_thread_va;
+    if (!process)
+        return 0;
+    UINT64 base = process->ThreadAllocationNext;
     for (SIZE_T i = 0; i < pages; i++) {
         UINT64 pa = MmAllocatePage();
         if (pa == MM_INVALID_PHYS)
             return 0;
         MmMapPage(base + i * PAGE_SIZE, pa, PTE_USER | PTE_WRITE);
     }
-    g_thread_va += pages * PAGE_SIZE;
+    process->ThreadAllocationNext += pages * PAGE_SIZE;
     return base;
 }
 
@@ -398,12 +461,13 @@ UINT64 NtCreateThreadEx(UINT64 *a)
 {
     PHANDLE out = (PHANDLE)a[0];
     UINT64 entry = a[4], arg = a[5];
+    PKPROCESS process = KeGetCurrentThread()->Process;
     if (!MmProbeForWrite((UINT64)out, sizeof(HANDLE)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
 
     /* Stack + TEB for the new thread. */
-    UINT64 stack_base = map_user_pages(THREAD_STACK_PAGES);
-    UINT64 teb_va = map_user_pages(PROCESS_TEB_SIZE / PAGE_SIZE);
+    UINT64 stack_base = map_user_pages(process, THREAD_STACK_PAGES);
+    UINT64 teb_va = map_user_pages(process, PROCESS_TEB_SIZE / PAGE_SIZE);
     if (!stack_base || !teb_va)
         return (UINT64)STATUS_NO_MEMORY;
     UINT64 stack_top = stack_base + THREAD_STACK_PAGES * PAGE_SIZE;
@@ -421,7 +485,8 @@ UINT64 NtCreateThreadEx(UINT64 *a)
     teb->NtTib.StackBase = (PVOID)stack_top;
     teb->NtTib.StackLimit = (PVOID)stack_base;
     teb->ProcessEnvironmentBlock = (PVOID)PROCESS_PEB_VA;
-    teb->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)PROCESS_CLIENT_ID;
+    teb->ClientId.UniqueProcess =
+        (HANDLE)(ULONG_PTR)(process ? process->ProcessId : PROCESS_CLIENT_ID);
 
     /* Waitable thread object (signaled on exit). */
     POBJECT obj;
@@ -434,8 +499,8 @@ UINT64 NtCreateThreadEx(UINT64 *a)
 
     /* Interrupts are masked during a syscall, so the new thread cannot run
      * before we finish wiring it up. */
-    PKTHREAD kt = KeCreateUserThread("userthread", entry, stack_top, teb_va, arg,
-                                     8);
+    PKTHREAD kt = KeCreateUserThreadForProcess(
+        process, "userthread", entry, stack_top, teb_va, arg, 8);
     if (!kt) {
         ObDereferenceObject(obj);
         return (UINT64)STATUS_NO_MEMORY;

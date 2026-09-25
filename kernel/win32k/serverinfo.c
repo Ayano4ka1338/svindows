@@ -20,12 +20,12 @@
  *   GetSysColorBrush    mov gpsi,%rax; mov 0x13e0(%rax,%rcx,8),%rax
  *   HMValidateHandle    mov gpsi,%rax; ... 0x8(%rax)          (cHandleEntries)
  */
-#include <ntos/win32k.h>
-#include <ntos/ps.h>
-#include <ntos/mm.h>
-#include <ntos/gfx.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/win32k.h>
+#include <svindows/ps.h>
+#include <svindows/mm.h>
+#include <svindows/gfx.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
 
 #define SI_CHANDLEENTRIES 0x0008
 #define SI_AISYSMET       0x0758

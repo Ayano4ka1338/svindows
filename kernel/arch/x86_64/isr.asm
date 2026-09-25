@@ -6,7 +6,7 @@
 ; a common path. The common path saves the general registers into a KTRAP_FRAME
 ; and calls the C dispatcher KiDispatchTrap(frame).
 ;
-; The order of the pushes here MUST match struct KTRAP_FRAME in ntos/ke.h.
+; The order of the pushes here MUST match struct KTRAP_FRAME in svindows/ke.h.
 ; ============================================================================
 bits 64
 section .text

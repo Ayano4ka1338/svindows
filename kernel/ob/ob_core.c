@@ -1,10 +1,10 @@
 /*
  * ob/ob_core.c - object types, object lifetime, reference counting.
  */
-#include <ntos/ob.h>
-#include <ntos/ex.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/ob.h>
+#include <svindows/ex.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
 #include "obp.h"
 
 static LIST_ENTRY g_type_list;

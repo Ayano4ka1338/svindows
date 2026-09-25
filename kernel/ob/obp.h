@@ -4,7 +4,7 @@
 #ifndef _OB_OBP_H_
 #define _OB_OBP_H_
 
-#include <ntos/ob.h>
+#include <svindows/ob.h>
 
 /* Body of a Directory object: a list of the OBJECT_HEADERs it contains,
  * threaded through their NamespaceEntry field. */

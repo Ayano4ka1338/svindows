@@ -8,9 +8,9 @@
  * on every clock tick. kernel32's GetTickCount/GetSystemTimeAsFileTime read it
  * exactly the way the real ones do.
  */
-#include <ntos/ke.h>
-#include <ntos/mm.h>
-#include <ntos/rtl.h>
+#include <svindows/ke.h>
+#include <svindows/mm.h>
+#include <svindows/rtl.h>
 
 #define KUSER_SHARED_DATA_USER_VA 0x000000007FFE0000ULL
 

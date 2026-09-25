@@ -5,7 +5,7 @@
  * to stdout (`-serial stdio`), so everything the kernel prints shows up in the
  * host terminal even before there is any display driver.
  */
-#include <ntos/hal.h>
+#include <svindows/hal.h>
 
 #define COM1_BASE 0x3F8
 
@@ -18,6 +18,7 @@
 #define UART_LSR         5 /* line status */
 
 #define LSR_THR_EMPTY    0x20 /* transmit holding register empty */
+#define LSR_DATA_READY   0x01 /* receive data register has a byte */
 
 static BOOLEAN g_serial_ready = FALSE;
 
@@ -51,4 +52,16 @@ void HalSerialPutChar(char c)
     }
     serial_wait_tx();
     __outbyte(COM1_BASE + UART_DATA, (UINT8)c);
+}
+
+BOOLEAN HalSerialDataAvailable(void)
+{
+    return g_serial_ready &&
+           (__inbyte(COM1_BASE + UART_LSR) & LSR_DATA_READY) != 0;
+}
+
+char HalSerialReadChar(void)
+{
+    return HalSerialDataAvailable()
+        ? (char)__inbyte(COM1_BASE + UART_DATA) : 0;
 }

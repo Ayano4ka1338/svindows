@@ -11,10 +11,11 @@
  * MmPhysToVirt resolves through the direct map. New fine-grained mappings (for
  * example the kernel heap) are added with MmMapPage.
  */
-#include <ntos/mm.h>
-#include <ntos/ke.h>
-#include <ntos/hal.h>
-#include <ntos/rtl.h>
+#include <svindows/mm.h>
+#include <svindows/ke.h>
+#include <svindows/hal.h>
+#include <svindows/rtl.h>
+#include <svindows/address_space.h>
 
 static UINT64 g_kernel_pml4_phys;
 
@@ -115,7 +116,7 @@ void MmInitializeVirtualMemory(const MM_MEMORY_MAP *map)
 
 BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags)
 {
-    UINT64 *pml4 = table_at(g_kernel_pml4_phys);
+    UINT64 *pml4 = table_at(MmGetCurrentAddressSpace());
     UINT64 pdpt_phys = next_table(&pml4[PML4_INDEX(virt)]);
     UINT64 *pdpt = table_at(pdpt_phys);
     UINT64 pd_phys = next_table(&pdpt[PDPT_INDEX(virt)]);
@@ -134,7 +135,7 @@ BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags)
 
 BOOLEAN MmUnmapPage(UINT64 virt)
 {
-    UINT64 *pml4 = table_at(g_kernel_pml4_phys);
+    UINT64 *pml4 = table_at(MmGetCurrentAddressSpace());
     if (!(pml4[PML4_INDEX(virt)] & PTE_PRESENT))
         return FALSE;
     UINT64 *pdpt = table_at(pml4[PML4_INDEX(virt)] & PTE_ADDR_MASK);
@@ -152,7 +153,7 @@ BOOLEAN MmUnmapPage(UINT64 virt)
 
 UINT64 MmGetPhysicalAddress(UINT64 virt)
 {
-    UINT64 *pml4 = table_at(g_kernel_pml4_phys);
+    UINT64 *pml4 = table_at(MmGetCurrentAddressSpace());
     if (!(pml4[PML4_INDEX(virt)] & PTE_PRESENT))
         return MM_INVALID_PHYS;
     UINT64 *pdpt = table_at(pml4[PML4_INDEX(virt)] & PTE_ADDR_MASK);
@@ -170,6 +171,20 @@ UINT64 MmGetPhysicalAddress(UINT64 virt)
     if (!(pte & PTE_PRESENT))
         return MM_INVALID_PHYS;
     return (pte & PTE_ADDR_MASK) | (virt & PAGE_MASK);
+}
+
+UINT64 MmGetPageFlags(UINT64 virt)
+{
+    UINT64 *pml4 = table_at(MmGetCurrentAddressSpace());
+    if (!(pml4[PML4_INDEX(virt)] & PTE_PRESENT)) return 0;
+    UINT64 *pdpt = table_at(pml4[PML4_INDEX(virt)] & PTE_ADDR_MASK);
+    if (!(pdpt[PDPT_INDEX(virt)] & PTE_PRESENT)) return 0;
+    UINT64 *pd = table_at(pdpt[PDPT_INDEX(virt)] & PTE_ADDR_MASK);
+    UINT64 pde = pd[PD_INDEX(virt)];
+    if (!(pde & PTE_PRESENT)) return 0;
+    if (pde & PTE_LARGE) return pde;
+    UINT64 *pt = table_at(pde & PTE_ADDR_MASK);
+    return pt[PT_INDEX(virt)];
 }
 
 /* ------------------------------------------------------------------ */
@@ -197,9 +212,14 @@ BOOLEAN MmProbeForRead(UINT64 va, UINT64 len)
 
 BOOLEAN MmProbeForWrite(UINT64 va, UINT64 len)
 {
-    /* Same presence + range check; per-page write permission isn't tracked
-     * separately here, and user data pages are mapped writable. */
-    return MmProbeForRead(va, len);
+    if (!MmProbeForRead(va, len))
+        return FALSE;
+    for (UINT64 p = PAGE_ALIGN(va); p < va + len; p += PAGE_SIZE) {
+        UINT64 flags = MmGetPageFlags(p);
+        if (!(flags & PTE_USER) || !(flags & PTE_WRITE))
+            return FALSE;
+    }
+    return TRUE;
 }
 
 BOOLEAN MmCaptureUnicodeName(UINT64 ustr_va, char *out, SIZE_T out_size)
@@ -229,9 +249,13 @@ BOOLEAN MmCaptureUnicodeName(UINT64 ustr_va, char *out, SIZE_T out_size)
 
 void MmProtectRange(UINT64 va, UINT64 size, BOOLEAN writable)
 {
+    MmProtectRangeFlags(va, size, PTE_USER | (writable ? PTE_WRITE : 0));
+}
+
+void MmProtectRangeFlags(UINT64 va, UINT64 size, UINT64 flags)
+{
     UINT64 first = PAGE_ALIGN(va);
     UINT64 last = PAGE_ALIGN_UP(va + size);
-    UINT64 flags = PTE_USER | (writable ? PTE_WRITE : 0);
     for (UINT64 p = first; p < last; p += PAGE_SIZE) {
         UINT64 pa = MmGetPhysicalAddress(p);
         if (pa != MM_INVALID_PHYS)

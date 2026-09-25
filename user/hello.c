@@ -1,9 +1,9 @@
 /*
  * user/hello.c - a plain, portable C program.
  *
- * No Windows or NTOS specifics: it just uses the standard library and a normal
+ * No Windows or SVINDOWS specifics: it just uses the standard library and a normal
  * int main(). It is compiled and linked the ordinary way (entry defaults to the
- * CRT's mainCRTStartup) and runs on NTOS unchanged -- the point being that a
+ * CRT's mainCRTStartup) and runs on SVINDOWS unchanged -- the point being that a
  * standard program needs no special glue to run here.
  */
 #include <stdio.h>
@@ -12,7 +12,7 @@
 
 int main(int argc, char **argv)
 {
-    printf("Hello from a standard C program on NTOS!\n");
+    printf("Hello from a standard C program on SVINDOWS!\n");
     printf("  argc=%d, argv[0]=%s\n", argc, argc ? argv[0] : "(none)");
 
     int *squares = (int *)malloc(8 * sizeof(int));

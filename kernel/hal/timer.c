@@ -5,7 +5,7 @@
  * steady frequency. That interrupt is the heartbeat the scheduler uses to
  * preempt threads.
  */
-#include <ntos/hal.h>
+#include <svindows/hal.h>
 
 #define PIT_CHANNEL0 0x40
 #define PIT_COMMAND  0x43

@@ -1,6 +1,6 @@
-/* string.h - the sliver of string.h NTOS's msvcrt provides. */
-#ifndef _NTOS_STRING_H_
-#define _NTOS_STRING_H_
+/* string.h - the sliver of string.h SVINDOWS's msvcrt provides. */
+#ifndef _SVINDOWS_STRING_H_
+#define _SVINDOWS_STRING_H_
 #include <stddef.h>
 size_t strlen(const char *s);
 char  *strcpy(char *dst, const char *src);

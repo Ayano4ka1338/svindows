@@ -10,11 +10,13 @@
  * Single-CPU only for now, so short critical sections just disable interrupts
  * (KiIrqSave/KiIrqRestore) instead of taking spinlocks.
  */
-#include <ntos/ke.h>
-#include <ntos/ex.h>
-#include <ntos/ob.h>
-#include <ntos/rtl.h>
+#include <svindows/ke.h>
+#include <svindows/ex.h>
+#include <svindows/ob.h>
+#include <svindows/rtl.h>
 #include <nt/peb.h>
+#include <svindows/address_space.h>
+#include <svindows/ldr.h>
 
 #define DEFAULT_QUANTUM 2   /* timer ticks per scheduling slice */
 #define THREAD_STACK_SIZE 0x4000 /* 16 KiB kernel stack per thread */
@@ -27,8 +29,41 @@ static KPROCESS       g_system_process;
 static KTHREAD        g_idle_thread;
 static PKTHREAD       g_current_thread;
 static LIST_ENTRY     g_ready_queue;
+static LIST_ENTRY     g_all_threads;
 static ULONG          g_next_thread_id;
 static volatile UINT64 g_tick_count;
+
+static void KepSignalThreadTermination(PKTHREAD thread)
+{
+    if (!thread->TerminationObject)
+        return;
+    PDISPATCHER_HEADER termination = thread->TerminationObject;
+    termination->SignalState = 1;
+    KiSignalObject(termination);
+    thread->TerminationObject = NULL;
+    ObDereferenceObject((POBJECT)termination);
+}
+
+static void KepReapTerminatedThreads(void)
+{
+    PLIST_ENTRY head = &g_all_threads;
+    for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
+        PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
+        entry = entry->Flink;
+        if (thread == g_current_thread ||
+            thread->State != ThreadStateTerminated)
+            continue;
+        RemoveEntryList(&thread->SchedulerEntry);
+        RemoveEntryList(&thread->ProcessEntry);
+        POBJECT process_object = thread->OwningProcessObject;
+        thread->OwningProcessObject = NULL;
+        if (thread->KernelStackBase)
+            ExFreePool((void *)thread->KernelStackBase);
+        ExFreePool(thread);
+        if (process_object)
+            ObDereferenceObject(process_object);
+    }
+}
 
 PKTHREAD KeGetCurrentThread(void) { return g_current_thread; }
 UINT64   KeGetTickCount(void)     { return g_tick_count; }
@@ -36,12 +71,23 @@ UINT64   KeGetTickCount(void)     { return g_tick_count; }
 void KeInitializeScheduler(void)
 {
     InitializeListHead(&g_ready_queue);
+    InitializeListHead(&g_all_threads);
 
     UINT64 cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
 
     g_system_process.DirectoryTableBase = cr3;
+    g_system_process.HandleTable = ObGetBootstrapHandleTable();
+    g_system_process.LoaderContext = LdrCreateProcessContext();
+    if (!g_system_process.LoaderContext)
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "cannot allocate System loader context");
     g_system_process.ProcessId = 0;
+    g_system_process.Object = NULL;
+    g_system_process.ParentProcessId = 0;
+    g_system_process.ExitStatus = STATUS_PENDING;
+    g_system_process.UserAllocationNext = 0x0000000020000000ULL;
+    g_system_process.ThreadAllocationNext = 0x0000000030000000ULL;
     g_system_process.Name = "System";
     InitializeListHead(&g_system_process.ThreadListHead);
 
@@ -50,7 +96,9 @@ void KeInitializeScheduler(void)
     g_idle_thread.State = ThreadStateRunning;
     g_idle_thread.Name = "Idle";
     g_idle_thread.Process = &g_system_process;
+    InitializeListHead(&g_idle_thread.OwnedMutantListHead);
     InsertTailList(&g_system_process.ThreadListHead, &g_idle_thread.ProcessEntry);
+    InsertTailList(&g_all_threads, &g_idle_thread.SchedulerEntry);
 
     g_current_thread = &g_idle_thread;
     KeSetCurrentThread(&g_idle_thread);
@@ -64,7 +112,8 @@ void KeInitializeScheduler(void)
 
 /* Allocate a thread and its kernel stack, fabricating the initial stack so the
  * first KiSwitchContext to it 'ret's into KiThreadStartup. Not yet enqueued. */
-static PKTHREAD KepAllocThread(const char *name, LONG priority)
+static PKTHREAD KepAllocThread(PKPROCESS process, const char *name,
+                               LONG priority)
 {
     PKTHREAD t = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTHREAD), 'rhtK');
     if (!t)
@@ -94,7 +143,12 @@ static PKTHREAD KepAllocThread(const char *name, LONG priority)
     t->Quantum = DEFAULT_QUANTUM;
     t->ThreadId = g_next_thread_id++;
     t->Name = name;
-    t->Process = &g_system_process;
+    t->Process = process ? process : &g_system_process;
+    InitializeListHead(&t->OwnedMutantListHead);
+    if (t->Process->Object) {
+        ObReferenceObject(t->Process->Object);
+        t->OwningProcessObject = t->Process->Object;
+    }
 
     /* Seed a valid FPU/SSE image (captures the default MXCSR) so the first
      * FXRSTOR into this thread doesn't fault or load garbage. */
@@ -106,14 +160,15 @@ static void KepEnqueueThread(PKTHREAD t)
 {
     UINT64 flags = KiIrqSave();
     InsertTailList(&g_ready_queue, &t->ReadyEntry);
-    InsertTailList(&g_system_process.ThreadListHead, &t->ProcessEntry);
+    InsertTailList(&t->Process->ThreadListHead, &t->ProcessEntry);
+    InsertTailList(&g_all_threads, &t->SchedulerEntry);
     KiIrqRestore(flags);
 }
 
 PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
                         PVOID context, LONG priority)
 {
-    PKTHREAD t = KepAllocThread(name, priority);
+    PKTHREAD t = KepAllocThread(&g_system_process, name, priority);
     if (!t)
         return NULL;
 
@@ -130,7 +185,17 @@ PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
                             UINT64 user_stack, UINT64 user_gs_base,
                             UINT64 user_arg, LONG priority)
 {
-    PKTHREAD t = KepAllocThread(name, priority);
+    return KeCreateUserThreadForProcess(&g_system_process, name, user_entry,
+                                        user_stack, user_gs_base, user_arg,
+                                        priority);
+}
+
+PKTHREAD KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
+                                      UINT64 user_entry, UINT64 user_stack,
+                                      UINT64 user_gs_base, UINT64 user_arg,
+                                      LONG priority)
+{
+    PKTHREAD t = KepAllocThread(process, name, priority);
     if (!t)
         return NULL;
 
@@ -161,6 +226,7 @@ PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
  */
 static void KiSchedule(void)
 {
+    KepReapTerminatedThreads();
     PKTHREAD prev = g_current_thread;
     PKTHREAD next;
 
@@ -187,6 +253,10 @@ static void KiSchedule(void)
     next->Quantum = DEFAULT_QUANTUM;
     g_current_thread = next;
     KeSetCurrentThread(next);
+
+    /* Kernel mappings are shared, so it is safe to change CR3 while running
+     * on the outgoing kernel stack. User mappings become those of `next`. */
+    MmSwitchAddressSpace(next->Process->DirectoryTableBase);
 
     /* Point the CPU's ring-0 entry stack at the incoming thread's kernel stack,
      * so a syscall or interrupt taken from ring 3 lands on the right stack, and
@@ -252,21 +322,35 @@ NORETURN void KeTerminateThread(void)
     t->State = ThreadStateTerminated;
     KeLog("[ke]   thread '%s' (id %u) terminated\n", t->Name, t->ThreadId);
 
+    KeAbandonThreadMutants(t);
+
     /* Signal the thread object so anyone waiting on this thread wakes up, then
      * release the reference the thread held on it (see NtCreateThreadEx). The
      * dispatcher header is the object body, so the body pointer is the same
      * address. */
-    if (t->TerminationObject) {
-        PDISPATCHER_HEADER termination = t->TerminationObject;
-        termination->SignalState = 1;
-        KiSignalObject(termination);
-        t->TerminationObject = NULL;
-        ObDereferenceObject((POBJECT)termination);
+    if (t->ProcessMainThread && t->Process) {
+        PKPROCESS process = t->Process;
+        process->Exiting = TRUE;
+        process->ExitStatus = t->ExitStatus;
+        PLIST_ENTRY head = &process->ThreadListHead;
+        for (PLIST_ENTRY entry = head->Flink; entry != head;
+             entry = entry->Flink) {
+            PKTHREAD other = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
+            if (other == t || other->State == ThreadStateTerminated)
+                continue;
+            if (other->State == ThreadStateReady)
+                RemoveEntryList(&other->ReadyEntry);
+            else if (other->State == ThreadStateWaiting)
+                KiCancelThreadWait(other, t->ExitStatus);
+            other->ExitStatus = t->ExitStatus;
+            other->State = ThreadStateTerminated;
+            KeAbandonThreadMutants(other);
+            KepSignalThreadTermination(other);
+            KeLog("[ke]   process exit terminated thread '%s' (id %u)\n",
+                  other->Name, other->ThreadId);
+        }
     }
-
-    /* NOTE: the thread's stack and KTHREAD are intentionally leaked for now;
-     * a reaper in the idle thread will reclaim terminated threads once there
-     * is somewhere safe to free them from. */
+    KepSignalThreadTermination(t);
     KiSchedule();
 
     for (;;)
@@ -280,9 +364,9 @@ void KeClockTick(void)
 
     /* Dispatcher timeouts are absolute tick deadlines stored on blocked
      * threads. The process list is stable while interrupts are disabled. */
-    PLIST_ENTRY head = &g_system_process.ThreadListHead;
+    PLIST_ENTRY head = &g_all_threads;
     for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
-        PKTHREAD waiting = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
+        PKTHREAD waiting = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
         entry = entry->Flink;
         if (waiting->State == ThreadStateWaiting && waiting->WaitDeadline &&
             g_tick_count >= waiting->WaitDeadline)

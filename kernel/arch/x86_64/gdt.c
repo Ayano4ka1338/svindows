@@ -8,7 +8,7 @@
  * fault handler down with it.
  */
 #include <nt/ntdef.h>
-#include <ntos/ke.h>
+#include <svindows/ke.h>
 
 /*
  * Segment selectors.

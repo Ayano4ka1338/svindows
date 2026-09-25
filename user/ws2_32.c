@@ -17,7 +17,9 @@ int WSAStartup(unsigned short version, void *data)
 
 __declspec(dllexport) int GetHostNameW(WCHAR *name, int count)
 {
-    static const WCHAR host[] = { 'N','T','O','S',0 };
+    static const WCHAR host[] = {
+        'S','V','I','N','D','O','W','S',0
+    };
     int i = 0;
     if (!name || count <= 0)
         return -1;

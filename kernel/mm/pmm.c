@@ -6,9 +6,9 @@
  * through MmPhysToVirt, so the allocator keeps working across the switch from
  * the identity map to the high-half direct map.
  */
-#include <ntos/mm.h>
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/mm.h>
+#include <svindows/ke.h>
+#include <svindows/rtl.h>
 
 /* Physical end of the loaded kernel image (from the linker script). */
 extern char __kernel_phys_end[];

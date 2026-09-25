@@ -5,7 +5,7 @@
  * (0x08..0x0F) collide with CPU exceptions, so we remap them to 0x20..0x2F
  * (IRQ_BASE_VECTOR). All lines start masked; drivers unmask the ones they use.
  */
-#include <ntos/hal.h>
+#include <svindows/hal.h>
 
 #define PIC1_CMD  0x20
 #define PIC1_DATA 0x21

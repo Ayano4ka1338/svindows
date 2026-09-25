@@ -44,19 +44,21 @@ Svindows is intended for educational and research purposes.
 - Page tables and direct map
 - Kernel pool
 - NT-style object manager
-- Handles and namespaces
+- Per-process handles and namespaces
 - Kernel threads
 - Preemptive scheduler
 - Ring-3 processes through `syscall`/`sysret`
 - NT-style `Nt*` service table
 - PE32+ executable and DLL loader
-- FAT32 disk image support
+- Writable FAT32 disk image support with subdirectories
 - Import resolution
 - Windows-compatible PEB/TEB structures
 - NT file I/O
 - Events, semaphores, threads and waits
 - Registry APIs
 - User-pointer validation
+- Ring-3 exception dispatch: vectored handlers, C `__try/__except` and
+  `__finally`, and C++ `throw`/`catch` through the MSVC x64 personality
 - `kernel32.dll`
 - `advapi32.dll`
 - `msvcrt.dll`
@@ -68,14 +70,16 @@ Svindows is intended for educational and research purposes.
 - Dynamic DLL loading
 - 32-bpp framebuffer
 - PS/2 keyboard and mouse input
+- User-mode `cmd.exe` with PATH lookup, variables, batch files, redirection,
+  pipelines, history and filesystem commands
+- Character console subsystem with screen buffers, colors, cursor and modes
 
 ### Compatibility
 
-Svindows can currently run an **unmodified Windows 11 x64 `hostname.exe`** from:
-
-```text
-C:\Windows\System32
-```
+Svindows boots its own PE32+ command processor by default. The shell can launch
+child PE processes in isolated address spaces, search `PATH`, expand variables,
+run `.bat` files, connect processes with anonymous pipes, redirect standard
+handles, and mutate files and directories on the writable FAT32 volume.
 
 ## Roadmap
 
@@ -93,22 +97,24 @@ You need a Linux host with:
 - `mtools`
 - `qemu-system-x86_64`
 
-Build the kernel:
+Build the complete system (kernel, user-mode runtime, disk and ISO):
 
 ```bash
 make
+# or, equivalently:
+make all
 ```
 
-Build the bootable ISO:
+Remove all generated files:
 
 ```bash
-make iso
+make clean
 ```
 
-Run Svindows in QEMU:
+Run in the current terminal (serial input/output):
 
 ```bash
-make run
+make run-serial
 ```
 
 Run with a graphical QEMU window:
@@ -117,7 +123,8 @@ Run with a graphical QEMU window:
 make run-gui
 ```
 
-`make run` boots the ISO and prints the kernel log through the emulated serial port.
+Both run targets boot the same user-mode `cmd.exe`; `run-gui` opens QEMU's VGA
+window while `run-serial` stays entirely in the terminal.
 
 User-space executables are stored on the FAT32 disk image:
 

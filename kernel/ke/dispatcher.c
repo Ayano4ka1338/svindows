@@ -9,8 +9,9 @@
  *
  * Single-CPU: short critical sections just disable interrupts.
  */
-#include <ntos/ke.h>
-#include <ntos/rtl.h>
+#include <svindows/ke.h>
+#include <svindows/ob.h>
+#include <svindows/rtl.h>
 #include <nt/ntstatus.h>
 
 /* Try to satisfy a wait without blocking, consuming the signal as appropriate. */
@@ -21,26 +22,48 @@ static BOOLEAN KiCanAcquire(PDISPATCHER_HEADER h)
     case ThreadObject:
     case EventSynchronizationObject:
     case SemaphoreObject:
-    case MutantObject:
         return (BOOLEAN)(h->SignalState > 0);
+    case MutantObject: {
+        PKMUTANT mutant = (PKMUTANT)h;
+        return (BOOLEAN)(h->SignalState > 0 ||
+                         mutant->OwnerThread == KeGetCurrentThread());
+    }
     }
     return FALSE;
 }
 
-static void KiConsumeSignal(PDISPATCHER_HEADER h)
+static NTSTATUS KiConsumeSignal(PDISPATCHER_HEADER h)
 {
     switch (h->Type) {
     case EventNotificationObject:
     case ThreadObject:
-        break; /* level-triggered, never consumed */
+        return STATUS_SUCCESS; /* level-triggered, never consumed */
     case EventSynchronizationObject:
         h->SignalState = 0;
-        break;
+        return STATUS_SUCCESS;
     case SemaphoreObject:
-    case MutantObject:
         h->SignalState--;
-        break;
+        return STATUS_SUCCESS;
+    case MutantObject: {
+        PKMUTANT mutant = (PKMUTANT)h;
+        PKTHREAD current = KeGetCurrentThread();
+        if (mutant->OwnerThread == current) {
+            mutant->RecursionCount++;
+            return STATUS_SUCCESS;
+        }
+        h->SignalState = 0;
+        mutant->OwnerThread = current;
+        mutant->RecursionCount = 1;
+        InsertTailList(&current->OwnedMutantListHead, &mutant->OwnerEntry);
+        ObReferenceObject((POBJECT)mutant);
+        if (mutant->Abandoned) {
+            mutant->Abandoned = FALSE;
+            return STATUS_ABANDONED_WAIT_0;
+        }
+        return STATUS_SUCCESS;
     }
+    }
+    return STATUS_INVALID_PARAMETER;
 }
 
 /* Remove every outstanding wait block owned by a thread. Each entry is made a
@@ -83,6 +106,14 @@ void KiTimeoutThreadWait(PKTHREAD thread)
     KiWakeWaitingThread(thread, STATUS_TIMEOUT);
 }
 
+void KiCancelThreadWait(PKTHREAD thread, NTSTATUS status)
+{
+    KiUnlinkThreadWait(thread);
+    thread->WaitStatus = status;
+    thread->WaitDeadline = 0;
+    thread->WaitBlockCount = 0;
+}
+
 NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
                                   BOOLEAN wait_all, UINT64 timeout_ticks)
 {
@@ -103,16 +134,21 @@ NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
                     break;
                 }
             if (ready) {
+                NTSTATUS result = STATUS_WAIT_0;
                 for (ULONG i = 0; i < count; i++)
-                    KiConsumeSignal(objects[i]);
+                    if (KiConsumeSignal(objects[i]) ==
+                        STATUS_ABANDONED_WAIT_0)
+                        result = STATUS_ABANDONED_WAIT_0 + i;
                 KiIrqRestore(flags);
-                return STATUS_WAIT_0;
+                return result;
             }
         } else {
             for (ULONG i = 0; i < count; i++) {
                 if (KiCanAcquire(objects[i])) {
-                    KiConsumeSignal(objects[i]);
+                    NTSTATUS consumed = KiConsumeSignal(objects[i]);
                     KiIrqRestore(flags);
+                    if (consumed == STATUS_ABANDONED_WAIT_0)
+                        return STATUS_ABANDONED_WAIT_0 + i;
                     return (NTSTATUS)(STATUS_WAIT_0 + i);
                 }
             }
@@ -214,7 +250,7 @@ LONG KeReleaseSemaphore(PKSEMAPHORE sem, LONG count)
 }
 
 /* ------------------------------------------------------------------ */
-/* Mutants (mutexes) - non-recursive, ownership not yet tracked        */
+/* Mutants (mutexes): owner, recursion, and abandonment are kernel state. */
 /* ------------------------------------------------------------------ */
 
 void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned)
@@ -222,14 +258,49 @@ void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned)
     mutant->Header.Type = MutantObject;
     mutant->Header.SignalState = initially_owned ? 0 : 1;
     InitializeListHead(&mutant->Header.WaitListHead);
+    InitializeListHead(&mutant->OwnerEntry);
+    mutant->OwnerThread = initially_owned ? KeGetCurrentThread() : NULL;
+    mutant->RecursionCount = initially_owned ? 1 : 0;
+    mutant->Abandoned = FALSE;
+    if (initially_owned) {
+        InsertTailList(&mutant->OwnerThread->OwnedMutantListHead,
+                       &mutant->OwnerEntry);
+        ObReferenceObject((POBJECT)mutant);
+    }
 }
 
-LONG KeReleaseMutant(PKMUTANT mutant)
+BOOLEAN KeReleaseMutant(PKMUTANT mutant, LONG *previous_count)
 {
     UINT64 flags = KiIrqSave();
-    LONG previous = mutant->Header.SignalState;
-    mutant->Header.SignalState = 1;
-    KiSignalObject(&mutant->Header);
+    if (mutant->OwnerThread != KeGetCurrentThread()) {
+        KiIrqRestore(flags);
+        return FALSE;
+    }
+    if (previous_count)
+        *previous_count = mutant->RecursionCount;
+    if (--mutant->RecursionCount == 0) {
+        mutant->OwnerThread = NULL;
+        mutant->Header.SignalState = 1;
+        RemoveEntryList(&mutant->OwnerEntry);
+        InitializeListHead(&mutant->OwnerEntry);
+        KiSignalObject(&mutant->Header);
+        ObDereferenceObject((POBJECT)mutant);
+    }
     KiIrqRestore(flags);
-    return previous;
+    return TRUE;
+}
+
+void KeAbandonThreadMutants(PKTHREAD thread)
+{
+    while (!IsListEmpty(&thread->OwnedMutantListHead)) {
+        PLIST_ENTRY entry = RemoveHeadList(&thread->OwnedMutantListHead);
+        PKMUTANT mutant = CONTAINING_RECORD(entry, KMUTANT, OwnerEntry);
+        InitializeListHead(&mutant->OwnerEntry);
+        mutant->OwnerThread = NULL;
+        mutant->RecursionCount = 0;
+        mutant->Abandoned = TRUE;
+        mutant->Header.SignalState = 1;
+        KiSignalObject(&mutant->Header);
+        ObDereferenceObject((POBJECT)mutant);
+    }
 }

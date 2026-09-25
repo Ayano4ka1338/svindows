@@ -1,6 +1,11 @@
 LIBRARY ntdll.dll
 EXPORTS
     LdrInitializeProcess
+    KiUserExceptionDispatcher
+    RtlCaptureContext
+    RtlRaiseException
+    __CxxFrameHandler3
+    _CxxThrowException
     RtlImageNtHeader
     RtlInitializeNtUserPfn
     RtlRetrieveNtUserPfn
@@ -11,7 +16,15 @@ EXPORTS
     NtDisplayString
     NtDisplayNumber
     NtTerminateThread
+    NtContinue
+    RtlAddVectoredExceptionHandler
+    RtlRemoveVectoredExceptionHandler
+    RtlLookupFunctionEntry
+    RtlVirtualUnwind
+    __C_specific_handler
     NtAllocateVirtualMemory
+    NtFreeVirtualMemory
+    NtQueryVirtualMemory
     NtProtectVirtualMemory
     NtCreateFile
     NtReadFile
@@ -36,6 +49,32 @@ EXPORTS
     NtCreateSemaphore
     NtReleaseSemaphore
     NtQueryInformationProcess
+    NtCreateUserProcessSimple
+    NtFileSystemControlSimple
+    NtSetFileSizeSimple
+    NtCreatePipeSimple
+    NtConsoleControlSimple
+    NtEnumerateDirectorySimple
+    NtAbiProbe0
+    NtAbiProbe1
+    NtAbiProbe2
+    NtAbiProbe3
+    NtAbiProbe4
+    NtAbiProbe5
+    NtAbiProbe6
+    NtAbiProbe7
+    NtAbiProbe8
+    NtAbiProbe9
+    NtAbiProbe10
+    NtAbiProbe11
+    NtAbiProbe12
+    NtAbiProbe13
+    NtAbiProbe14
+    NtAbiProbe15
+    NtAbiProbe16
+    NtAbiShadowProbe
+    NtCreateMutant
+    NtReleaseMutant
 
 ; --- C runtime side of ntdll (user/ntdllrtl.c) ---
     RtlCreateHeap
