@@ -1,3 +1,0 @@
-This line lives in a file on the FAT32 disk. A Win32 program opened it
-with CreateFileA, read it with ReadFile, and printed it with WriteFile --
-kernel32 forwarding to ntdll, which issues the actual system calls.

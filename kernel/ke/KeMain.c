@@ -1,0 +1,297 @@
+/*
+ * ke/KeMain.c - KiSystemStartup, the kernel's C entry point.
+ *
+ * Reached from the boot trampoline once the CPU is in 64-bit long mode and the
+ * kernel is running out of the higher half. Brings up the console, installs the
+ * CPU descriptor tables, reports what it found, and idles.
+ */
+#include <nt/Ntdef.h>
+#include <nt/Ntstatus.h>
+#include <svindows/Ke.h>
+#include <svindows/Hal.h>
+#include <svindows/Mm.h>
+#include <svindows/Ex.h>
+#include <svindows/Ob.h>
+#include <svindows/Ldr.h>
+#include <svindows/Ps.h>
+#include <svindows/Io.h>
+#include <svindows/Console.h>
+#include <svindows/Cm.h>
+#include <svindows/Gfx.h>
+#include <svindows/Win32k.h>
+#include <svindows/Input.h>
+#include <svindows/Rtl.h>
+
+#define SVINDOWS_VERSION "0.6.0"
+
+#define BOOT_REPORT_CAPACITY 2048
+#define BOOT_REPORT_LABEL_WIDTH 38
+static char g_boot_report[BOOT_REPORT_CAPACITY];
+static SIZE_T g_boot_report_length;
+
+/* Set by the top-level Makefile (PROGRAM=...). This keeps boot-program
+ * selection a build-time policy rather than a special kernel code path. */
+#ifndef SVINDOWS_BOOT_PROGRAM
+#define SVINDOWS_BOOT_PROGRAM "cmd.exe"
+#endif
+#ifndef SVINDOWS_BOOT_COMMAND_LINE
+#define SVINDOWS_BOOT_COMMAND_LINE SVINDOWS_BOOT_PROGRAM
+#endif
+
+/* The input thread bridges the hardware queues into the USER message queues;
+ * drawing the pointer is the shell's job, not the kernel's. */
+static void InputWorker(PVOID context)
+{
+    (void)context;
+
+    UINT32 last_seq = (UINT32)-1;
+
+    for (;;) {
+        /* Headless `make run-serial` uses COM1 as the keyboard. */
+        while (HalSerialDataAvailable()) {
+            char c = HalSerialReadChar();
+            if (c == '\r') c = '\n';
+            if ((UINT8)c == 127) c = '\b';
+            if (c) {
+                IoConsoleInputCharacter(c);
+                KiUserQueueCharacter((UINT8)c);
+            }
+        }
+
+        /* Deliver each key to both console input and the USER message queue.
+         * Echo belongs to the console application so GUI input stays silent. */
+        while (KbdDataAvailable()) {
+            char c = KbdReadChar();
+            if (c) {
+                IoConsoleInputCharacter(c);
+                KiUserQueueCharacter((UINT8)c);
+            }
+        }
+
+        /* Forward pointer motion into the USER message queues. The visible
+         * cursor belongs to the shell once it draws one; the kernel no longer
+         * paints its own sprite over the desktop. */
+        UINT32 seq = MouseState.Seq;
+        if (seq != last_seq) {
+            last_seq = seq;
+            KiUserQueueMouse(MouseState.X, MouseState.Y, MouseState.Buttons);
+        }
+
+        ConUpdateCursor(KeGetTickCount());
+
+        KeYield();
+    }
+}
+
+static void print_banner(void)
+{
+    HalVgaSetColor(VGA_COLOR(VGA_LCYAN, VGA_BLACK));
+    KeLog("\n");
+    KeLog("  SVINDOWS - NT-compatible operating system for x86-64\n");
+    KeLog("  version %s\n", SVINDOWS_VERSION);
+    HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+    KeLog("  --------------------------------------------------\n\n");
+}
+
+/* Every successful marker is emitted only after the associated initializer has
+ * returned. Initializers that can fail return NTSTATUS; non-returning failures
+ * bugcheck, so an [ ok ] marker never masks a failed boot step. */
+static void KiBootRecordStep(const char *name, const char *state)
+{
+    const char *prefix = "  ";
+    SIZE_T name_length = strlen(name);
+
+    while (*prefix && g_boot_report_length < BOOT_REPORT_CAPACITY)
+        g_boot_report[g_boot_report_length++] = *prefix++;
+    for (SIZE_T i = 0; i < BOOT_REPORT_LABEL_WIDTH &&
+         g_boot_report_length < BOOT_REPORT_CAPACITY; i++)
+        g_boot_report[g_boot_report_length++] = i < name_length ? name[i] : ' ';
+    while (*state && g_boot_report_length < BOOT_REPORT_CAPACITY)
+        g_boot_report[g_boot_report_length++] = *state++;
+    if (g_boot_report_length < BOOT_REPORT_CAPACITY)
+        g_boot_report[g_boot_report_length++] = '\n';
+}
+
+static void KiReplayBootReport(void)
+{
+    const SIZE_T label_end = 2 + BOOT_REPORT_LABEL_WIDTH;
+    SIZE_T offset = 0;
+
+    while (offset < g_boot_report_length) {
+        SIZE_T line_end = offset;
+        while (line_end < g_boot_report_length && g_boot_report[line_end] != '\n')
+            line_end++;
+
+        ConAppendKernelText(g_boot_report + offset, label_end);
+        if (line_end > offset + label_end) {
+            const char *state = g_boot_report + offset + label_end;
+            UINT8 color = VGA_LGREEN;
+            if (state[1] == 'n') color = VGA_YELLOW;
+            if (state[1] == 'f') color = VGA_LRED;
+            ConAppendKernelTextWithAttribute(state, line_end - offset - label_end,
+                                              VGA_COLOR(color, VGA_BLACK));
+        }
+        if (line_end < g_boot_report_length)
+            ConAppendKernelText("\n", 1);
+        offset = line_end + 1;
+    }
+}
+
+static void KiBootStepOk(const char *name)
+{
+    HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+    KeLog("  %-48s", name);
+    HalVgaSetColor(VGA_COLOR(VGA_LGREEN, VGA_BLACK));
+    KeLog("[ ok ]\n");
+    HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+
+    KiBootRecordStep(name, "[ ok ]");
+}
+
+static void KiBootStepUnavailable(const char *name)
+{
+    HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+    KeLog("  %-48s", name);
+    HalVgaSetColor(VGA_COLOR(VGA_YELLOW, VGA_BLACK));
+    KeLog("[ n/a ]\n");
+    HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+
+    KiBootRecordStep(name, "[ n/a ]");
+}
+
+static void KiBootStepFailed(const char *name, NTSTATUS status)
+{
+    HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+    KeLog("  %-48s", name);
+    HalVgaSetColor(VGA_COLOR(VGA_LRED, VGA_BLACK));
+    KeLog("[ failed: 0x%08x ]\n", (unsigned)status);
+    HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+
+    KiBootRecordStep(name, "[ failed ]");
+}
+
+/*
+ * KiSystemStartup - phase 0 kernel initialization.
+ *
+ * @magic:    the Multiboot2 bootloader magic reported by GRUB.
+ * @mbi_phys: physical address of the Multiboot2 information structure.
+ */
+void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
+{
+    /* Console first, so everything after this is observable. */
+    KeLogInit();
+    print_banner();
+
+    if (magic != MULTIBOOT2_BOOTLOADER_MAGIC) {
+        KiBootStepFailed("Validating Multiboot2 hand-off", STATUS_INVALID_PARAMETER);
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "invalid Multiboot2 bootloader magic");
+    }
+    KiBootStepOk("Multiboot2 hand-off");
+
+    KeInitializeGdt();
+    KiBootStepOk("GDT / task state segment");
+
+    KeInitializeIdt();
+    KiBootStepOk("Interrupt descriptor table");
+
+    KiInitializeSystemCalls();
+    KiBootStepOk("Syscall / exception dispatcher");
+
+    /* Phase 1: memory management. */
+    MmInitialize((UINT64)mbi_phys);
+    KiBootStepOk("Physical / virtual memory");
+
+    /* Map the shared user-data page (tick count / system time for ring 3). */
+    KeInitializeSharedData();
+    KiBootStepOk("Shared user data page");
+
+    /* The framebuffer backs the console. Desktop rendering is not a kernel
+     * boot responsibility. */
+    BOOLEAN framebuffer_ready = GfxInitialize();
+    if (framebuffer_ready) {
+        GfxClear(GfxColor(0, 0, 0));
+        KiBootStepOk("Framebuffer console");
+    } else {
+        KiBootStepUnavailable("Framebuffer console");
+    }
+
+    /* Kernel pool. */
+    ExInitializePool();
+    KiBootStepOk("Executive pool allocator");
+
+    /* Phase 2: object manager, then the Ps object types. */
+    ObInitialize();
+    KiBootStepOk("Object manager / namespace");
+    PsInitialize();
+    KiBootStepOk("Process / dispatcher objects");
+
+    /* Configuration manager (registry). */
+    CmInitialize();
+    KiBootStepOk("Registry manager");
+
+    /* win32k's shared SERVERINFO, which USER32 reads during process attach. */
+    W32kInitializeServerInfo();
+    KiBootStepOk("Win32 subsystem data");
+
+    /* Arm the boot stack's overflow guard before the loader starts recursing
+     * through the dependency graph. */
+    LdrInitializeStackGuard();
+    KiBootStepOk("Kernel stack guard");
+
+    /* Phase 5/6: mount the disk, then load a PE from it and run it. */
+    NTSTATUS io = IoInitialize();
+    if (NT_SUCCESS(io))
+        KiBootStepOk("ATA / FAT32 filesystem");
+    else
+        KiBootStepFailed("ATA / FAT32 filesystem", io);
+
+    KeInitializeScheduler();
+    KiBootStepOk("Scheduler");
+
+    NTSTATUS st = PsCreateInitialProcess(SVINDOWS_BOOT_PROGRAM,
+                                         SVINDOWS_BOOT_COMMAND_LINE);
+    if (NT_SUCCESS(st))
+        KiBootStepOk("Initial user process");
+    else
+        KiBootStepFailed("Initial user process", st);
+
+    HalInitializePic();
+    KiBootStepOk("Interrupt controller");
+    HalRegisterIrqHandler(0, KeClockTick);
+    HalInitializeTimer(100); /* 100 Hz preemption tick */
+    KiBootStepOk("100 Hz system timer");
+
+    /* Input: PS/2 keyboard + mouse, feeding the USER message queues. */
+    HalInitializeKeyboard();
+    HalInitializeMouse();
+    if (GfxAvailable())
+        HalMouseSetBounds((INT32)GfxFramebuffer.Width, (INT32)GfxFramebuffer.Height);
+    if (KeCreateThread("Input", InputWorker, NULL, 8))
+        KiBootStepOk("Keyboard / mouse input");
+    else
+        KiBootStepFailed("Keyboard / mouse input", STATUS_NO_MEMORY);
+
+    /* IoInitialize created the process-visible console and cleared its screen
+     * buffer. Replay the independently collected, real boot results there so
+     * they remain visible when cmd.exe starts. */
+    KiReplayBootReport();
+
+    KeLog("\n  Free physical memory: %lu MiB\n",
+          (unsigned long)((MmFreePageCount() << PAGE_SHIFT) >> 20));
+    if (NT_SUCCESS(st)) {
+        HalVgaSetColor(VGA_COLOR(VGA_LGREEN, VGA_BLACK));
+        KeLog("  Boot completed. Starting %s.\n\n", SVINDOWS_BOOT_PROGRAM);
+        HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+    } else {
+        HalVgaSetColor(VGA_COLOR(VGA_LRED, VGA_BLACK));
+        KeLog("  Boot completed without an initial user process.\n\n");
+        HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
+    }
+
+    /* Become the idle thread. The scheduler runs the ring-3 PE (which makes
+     * syscalls) and the kernel worker. */
+    __sti();
+    for (;;)
+        __halt();
+}

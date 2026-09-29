@@ -1,0 +1,104 @@
+# SVINDOWS implementation plan
+
+This checklist defines the current development order.  Each stage ends with a
+clean build and a QEMU boot before work proceeds to the next stage.
+
+## 1. Process model and lifetime
+
+- [x] Give every `KPROCESS` its own handle table.
+- [x] Move loader module/cache state from globals into a process-owned context.
+- [x] Move user virtual-allocation and thread-stack cursors into `KPROCESS`.
+- [x] Track parent PID, exit status, image name and standard handles.
+- [x] Implement process termination: terminate remaining threads, signal the
+      process object, close its handles and retain the exit status for waiters.
+- [x] Reap terminated threads and release kernel stacks/KTHREAD objects.
+- [x] Walk and destroy a process's user page tables and physical pages.
+- [x] Represent the initial command processor as a normal user process rather
+      than as a thread owned by the System process.
+
+## 2. Writable FAT32 and Win32 filesystem surface
+
+- [x] Add sector writes and a buffered block-write path to the ATA layer.
+- [x] Implement FAT32 cluster allocation/freeing and mirrored FAT updates.
+- [x] Implement directory entry creation, update, deletion and subdirectories.
+- [x] Add file offsets, writable file objects and create dispositions.
+- [x] Implement `ReadFile`, `WriteFile`, seek, truncate, delete, rename and
+      directory creation/removal through NT syscalls and Kernel32 wrappers.
+- [x] Add path normalization for drive letters, `.`/`..`, separators and the
+      current directory.
+- [x] Separate shared vnodes from per-handle file positions, represent
+      directories as File objects, and enumerate them through
+      `NtQueryDirectoryFile`/`FindFirstFileExW`.
+- [x] Route seek, truncate, rename and delete disposition through the native
+      `NtSetInformationFile` contract instead of private pathname mutations.
+
+## 3. Command processor
+
+- [x] Replace whitespace splitting with a quoted/escaped command-line parser.
+- [x] Resolve executable names using current directory, `.exe` completion and
+      `PATH`/`PATHEXT`-style searching.
+- [x] Implement environment expansion and core `set`, `cd`, `type`, `copy`,
+      `del`, `mkdir`, `rmdir`, `rename` and `echo` behavior.
+- [x] Move every stateless command out of `cmd.exe` into standalone console PE
+      images and inherit the shell current directory through process parameters.
+- [x] Add `<`, `>`, `>>`, `2>` redirection backed by inheritable standard
+      handles, then anonymous pipes and pipelines.
+- [x] Add `.bat` execution, `%ERRORLEVEL%`, conditionals needed by scripts and
+      command history/editing.
+
+## 4. Console subsystem
+
+- [x] Separate kernel diagnostics from user console output.
+- [x] Introduce a console subsystem with a character/attribute screen buffer.
+- [x] Implement cursor position/shape, colors, scrolling and clear/fill APIs.
+- [x] Add cooked/raw input modes and an input-event queue.
+- [x] Attach multiple client processes to a console and route their standard
+      handles through console file objects.
+- [x] Make serial and framebuffer backends consume the same console output.
+
+## Follow-up hardening (outside stages 1-4)
+
+- [x] Deliver ring-3 CPU exceptions through `KiUserExceptionDispatcher`, with
+      vectored handlers, editable AMD64 `CONTEXT` and `NtContinue`.
+- [x] Preserve first-chance exception state until dispatch completes and emit
+      release-friendly `module!export+offset`, register, VM-region and PTE
+      diagnostics for genuinely unhandled user faults.
+- [x] Walk x64 `.pdata`/`UNWIND_INFO`, restore common AMD64 frame layouts and
+      dispatch C `__try/__except` scopes with constant or callable filters.
+- [x] Add second-pass unwind for `__finally` termination handlers.
+- [x] Dispatch C++ exceptions: `_CxxThrowException` raises 0xE06D7363 and
+      `__CxxFrameHandler3` matches typed and catch-all handlers from the MSVC
+      x64 `FuncInfo` maps, running destructors on the way.
+- [x] Enter C++ catches only after the unwind (the first pass records the
+      catch, `RtlDispatchException` runs the termination pass, then calls the
+      catch funclet) so try-block destructors run before the catch body.
+- [x] Match C++ catches through the full `CatchableTypeArray`, including base
+      subobjects at a non-zero offset.
+- [x] Implement static PE TLS: read each module's `IMAGE_TLS_DIRECTORY64`,
+      assign an index, and give every thread a block vector (template-copied)
+      at `TEB.ThreadLocalStoragePointer`; continue the index space from
+      kernel32's `TlsAlloc`.
+- [x] Run PE TLS callbacks with `DLL_PROCESS_ATTACH` from the ring-3 bootstrap
+      before any `DllMain`.
+- [ ] Cover chained unwind records and remaining prolog/epilog edge cases.
+- [ ] Copy complex thrown objects (copy constructors and `vbaseDtor` handling)
+      and honour `pForwardCompat` for cross-module C++ catches.
+- [x] Enforce the read/write/delete sharing matrix across concurrent opens and
+      retain file/directory delete-pending state until the last handle closes.
+- [x] Route FAT32 I/O through a write-back sector cache and expose explicit
+      persistence through `NtFlushBuffersFile`/`FlushFileBuffers`.
+- [x] Make file replacement copy-on-write ordered (new data -> FAT chain ->
+      directory entry -> old-chain release), report `STATUS_DISK_FULL`, and
+      add physical-sector write fault injection through `FAT_FAULT_AFTER`.
+- [x] Add bounded sector-cache transactions with before-images and rollback;
+      use them for directory allocation/growth and create/rename/delete
+      metadata phases.
+- [x] Rebuild FAT reachability at mount, transactionally reclaim orphaned
+      allocations, and regenerate primary/backup FSInfo free-space metadata.
+- [ ] Automate an exhaustive fault-point sweep and reconcile divergent FAT
+      mirrors after a literal power loss during one mirrored update.
+- [x] Add FAT long-name creation: generate a unique 8.3 short name, write the
+      checksummed VFAT long-name entries, and clean them up on delete/rename.
+- [x] Add arrow-key recall and richer in-line command editing (history up/down,
+      Home/End, Delete and mid-line insert on both PS/2 and serial input).
+- [ ] Support multiple independently allocated console instances and resize.
