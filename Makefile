@@ -1,19 +1,11 @@
-# ============================================================================
-# SVINDOWS top-level build
-#
-#   make / make all build the complete bootable system
-#   make run-serial  boot cmd.exe in a terminal (serial input/output)
-#   make run-gui     boot cmd.exe in a QEMU window (PS/2 keyboard + VGA)
-#   make clean      remove build artifacts
-# ============================================================================
-
 CROSS   ?=
 CC      := $(CROSS)gcc
 LD      := $(CROSS)ld
 NASM    := nasm
-PYTHON  ?= python3
+HOSTCC  ?= clang
 
 CONFIG ?= debug
+FAT_FAULT_AFTER ?= -1
 ifeq ($(CONFIG),release)
 KERNEL_OPT := -O2
 USER_OPT   := -O2
@@ -25,13 +17,13 @@ $(error Unknown CONFIG '$(CONFIG)'; use CONFIG=debug or CONFIG=release)
 endif
 
 BUILD   := build
+BUILD_CONFIG := $(BUILD)/BuildConfig
 KERNEL  := $(BUILD)/svindowskrnl.elf
 ISO     := $(BUILD)/svindows.iso
 
 .DEFAULT_GOAL := all
 
-# The PE to start after boot. The command processor is the normal system shell;
-# PROGRAM=testapp.exe and PROGRAM=hello.exe remain useful development boots.
+# The PE to start after boot: the command processor, the normal system shell.
 PROGRAM ?= cmd.exe
 CMDLINE ?= $(PROGRAM)
 
@@ -44,16 +36,18 @@ CFLAGS := -std=gnu11 -ffreestanding \
           -fno-asynchronous-unwind-tables -MMD -MP \
           -Wall -Wextra -Wno-unused-parameter -Wno-multichar \
           $(KERNEL_OPT) -g -Ikernel/include -DSVINDOWS_BOOT_PROGRAM=\"$(PROGRAM)\" \
-          -DSVINDOWS_BOOT_COMMAND_LINE='"$(CMDLINE)"'
+          -DSVINDOWS_BOOT_COMMAND_LINE='"$(CMDLINE)"' \
+          -DIO_FAULT_AFTER_WRITES=$(FAT_FAULT_AFTER)
 
 NASMFLAGS := -f elf64 -g -F dwarf
 
 LDFLAGS := -n -nostdlib -static -no-pie -z noexecstack \
            -z max-page-size=0x1000 --no-warn-rwx-segments \
-           -T kernel/arch/x86_64/linker.ld
+           -T kernel/arch/x86_64/Linker.ld
 
-C_SRC   := $(shell find kernel -name '*.c')
-ASM_SRC := $(shell find kernel -name '*.asm')
+# Keep object and link order deterministic across hosts and filesystems.
+C_SRC   := $(sort $(shell find kernel -name '*.c'))
+ASM_SRC := $(sort $(shell find kernel -name '*.asm'))
 OBJ     := $(patsubst %,$(BUILD)/%.o,$(C_SRC) $(ASM_SRC))
 C_DEPS  := $(patsubst %.c,$(BUILD)/%.c.d,$(C_SRC))
 
@@ -62,20 +56,19 @@ C_DEPS  := $(patsubst %.c,$(BUILD)/%.c.d,$(C_SRC))
 # Large compatibility surfaces are grouped into included implementation parts.
 # They remain one translation unit while private helpers are still shared, but
 # listing them here keeps incremental builds correct when a part changes.
-WIN32K_USER_PARTS := $(wildcard kernel/win32k/user_*.inc)
+WIN32K_USER_PARTS := $(wildcard kernel/win32k/User*.inc)
 WIN32K_GDI_PARTS  := $(wildcard kernel/win32k/gdi/*.inc)
 LDR_PARTS         := $(wildcard kernel/ldr/pe/*.inc)
 KERNEL32_PARTS    := $(wildcard user/kernel32/*.inc)
-NTDLLRTL_PARTS    := $(wildcard user/ntdllrtl/*.inc)
+NTDLLRTL_PARTS    := $(wildcard user/ntdll/Rtl/*.inc)
 MSVCRT_PARTS      := $(wildcard user/msvcrt/*.inc)
 CMD_PARTS         := $(wildcard user/cmd/*.inc)
 
 # User-space images, built as real PE32+ files and placed on a FAT disk image
 # the kernel reads at runtime. The dependency chain is
-#   testapp.exe -> kernel32.dll -> ntdll.dll -> syscall
+#   cmd.exe -> kernel32.dll -> ntdll.dll -> syscall
 # ntdll (asm) exports the Nt* syscall stubs; kernel32 (C) implements Win32 on
-# top of them; testapp (C) is a normal Win32 program.
-TESTAPP    := $(BUILD)/testapp.exe
+# top of them; cmd (C) is a normal Win32 program.
 NTDLL      := $(BUILD)/ntdll.dll
 NTDLLLIB   := $(BUILD)/ntdll.lib
 KERNEL32   := $(BUILD)/kernel32.dll
@@ -85,37 +78,37 @@ ADVAPI32LIB := $(BUILD)/advapi32.lib
 MSVCRT     := $(BUILD)/msvcrt.dll
 MSVCRTLIB  := $(BUILD)/msvcrt.lib
 CRT0       := $(BUILD)/crt0.obj
-HELLO      := $(BUILD)/hello.exe
-FILETEST   := $(BUILD)/filetest.exe
-CAT        := $(BUILD)/cat.exe
-CONSOLETEST := $(BUILD)/consoletest.exe
-ABITEST    := $(BUILD)/abitest.exe
-SEHTEST    := $(BUILD)/sehtest.exe
-SEHCRASH   := $(BUILD)/sehcrash.exe
-SEHFRAME   := $(BUILD)/sehframe.exe
-CPPTEST    := $(BUILD)/cpptest.exe
-TLSTEST    := $(BUILD)/tlstest.exe
-FETCH      := $(BUILD)/fetch.exe
 CMD        := $(BUILD)/cmd.exe
+CMDUTIL    := $(BUILD)/cmdutil.exe
+COMMAND_BINS := $(addprefix $(BUILD)/,DIR.EXE TYPE.EXE CLS.EXE VER.EXE HELP.EXE \
+                VOL.EXE HOSTNAME.EXE PAUSE.EXE COPY.EXE DEL.EXE ERASE.EXE \
+                MD.EXE MKDIR.EXE RD.EXE RMDIR.EXE REN.EXE RENAME.EXE)
 EXTRA      := $(BUILD)/extra.dll
 DISK       := $(BUILD)/disk.img
 LLDLINK    := lld-link
-LLVM_DLLTOOL := $(or $(shell command -v llvm-dlltool 2>/dev/null),\
-                     $(shell command -v llvm-dlltool-19 2>/dev/null),\
-                     llvm-dlltool)
 CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
-              -fno-stack-protector -fno-stack-check -funwind-tables $(USER_OPT)
+              -fno-stack-protector -fno-stack-check -funwind-tables \
+              -Iuser/include $(USER_OPT)
 
 QEMU        := qemu-system-x86_64
 # -boot d forces booting from the CD-ROM (the ISO); the hard disk is data only.
 QEMUFLAGS   := -m 1024M -no-reboot -no-shutdown -boot d
 QEMUDISK    := -drive file=$(DISK),format=raw,if=ide,index=0,media=disk
 
-.PHONY: all iso run run-serial run-gui test test-release test-exceptions test-fs-reboot clean FORCE
+.PHONY: all iso run run-serial run-gui clean check audit test test-release FORCE
 
 FORCE:
 
 all: $(ISO) $(DISK)
+
+# A configuration change must invalidate existing objects even without clean.
+# Preserve the stamp's mtime when settings have not changed.
+$(BUILD_CONFIG): FORCE
+	@mkdir -p $(BUILD)
+	@printf '%s\n' 'CONFIG=$(CONFIG)' 'KERNEL_OPT=$(KERNEL_OPT)' 'USER_OPT=$(USER_OPT)' > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+
+$(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(EXTRA): $(BUILD_CONFIG)
 
 $(BUILD)/%.c.o: %.c
 	@mkdir -p $(dir $@)
@@ -124,13 +117,18 @@ $(BUILD)/%.c.o: %.c
 # PROGRAM is supplied through CFLAGS, which make does not otherwise track.
 # Recompile just the boot selector so switching PROGRAM never reuses a kernel
 # containing the previous executable name.
-$(BUILD)/kernel/ke/ke_main.c.o: kernel/ke/ke_main.c FORCE
+$(BUILD)/kernel/ke/KeMain.c.o: kernel/ke/KeMain.c FORCE
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/kernel/ke/syscall.c.o: $(WIN32K_USER_PARTS)
-$(BUILD)/kernel/win32k/gdiobj.c.o: $(WIN32K_GDI_PARTS)
-$(BUILD)/kernel/ldr/pe.c.o: $(LDR_PARTS)
+# The fault-injection threshold is supplied through CFLAGS as well.
+$(BUILD)/kernel/io/BlockCache.c.o: kernel/io/BlockCache.c FORCE
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/ke/Syscall.c.o: $(WIN32K_USER_PARTS)
+$(BUILD)/kernel/win32k/Gdiobj.c.o: $(WIN32K_GDI_PARTS)
+$(BUILD)/kernel/ldr/Pe.c.o: $(LDR_PARTS)
 
 $(BUILD)/%.asm.o: %.asm
 	@mkdir -p $(dir $@)
@@ -138,42 +136,44 @@ $(BUILD)/%.asm.o: %.asm
 
 # ntdll.dll: the syscall-stub library, with an export table + import library.
 # Each user DLL gets a distinct preferred base so the loader (which loads at the
-# preferred base) never has two images collide. ntdllrtl.c provides the C side
+# preferred base) never has two images collide. Ntdllrtl.c provides the C side
 # (Rtl heap, critical sections, string helpers) real binaries import.
-$(NTDLL): user/ntdll.asm user/ntdll.def user/ntdllrtl.c $(NTDLLRTL_PARTS)
+$(NTDLL): user/ntdll/Ntdll.asm user/ntdll/Ntdll.def user/ntdll/Ntdllrtl.c $(NTDLLRTL_PARTS)
 	@mkdir -p $(BUILD)
-	$(NASM) -f win64 user/ntdll.asm -o $(BUILD)/ntdll.obj
-	$(CLANGWIN) -c user/ntdllrtl.c -o $(BUILD)/ntdllrtl.obj
+	$(NASM) -f win64 user/ntdll/Ntdll.asm -o $(BUILD)/ntdll.obj
+	$(CLANGWIN) -c user/ntdll/Ntdllrtl.c -o $(BUILD)/ntdllrtl.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x180000000 \
-	           /def:user/ntdll.def /out:$(NTDLL) /implib:$(NTDLLLIB) \
+	           /def:user/ntdll/Ntdll.def /out:$(NTDLL) /implib:$(NTDLLLIB) \
 	           $(BUILD)/ntdll.obj $(BUILD)/ntdllrtl.obj
 	@echo "  DLL   $(NTDLL)"
 
 # kernel32.dll: the Win32 subsystem library, built from C over ntdll.
-$(KERNEL32): user/kernel32.c user/kernel32_process.c $(KERNEL32_PARTS) $(NTDLL)
+$(KERNEL32): user/kernel32/Kernel32.c user/kernel32/Kernel32Process.c $(KERNEL32_PARTS) $(NTDLL)
 	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/kernel32.c -o $(BUILD)/kernel32.obj
-	$(CLANGWIN) -c user/kernel32_process.c -o $(BUILD)/kernel32_process.obj
+	$(CLANGWIN) -c user/kernel32/Kernel32.c -o $(BUILD)/kernel32.obj
+	$(CLANGWIN) -c user/kernel32/Kernel32Process.c -o $(BUILD)/kernel32_process.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x1C0000000 \
 	           /out:$(KERNEL32) /implib:$(KERNEL32LIB) \
 	           $(BUILD)/kernel32.obj $(BUILD)/kernel32_process.obj $(NTDLLLIB)
 	@echo "  DLL   $(KERNEL32)"
 
 # advapi32.dll: the registry Reg* API (C), built over ntdll's Nt*Key services.
-$(ADVAPI32): user/advapi32.c $(NTDLL)
+$(ADVAPI32): user/advapi32/Advapi32.c $(NTDLL)
 	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/advapi32.c -o $(BUILD)/advapi32.obj
+	$(CLANGWIN) -c user/advapi32/Advapi32.c -o $(BUILD)/advapi32.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x1D0000000 \
 	           /out:$(ADVAPI32) /implib:$(ADVAPI32LIB) \
 	           $(BUILD)/advapi32.obj $(NTDLLLIB)
 	@echo "  DLL   $(ADVAPI32)"
 
 # msvcrt.dll: a tiny C runtime (printf/malloc/str*) over kernel32.
-$(MSVCRT): user/msvcrt.c $(MSVCRT_PARTS) $(KERNEL32)
+$(MSVCRT): user/msvcrt/Msvcrt.c $(MSVCRT_PARTS) $(KERNEL32)
 	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/msvcrt.c -o $(BUILD)/msvcrt.obj
+	$(CLANGWIN) -c user/msvcrt/Msvcrt.c -o $(BUILD)/msvcrt.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x1E0000000 \
 	           /out:$(MSVCRT) /implib:$(MSVCRTLIB) \
+	           /export:RtlEnterCriticalSection=ntdll.RtlEnterCriticalSection \
+	           /export:RtlLeaveCriticalSection=ntdll.RtlLeaveCriticalSection \
 	           /export:??0exception@@QEAA@XZ=msvcrt_exception_ctor0 \
 	           "/export:??0exception@@QEAA@AEBQEBD@Z=msvcrt_exception_ctor_msg" \
 	           "/export:??0exception@@QEAA@AEBQEBDH@Z=msvcrt_exception_ctor_msg" \
@@ -186,177 +186,68 @@ $(MSVCRT): user/msvcrt.c $(MSVCRT_PARTS) $(KERNEL32)
 
 # extra.dll: a standalone DLL loaded at runtime via LoadLibraryA (not linked
 # into the app's import chain). Distinct preferred base so it never collides.
-$(EXTRA): user/extra.c
+$(EXTRA): user/extra/Extra.c
 	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/extra.c -o $(BUILD)/extra.obj
+	$(CLANGWIN) -c user/extra/Extra.c -o $(BUILD)/extra.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x200000000 \
 	           /out:$(EXTRA) /implib:$(BUILD)/extra.lib $(BUILD)/extra.obj
 	@echo "  DLL   $(EXTRA)"
 
 # crt0.obj: the C runtime startup (mainCRTStartup). Linked into every program
 # so a standard `int main()` is entered without a custom /entry.
-$(CRT0): user/crt0.c
+$(CRT0): user/crt/Crt0.c
 	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/crt0.c -o $(CRT0)
-
-# stubtest.lib: an import library (built by llvm-dlltool from a .def) that
-# promises a kernel32 export the real kernel32.dll does not provide, so testapp
-# can exercise the loader's unimplemented-import stubbing.
-STUBTESTLIB := $(BUILD)/stubtest.lib
-$(STUBTESTLIB): user/stubtest.def
-	@mkdir -p $(BUILD)
-	$(LLVM_DLLTOOL) -m i386:x86-64 -d user/stubtest.def -l $(STUBTESTLIB) -D kernel32.dll
-
-# testapp.exe: a Win32 program (C) entered through the CRT startup (int main),
-# linked against kernel32 + advapi32 + msvcrt (+ the stubtest import lib).
-$(TESTAPP): user/testapp.c $(CRT0) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(STUBTESTLIB)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/testapp.c -o $(BUILD)/testapp.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/testapp.obj $(CRT0) $(KERNEL32LIB) \
-	           $(ADVAPI32LIB) $(MSVCRTLIB) $(STUBTESTLIB)
-	@echo "  PE    $@"
-
-# hello.exe: a plain portable C program (int main, stdio/stdlib/string), built
-# the ordinary way -- no custom entry, no OS-specific code.
-$(HELLO): user/hello.c $(CRT0) $(KERNEL32) $(MSVCRT)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -Iuser/include -c user/hello.c -o $(BUILD)/hello.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/hello.obj $(CRT0) $(KERNEL32LIB) $(MSVCRTLIB)
-	@echo "  PE    $@"
-
-$(FILETEST): user/filetest.c $(CRT0) $(KERNEL32)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/filetest.c -o $(BUILD)/filetest.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/filetest.obj $(CRT0) $(KERNEL32LIB)
-	@echo "  PE    $@"
-
-$(CAT): user/cat.c $(CRT0) $(KERNEL32)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/cat.c -o $(BUILD)/cat.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/cat.obj $(CRT0) $(KERNEL32LIB)
-	@echo "  PE    $@"
-
-$(CONSOLETEST): user/consoletest.c $(CRT0) $(KERNEL32)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/consoletest.c -o $(BUILD)/consoletest.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/consoletest.obj $(CRT0) $(KERNEL32LIB)
-	@echo "  PE    $@"
-
-$(ABITEST): user/abitest.c user/abi_helpers.asm $(CRT0) $(KERNEL32) $(NTDLL)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/abitest.c -o $(BUILD)/abitest.obj
-	$(NASM) -f win64 user/abi_helpers.asm -o $(BUILD)/abi_helpers.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/abitest.obj $(BUILD)/abi_helpers.obj \
-	           $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
-	@echo "  PE    $@"
-
-$(SEHTEST): user/sehtest.c user/seh_helpers.asm $(CRT0) $(KERNEL32) $(NTDLL)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/sehtest.c -o $(BUILD)/sehtest.obj
-	$(NASM) -f win64 user/seh_helpers.asm -o $(BUILD)/seh_helpers.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/sehtest.obj $(BUILD)/seh_helpers.obj \
-	           $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
-	@echo "  PE    $@"
-
-$(SEHCRASH): user/sehcrash.c user/seh_helpers.asm $(CRT0) $(KERNEL32)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/sehcrash.c -o $(BUILD)/sehcrash.obj
-	$(NASM) -f win64 user/seh_helpers.asm -o $(BUILD)/seh_crash_helpers.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/sehcrash.obj $(BUILD)/seh_crash_helpers.obj \
-	           $(CRT0) $(KERNEL32LIB)
-	@echo "  PE    $@"
-
-$(SEHFRAME): user/sehframe.c $(CRT0) $(KERNEL32) $(NTDLL)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -fasync-exceptions -funwind-tables -c user/sehframe.c -o $(BUILD)/sehframe.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/sehframe.obj $(CRT0) \
-	           $(KERNEL32LIB) $(NTDLLLIB)
-	@echo "  PE    $@"
-
-# cpptest.exe: a C++ program exercising the MSVC x64 C++ personality and
-# _CxxThrowException, both provided by ntdll over the shared unwinder.
-$(CPPTEST): user/cpptest.cpp $(CRT0) $(NTDLL)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -x c++ -fno-rtti -fasync-exceptions -funwind-tables \
-	           -c user/cpptest.cpp -o $(BUILD)/cpptest.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/cpptest.obj $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
-	@echo "  PE    $@"
-
-# tlstest.exe: a C++ program with static thread-local storage, proving the
-# loader builds a per-thread TLS block from the module's .tls template.
-$(TLSTEST): user/tlstest.cpp $(CRT0) $(KERNEL32) $(NTDLL)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -x c++ -fno-rtti -c user/tlstest.cpp -o $(BUILD)/tlstest.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/tlstest.obj $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
-	@echo "  PE    $@"
-
-$(FETCH): user/fetch.c user/fetch_cpu.asm $(CRT0) $(KERNEL32) $(NTDLL)
-	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/fetch.c -o $(BUILD)/fetch.obj
-	$(NASM) -f win64 user/fetch_cpu.asm -o $(BUILD)/fetch_cpu.obj
-	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/fetch.obj $(BUILD)/fetch_cpu.obj \
-	           $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
-	@echo "  PE    $@"
+	$(CLANGWIN) -c user/crt/Crt0.c -o $(CRT0)
 
 # cmd.exe is a normal user-mode PE. Like Windows cmd.exe, filesystem and shell
 # syntax commands are built into the command processor rather than the kernel.
-$(CMD): user/cmd.c $(CMD_PARTS) $(CRT0) $(KERNEL32) $(NTDLL)
+$(CMD): user/cmd/Cmd.c $(CMD_PARTS) $(CRT0) $(KERNEL32) $(NTDLL)
 	@mkdir -p $(BUILD)
-	$(CLANGWIN) -c user/cmd.c -o $(BUILD)/cmd.obj
+	$(CLANGWIN) -c user/cmd/Cmd.c -o $(BUILD)/cmd.obj
 	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
 	           /out:$@ $(BUILD)/cmd.obj $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
 	@echo "  PE    $@"
 
+# Stateless console commands are separate programs. One implementation is
+# linked once and installed under each command/alias name; it selects behavior
+# from argv[0], like a compact multi-call toolset without shell-resident code.
+$(CMDUTIL): user/cmdutils/Cmdutils.c $(CRT0) $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/cmdutils/Cmdutils.c -o $(BUILD)/cmdutils.obj
+	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
+	           /out:$@ $(BUILD)/cmdutils.obj $(CRT0) $(KERNEL32LIB)
+	@echo "  PE    $@"
+
+$(COMMAND_BINS): $(CMDUTIL)
+	cp $(CMDUTIL) $@
+
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): Makefile $(TESTAPP) $(HELLO) $(FILETEST) $(CAT) $(CONSOLETEST) $(ABITEST) $(SEHTEST) $(SEHCRASH) $(SEHFRAME) $(CPPTEST) $(TLSTEST) $(FETCH) $(CMD) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA) user/message.txt
+$(DISK): Makefile $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v SVINDOWS ::
-	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
-	mcopy -i $(DISK) $(HELLO) ::HELLO.EXE
-	mcopy -i $(DISK) $(FILETEST) ::FILETEST.EXE
-	mcopy -i $(DISK) $(CAT) ::CAT.EXE
-	mcopy -i $(DISK) $(CONSOLETEST) ::CONSOLE.EXE
-	mcopy -i $(DISK) $(ABITEST) ::ABITEST.EXE
-	mcopy -i $(DISK) $(SEHTEST) ::SEHTEST.EXE
-	mcopy -i $(DISK) $(SEHCRASH) ::SEHCRASH.EXE
-	mcopy -i $(DISK) $(SEHFRAME) ::SEHFRAME.EXE
-	mcopy -i $(DISK) $(CPPTEST) ::CPPTEST.EXE
-	mcopy -i $(DISK) $(TLSTEST) ::TLSTEST.EXE
-	mcopy -i $(DISK) $(FETCH) ::FETCH.EXE
 	mcopy -i $(DISK) $(CMD) ::CMD.EXE
 	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
 	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
 	mcopy -i $(DISK) $(ADVAPI32) ::ADVAPI32.DLL
 	mcopy -i $(DISK) $(MSVCRT) ::MSVCRT.DLL
 	mcopy -i $(DISK) $(EXTRA) ::EXTRA.DLL
-	mcopy -i $(DISK) user/message.txt ::MESSAGE.TXT
+	mcopy -i $(DISK) $(COMMAND_BINS) ::
+
 	@echo "  DISK  $(DISK)"
 
-$(KERNEL): $(OBJ) kernel/arch/x86_64/linker.ld
+$(KERNEL): $(OBJ) kernel/arch/x86_64/Linker.ld
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -o $@ $(OBJ)
 	@echo "  LD    $@"
 
 iso: $(ISO)
 
-$(ISO): $(KERNEL) boot/grub.cfg
+$(ISO): $(KERNEL) boot/Grub.cfg
 	@mkdir -p $(BUILD)/isodir/boot/grub
 	@cp $(KERNEL) $(BUILD)/isodir/boot/svindowskrnl.elf
-	@cp boot/grub.cfg $(BUILD)/isodir/boot/grub/grub.cfg
+	@cp boot/Grub.cfg $(BUILD)/isodir/boot/grub/grub.cfg
 	grub2-mkrescue -o $@ $(BUILD)/isodir 2>/dev/null
 	@echo "  ISO   $@"
 
@@ -368,47 +259,51 @@ run: run-serial
 run-gui: all
 	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) $(QEMUDISK) -serial stdio
 
-test: all
-	$(PYTHON) tools/qemu_test.py --name regression \
-		--wait-for 'C:\>' \
-		--send $$'set V=RECALL_OK\recho %V%: PASS\r\x1b[A\recho ARROW_EDIT: PASX\x1b[D\x1b[3~S\rdir\rabitest.exe\rsehtest.exe\rsehframe.exe\rcpptest.exe\rtlstest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\rconsole.exe\rfiletest.exe\rfetch.exe\r' \
-		--expect-count 'RECALL_OK: PASS=2' \
-		--expect 'ARROW_EDIT: PASS' \
-		--expect 'MESSAGE.TXT' \
-		--expect 'ABI_TEST: PASS' \
-		--expect 'MUTANT_TEST: PASS' \
-		--expect 'VM_TEST: PASS' \
-		--expect 'SEH_TEST: PASS' \
-		--expect 'SEH_FRAME_TEST: PASS' \
-		--expect 'SEH_FINALLY_TEST: PASS' \
-		--expect 'CPP_EH_TEST: PASS' \
-		--expect 'TLS_TEST: PASS' \
-		--expect 'UNHANDLED_TEST: PASS' \
-		--expect 'CONSOLE_TEST: PASS' \
-		--expect 'FAT32_TEST: PASS' \
-		--expect 'Svindows 0.6.0 x86_64'
+# Host checks exercise the actual kernel implementations with fake hardware.
+# No regression executable is installed in the guest image.
+check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) -std=gnu11 -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=address,undefined -fno-omit-frame-pointer -Ikernel/include \
+	    -Wl,--gc-sections tools/checks/ExecutionChecks.c -o $(BUILD)/checks/execution-checks
+	UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/checks/execution-checks
+	$(HOSTCC) -std=gnu11 -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=address,undefined -fno-omit-frame-pointer -Ikernel/include \
+	    -Wno-multichar -Wl,--gc-sections tools/checks/TimerChecks.c -o $(BUILD)/checks/timer-checks
+	UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/checks/timer-checks
+	$(HOSTCC) -std=gnu11 -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=address,undefined -fno-omit-frame-pointer -Ikernel/include \
+	    -Wl,--gc-sections tools/checks/KernelChecks.c kernel/mm/Vmm.c \
+	    kernel/mm/Multiboot.c kernel/hal/Framebuffer.c kernel/hal/Font9x20.c kernel/hal/Console.c \
+	    kernel/io/BlockCache.c kernel/rtl/Print.c kernel/win32k/SharedHandles.c -o $(BUILD)/checks/kernel-checks
+	UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/checks/kernel-checks
+	$(HOSTCC) -std=gnu11 -O1 -g -pthread -fsanitize=address,undefined \
+	    -fno-omit-frame-pointer -Ikernel/include tools/checks/RuntimeChecks.c \
+	    -o $(BUILD)/checks/runtime-checks
+	UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/checks/runtime-checks
+	$(HOSTCC) -std=gnu11 -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=address,undefined -fno-omit-frame-pointer -Ikernel/include \
+	    -Wl,--gc-sections tools/checks/ConsoleChecks.c kernel/io/Console.c \
+	    -o $(BUILD)/checks/console-checks
+	UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/checks/console-checks
+	$(HOSTCC) -std=gnu11 -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=address,undefined -fno-omit-frame-pointer -Ikernel/include \
+	    -Wl,--gc-sections tools/checks/LoaderChecks.c -o $(BUILD)/checks/loader-checks
+	UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/checks/loader-checks
+	$(HOSTCC) -std=gnu11 -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=address,undefined -fno-omit-frame-pointer -Ikernel/include \
+	    -Wl,--gc-sections tools/checks/Win32kChecks.c -o $(BUILD)/checks/win32k-checks
+	UBSAN_OPTIONS=halt_on_error=1 $(BUILD)/checks/win32k-checks
+
+test: all check
+	python3 tools/QemuSmoke.py
+
+audit:
+	python3 tools/SourceAudit.py
 
 test-release:
-	$(MAKE) CONFIG=release all
+	$(MAKE) clean
 	$(MAKE) CONFIG=release test
-
-test-exceptions: all
-	$(PYTHON) tools/qemu_test.py --name exceptions \
-		--wait-for 'C:\>' \
-		--send $$'sehtest.exe\rsehframe.exe\rcpptest.exe\rtlstest.exe\rsehcrash.exe\recho UNHANDLED_TEST: PASS\r' \
-		--expect 'SEH_TEST: PASS' --expect 'SEH_FRAME_TEST: PASS' \
-		--expect 'SEH_FINALLY_TEST: PASS' \
-		--expect 'CPP_EH_TEST: PASS' \
-		--expect 'TLS_TEST: PASS' \
-		--expect 'UNHANDLED_TEST: PASS'
-
-test-fs-reboot: all
-	$(PYTHON) tools/qemu_test.py --name fs-write \
-		--wait-for 'C:\>' --send $$'filetest.exe\r' \
-		--expect 'FAT32_TEST: PASS'
-	$(PYTHON) tools/qemu_test.py --name fs-reboot \
-		--wait-for 'C:\>' --send $$'type WRITE.TXT\r' \
-		--expect 'FAT32 writes survive close and reopen.'
 
 clean:
 	rm -rf $(BUILD)
