@@ -1,7 +1,8 @@
 <p align="center">
+  <img src="other/Logo.png" alt="Svindows Logo" width="180"> <img width="1280" height="798" alt="image" src="https://github.com/user-attachments/assets/71df715c-e44f-4b46-964a-1b1937211be4" />
 
-  <img src="other/Logo.png" alt="Svindows Logo" width="180"> <img width="1280" height="798" alt="image" src="https://github.com/user-attachments/assets/0900690c-baf4-49fd-950a-02c882753da8" />
 </p>
+
 <h1 align="center">Svindows</h1>
 
 <p align="center">
