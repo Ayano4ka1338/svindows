@@ -1080,6 +1080,42 @@ NTSTATUS FatFlush(void)
     return IoBlockFlush() ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
 }
 
+NTSTATUS FatQueryDiskSpace(UINT32 *sectors_per_cluster,
+                           UINT32 *free_clusters, UINT32 *bytes_per_sector,
+                           UINT32 *total_clusters)
+{
+    if (!g_fat.Mounted)
+        return STATUS_DEVICE_NOT_READY;
+    if (!sectors_per_cluster || !free_clusters || !bytes_per_sector ||
+        !total_clusters)
+        return STATUS_INVALID_PARAMETER;
+    UINT8 sector[ATA_SECTOR_SIZE];
+    UINT32 cached_sector = 0xffffffffu;
+    UINT32 free_count = 0;
+    for (UINT32 cluster = 2; cluster < g_fat.TotalClusters + 2; cluster++) {
+        UINT32 fat_sector = cluster / (ATA_SECTOR_SIZE / sizeof(UINT32));
+        if (fat_sector >= g_fat.FatSectors)
+            return STATUS_DEVICE_NOT_READY;
+        if (fat_sector != cached_sector) {
+            if (!IoBlockReadSectors(g_fat.FatStartLba + fat_sector, 1, sector))
+                return STATUS_DEVICE_NOT_READY;
+            cached_sector = fat_sector;
+        }
+        UINT32 offset = (cluster % (ATA_SECTOR_SIZE / sizeof(UINT32))) * 4;
+        UINT32 entry = (UINT32)sector[offset] |
+                       ((UINT32)sector[offset + 1] << 8) |
+                       ((UINT32)sector[offset + 2] << 16) |
+                       ((UINT32)sector[offset + 3] << 24);
+        if (!(entry & 0x0fffffffu))
+            free_count++;
+    }
+    *sectors_per_cluster = g_fat.SectorsPerCluster;
+    *free_clusters = free_count;
+    *bytes_per_sector = ATA_SECTOR_SIZE;
+    *total_clusters = g_fat.TotalClusters;
+    return STATUS_SUCCESS;
+}
+
 static void lfn_put_fragment(UINT16 out[260], const FAT_LFN_ENTRY *lfn)
 {
     UINT32 ordinal = lfn->Order & 0x1f;
@@ -1288,17 +1324,40 @@ static NTSTATUS fat_resolve_parent(const char *path, UINT32 *directory,
     }
 }
 
-static void from_83(const UINT8 in[11], char out[13])
+/* FAT stores short names as uppercase bytes.  NTRes bits 3 and 4 preserve
+ * an all-lowercase base name / extension without a VFAT long-name record.
+ * Readdir consumers (including Imlib2) need the user-visible case, not the
+ * on-disk uppercase alias: "png.so" is stored as "PNG     SO " + 0x18. */
+#define FAT_NTRES_LOWER_BASE 0x08u
+#define FAT_NTRES_LOWER_EXT  0x10u
+
+static char fat_apply_nt_case(char ch, BOOLEAN lower)
+{
+    if (lower && ch >= 'A' && ch <= 'Z')
+        ch = (char)(ch + ('a' - 'A'));
+    return ch;
+}
+
+static void from_83_case(const UINT8 in[11], UINT8 nt_reserved,
+                         char out[13])
 {
     int n = 0;
+    BOOLEAN lower_base = !!(nt_reserved & FAT_NTRES_LOWER_BASE);
+    BOOLEAN lower_ext = !!(nt_reserved & FAT_NTRES_LOWER_EXT);
     for (int i = 0; i < 8 && in[i] != ' '; i++)
-        out[n++] = (char)in[i];
+        out[n++] = fat_apply_nt_case((char)in[i], lower_base);
     if (in[8] != ' ') {
         out[n++] = '.';
         for (int i = 8; i < 11 && in[i] != ' '; i++)
-            out[n++] = (char)in[i];
+            out[n++] = fat_apply_nt_case((char)in[i], lower_ext);
     }
     out[n] = 0;
+}
+
+/* ShortName is deliberately kept uppercase for Win32 8.3 compatibility. */
+static void from_83(const UINT8 in[11], char out[13])
+{
+    from_83_case(in, 0, out);
 }
 
 NTSTATUS FatEnumerateDirectory(const char *path, UINT32 wanted,
@@ -1319,7 +1378,10 @@ NTSTATUS FatEnumerateDirectory(const char *path, UINT32 wanted,
         UINT32 parent; char leaf[260]; FAT_DIRENT dirent;
         NTSTATUS status = fat_resolve_parent(path, &parent, leaf);
         if (!NT_SUCCESS(status) || !fat_find(parent, leaf, &dirent, NULL) ||
-            !(dirent.Attr & 0x10)) return STATUS_OBJECT_PATH_NOT_FOUND;
+            !(dirent.Attr & 0x10)) {
+            ExFreePool(buf);
+            return STATUS_OBJECT_PATH_NOT_FOUND;
+        }
         directory = ((UINT32)dirent.FirstClusterHigh << 16) |
                     dirent.FirstClusterLow;
     }
@@ -1364,8 +1426,12 @@ NTSTATUS FatEnumerateDirectory(const char *path, UINT32 wanted,
                     return STATUS_BUFFER_TOO_SMALL;
                 }
             } else {
-                from_83(e->Name, out->Name);
+                /* Preserve FAT's NT lowercase flags for ordinary 8.3 names.
+                 * Linux readdir and libraries such as Imlib2 compare file
+                 * suffixes case-sensitively (for example, ".so"). */
+                from_83_case(e->Name, e->NtReserved, out->Name);
             }
+            from_83(e->Name, out->ShortName);
             out->Size = e->FileSize;
             out->Attributes = e->Attr;
             out->WriteDate = e->WriteDate;
@@ -1443,6 +1509,7 @@ NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size,
         out_info->Attributes = entry.Attr;
         out_info->WriteDate = entry.WriteDate;
         out_info->WriteTime = entry.WriteTime;
+        from_83(entry.Name, out_info->ShortName);
     }
     KeLog("[io]   loaded '%s' (%lu bytes) from disk\n", name, (unsigned long)size);
     return STATUS_SUCCESS;
@@ -1477,6 +1544,34 @@ NTSTATUS FatQueryPath(const char *name, FAT_FIND_DATA *out_info)
     out_info->Attributes = entry.Attr;
     out_info->WriteDate = entry.WriteDate;
     out_info->WriteTime = entry.WriteTime;
+    from_83(entry.Name, out_info->ShortName);
+    return STATUS_SUCCESS;
+}
+
+static BOOLEAN fat_write_dirent(FAT_ENTRY_LOCATION location,
+                                const FAT_DIRENT *entry);
+
+NTSTATUS FatSetFileDateTime(const char *name, UINT16 date, UINT16 time)
+{
+    if (!g_fat.Mounted)
+        return STATUS_DEVICE_NOT_READY;
+    UINT32 directory;
+    char leaf[260];
+    NTSTATUS status = fat_resolve_parent(name, &directory, leaf);
+    if (!NT_SUCCESS(status))
+        return status;
+    FAT_DIRENT entry;
+    FAT_ENTRY_LOCATION location;
+    if (!fat_find(directory, leaf, &entry, &location) || (entry.Attr & 0x10))
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    entry.WriteDate = date;
+    entry.WriteTime = time;
+    if (!IoBlockBeginTransaction())
+        return STATUS_INTERNAL_ERROR;
+    if (!fat_write_dirent(location, &entry) || !IoBlockCommitTransaction()) {
+        IoBlockRollbackTransaction();
+        return STATUS_DEVICE_NOT_READY;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1950,8 +2045,22 @@ NTSTATUS FatRenamePath(const char *old_name, const char *new_name)
     FAT_ENTRY_LOCATION old_location, new_location;
     if (!fat_find(old_parent, old_leaf, &entry, &old_location))
         return STATUS_OBJECT_NAME_NOT_FOUND;
-    if (fat_find(new_parent, new_leaf, &collision, NULL))
-        return STATUS_OBJECT_NAME_COLLISION;
+    if (fat_find(new_parent, new_leaf, &collision, &new_location)) {
+        /* POSIX rename replaces an existing regular file.  Xorg relies on
+         * this when rotating Xorg.0.log to Xorg.0.log.old on every start.
+         * FAT's directory-entry writer cannot overwrite a live entry, so
+         * remove the old destination first.  A rename onto itself is a
+         * successful no-op, and directories are never replaced here. */
+        if (old_parent == new_parent &&
+            old_location.Cluster == new_location.Cluster &&
+            old_location.Index == new_location.Index)
+            return STATUS_SUCCESS;
+        if (collision.Attr & 0x10)
+            return STATUS_OBJECT_NAME_COLLISION;
+        status = FatDeleteFile(new_name);
+        if (!NT_SUCCESS(status))
+            return status;
+    }
 
     UINT32 moved_cluster = ((UINT32)entry.FirstClusterHigh << 16) |
                            entry.FirstClusterLow;

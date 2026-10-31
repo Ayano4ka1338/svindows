@@ -228,14 +228,10 @@ static BOOLEAN dispatch_user_exception(PKTRAP_FRAME f)
     f->rsp = dispatch_rsp;
     f->rcx = record_va;
     f->rdx = context_va;
-    KeLog("[seh] dispatch code=0x%08lx address=%p tid=%lu\n",
-          (unsigned long)(UINT32)r->ExceptionCode,
-          (void *)r->ExceptionAddress,
-          (unsigned long)thread->ThreadId);
     return TRUE;
 }
 
-static void dump_frame(PKTRAP_FRAME f)
+static void dump_frame(PKTRAP_FRAME f, UINT64 fault_address)
 {
     const char *name = f->vector < 32 ? g_exception_names[f->vector]
                                       : "(external interrupt)";
@@ -245,9 +241,20 @@ static void dump_frame(PKTRAP_FRAME f)
     KeLog("\n=== TRAP: vector %lu (%s), error_code=0x%lx ===\n",
           (unsigned long)f->vector, name, (unsigned long)f->error_code);
 
-    KeLog("RIP=%p  CS=0x%lx  RFLAGS=0x%lx\n",
-          (void *)f->rip, (unsigned long)f->cs, (unsigned long)f->rflags);
-    KeLog("RSP=%p  SS=0x%lx\n", (void *)f->rsp, (unsigned long)f->ss);
+    KeLog("frame=%p RIP=%p  CS=0x%lx  RFLAGS=0x%lx\n",
+          (void *)f, (void *)f->rip, (unsigned long)f->cs,
+          (unsigned long)f->rflags);
+    /* On a same-CPL exception the CPU does not push RSP/SS.  Those two
+       trailing KTRAP_FRAME fields therefore do not exist in memory; recover
+       the interrupted RSP from the known hardware/stub frame geometry. */
+    UINT64 interrupted_rsp = (f->cs & 3u) == 3u ? f->rsp :
+                             (UINT64)(ULONG_PTR)f + 20u * sizeof(UINT64);
+    if ((f->cs & 3u) == 3u)
+        KeLog("RSP=%p SS=0x%lx (CPU-saved)\n", (void *)interrupted_rsp,
+              (unsigned long)f->ss);
+    else
+        KeLog("RSP=%p (reconstructed kernel RSP)\n",
+              (void *)interrupted_rsp);
 
     KeLog("process=%s pid=%lu thread=%s tid=%lu\n",
           process && process->Name ? process->Name : "?",
@@ -261,7 +268,6 @@ static void dump_frame(PKTRAP_FRAME f)
 
     if (f->vector == 14) { /* #PF: CR2 holds the faulting linear address */
         UINT64 error = f->error_code;
-        UINT64 fault_address = read_cr2();
         KeLog("CR2=%p page-fault=%s %s %s%s%s%s%s\n",
               (void *)fault_address,
               error & 1 ? "protection" : "not-present",
@@ -283,11 +289,16 @@ static void dump_frame(PKTRAP_FRAME f)
     KeLog("R12=%p R13=%p R14=%p R15=%p\n",
           (void *)f->r12, (void *)f->r13, (void *)f->r14, (void *)f->r15);
 
-    /* Debug aid: raw bytes at the faulting RIP and the top of the stack. */
-    if (f->rip && MmIsUserAddress(f->rip) && MmProbeForRead(f->rip, 16)) {
+    /* The instruction bytes are taken from the actual executing image, not
+       from source/debug line mappings which may be stale after ZIP updates. */
+    if (f->rip && (((f->cs & 3u) == 0u) ||
+                   (MmIsUserAddress(f->rip) && MmProbeForRead(f->rip, 4)))) {
         const volatile UINT8 *ip = (const volatile UINT8 *)f->rip;
-        KeLog("code@RIP:");
-        for (int i = 0; i < 16; i++)
+        UINT32 count = (f->cs & 3u) == 3u ? 4u :
+                       PAGE_SIZE - (UINT32)(f->rip & (PAGE_SIZE - 1u));
+        if (count > 8u) count = 8u;
+        KeLog("code@RIP (live):");
+        for (UINT32 i = 0; i < count; i++)
             KeLog(" %02x", ip[i]);
         KeLog("\n");
     }
@@ -327,6 +338,9 @@ static void dump_frame(PKTRAP_FRAME f)
 
 void KiDispatchTrap(PKTRAP_FRAME frame)
 {
+    /* CR2 is volatile across page faults. Snapshot it before any diagnostic
+       helper or exception dispatch can touch pageable/user memory. */
+    UINT64 fault_address = frame && frame->vector == 14 ? read_cr2() : 0;
     /* Hardware IRQs (remapped to vectors 32..47) go to the HAL, which EOIs the
      * PIC and runs the registered handler (e.g. the scheduler tick). */
     if (frame->vector >= IRQ_BASE_VECTOR && frame->vector < IRQ_BASE_VECTOR + 16) {
@@ -342,7 +356,7 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
     if (frame->vector < 32) {
         if ((frame->cs & 3) == 3 && dispatch_user_exception(frame))
             return;
-        dump_frame(frame);
+        dump_frame(frame, fault_address);
         if ((frame->cs & 3) == 3) {
             const UINT64 cfg_trace_va = 0x0000000000088ff8ULL;
             if (MmProbeForRead(cfg_trace_va, sizeof(UINT64)))
@@ -360,6 +374,6 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
     }
 
     /* Any other vector is unexpected. */
-    dump_frame(frame);
+    dump_frame(frame, fault_address);
     KeLog("Ignoring unexpected interrupt %lu\n", (unsigned long)frame->vector);
 }

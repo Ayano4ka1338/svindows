@@ -12,7 +12,7 @@ static ULONGLONG read_teb_qword(ULONGLONG offset)
     assert(offset == 0x48);
     return current_tid;
 }
-#include "../../user/ntdll/Rtl/CriticalSections.inc"
+#include "../../user/w/ntdll/Rtl/CriticalSections.inc"
 
 static RTL_CRITICAL_SECTION_NT lock;
 static unsigned counter;

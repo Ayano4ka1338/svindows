@@ -77,6 +77,11 @@ UINT64 LdrLoadLibrary(const char *name);
  * name and base (for user-stack symbolization in diagnostics). */
 BOOLEAN LdrDescribeUserAddress(UINT64 addr, const char **name_out,
                                UINT64 *base_out);
+/* Query the PE section containing a user address. Range is page aligned and
+ * protection is the section's initial PAGE_* protection. */
+BOOLEAN LdrQueryImageSection(UINT64 addr, UINT64 *allocation_base,
+                             UINT64 *section_base, UINT64 *section_size,
+                             UINT32 *protection);
 
 /* As above, and also report the closest named, non-forwarded PE export at or
  * below @addr.  symbol_out is NULL when the module has no suitable export;
@@ -93,6 +98,13 @@ UINT32 LdrTlsIndexCount(void);
 /* Build the thread's TLS block vector (one block per TLS module, copied from
  * each module's .tls template) and hang it off TEB.ThreadLocalStoragePointer at
  * @teb_va + 0x58. Must run with the process address space active. */
-void LdrApplyThreadTls(UINT64 teb_va);
+NTSTATUS LdrApplyThreadTls(UINT64 teb_va);
+/* Same operation, additionally reporting the contiguous page span owned by
+ * this thread. The output is zero when no static TLS modules are present. */
+NTSTATUS LdrApplyThreadTlsWithAllocation(UINT64 teb_va,
+                                         UINT64 *base_out, SIZE_T *pages_out);
+/* Undo a successful allocation during thread-creation failure, before another
+ * TLS allocation can occur. */
+void LdrRollbackThreadTls(UINT64 base, SIZE_T pages);
 
 #endif /* _SVINDOWS_LDR_H_ */

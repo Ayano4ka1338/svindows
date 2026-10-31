@@ -138,3 +138,13 @@ NTSTATUS ObLookupObjectByName(const char *path, POBJECT *out_object)
         p++; /* skip the '\' */
     }
 }
+
+void ObRemoveObjectName(POBJECT object)
+{
+    POBJECT_HEADER header = ObHeaderFromObject(object);
+    if (!header->ParentDirectory) return;
+    RemoveEntryList(&header->NamespaceEntry);
+    header->ParentDirectory = NULL;
+    header->Name = NULL;
+    ObDereferenceObject(object); /* namespace's reference */
+}

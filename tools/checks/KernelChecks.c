@@ -20,6 +20,38 @@ static UINT64 pdpt[512] __attribute__((aligned(4096)));
 static UINT64 pd[512] __attribute__((aligned(4096)));
 static UINT64 pt[512] __attribute__((aligned(4096)));
 UINT64 MmGetCurrentAddressSpace(void) { return (UINT64)root; }
+static SIZE_T released_pages;
+void MmFreePages(UINT64 phys, SIZE_T count)
+{
+    assert(phys && count == 1);
+    released_pages += count;
+}
+
+static void check_thread_user_pages(void)
+{
+    static UINT64 foreign_root[512] __attribute__((aligned(4096)));
+    static UINT64 foreign_pdpt[512] __attribute__((aligned(4096)));
+    static UINT64 foreign_pd[512] __attribute__((aligned(4096)));
+    static UINT64 foreign_pt[512] __attribute__((aligned(4096)));
+    static UINT8 foreign_pages[8192] __attribute__((aligned(4096)));
+    const UINT64 rw = PTE_PRESENT | PTE_USER | PTE_WRITE;
+    UINT64 base = 0x30000000;
+    foreign_root[0] = (UINT64)foreign_pdpt | rw;
+    foreign_pdpt[0] = (UINT64)foreign_pd | rw;
+    foreign_pd[(base >> 21) & 511] = (UINT64)foreign_pt | rw;
+    foreign_pt[0] = (UINT64)foreign_pages | rw;
+    foreign_pt[1] = (UINT64)(foreign_pages + PAGE_SIZE) | rw;
+    pt[0] = (UINT64)foreign_pages | rw;
+    SIZE_T before = released_pages;
+    MmReleaseUserPagesInAddressSpace((UINT64)foreign_root, base, 2);
+    assert(released_pages == before + 2);
+    assert(foreign_pt[0] == 0 && foreign_pt[1] == 0);
+    assert(pt[0] != 0); /* the current process was untouched */
+    MmReleaseUserPagesInAddressSpace((UINT64)foreign_root, base, 2);
+    MmReleaseUserPagesInAddressSpace((UINT64)foreign_root, MM_USER_MAX, 2);
+    assert(released_pages == before + 2);
+    puts("PASS thread user-page cleanup across address spaces and duplicate release");
+}
 
 static void check_shared_handles(void)
 {
@@ -69,6 +101,32 @@ static void check_shared_handles(void)
 /* Fake disk can simulate a transfer which writes bytes before failing. */
 static UINT8 disk[128][ATA_SECTOR_SIZE];
 static int fail_read;
+static UINT32 irp_completions;
+static void check_irp_completion(IO_DEVICE_OBJECT *device, IO_IRP *irp,
+                                 void *context)
+{
+    assert(device && irp->Completed && context == &irp_completions);
+    ++irp_completions;
+}
+static NTSTATUS check_irp_dispatch(IO_DEVICE_OBJECT *device, IO_IRP *irp)
+{
+    IoCompleteRequest(device, irp, STATUS_SUCCESS, 512);
+    IoCompleteRequest(device, irp, STATUS_SUCCESS, 1024);
+    return STATUS_SUCCESS;
+}
+static void check_irp(void)
+{
+    IO_DRIVER_OBJECT driver = {{check_irp_dispatch, NULL, NULL}};
+    IO_DEVICE_OBJECT device = {&driver, NULL};
+    IO_IRP irp = {0};
+    irp.Completion = check_irp_completion;
+    irp.CompletionContext = &irp_completions;
+    assert(IoCallDriver(&device, &irp) == STATUS_SUCCESS);
+    assert(irp.Completed && irp.Information == 512 && irp_completions == 1);
+    irp.Stack.MajorFunction = IRP_MJ_WRITE;
+    assert(IoCallDriver(&device, &irp) == STATUS_NOT_SUPPORTED);
+    puts("PASS IRP dispatch, one-shot completion and status propagation");
+}
 BOOLEAN AtaReadSectors(UINT32 lba, UINT8 count, void *buffer)
 {
     if (lba >= 128 || count != 1) return FALSE;
@@ -221,6 +279,8 @@ static void check_caret(void)
 
 int main(void)
 {
+    check_thread_user_pages();
+    check_irp();
     check_paging(); check_shared_handles(); check_multiboot(); check_graphics(); check_cache(); check_caret();
     char text[32];
     assert(RtlFormat(text, sizeof(text), "tail%") == 5);

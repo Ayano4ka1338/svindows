@@ -42,8 +42,8 @@ mb_header_start:
     dw  5                       ; type = framebuffer
     dw  1                       ; flags: optional (fall back if unavailable)
     dd  20                      ; size
-    dd  1024                    ; preferred width
-    dd  768                     ; preferred height
+    dd  1920                    ; preferred width
+    dd  1440                    ; preferred height
     dd  32                      ; preferred bits per pixel
 
     ; End tag (type = 0, size = 8).
@@ -203,8 +203,8 @@ higher_half_start:
 ; Kernel stack (higher-half BSS).
 ;
 ; The PE loader recurses once per dependency edge (LdrpLoadModule ->
-; LdrResolveImports -> LdrpLoadModule, plus forwarder chains), so the real
-; Explorer dependency graph - around a hundred modules deep in places - needs
+; LdrResolveImports -> LdrpLoadModule, plus forwarder chains), so large
+; dependency graphs need
 ; far more than the 16 KiB this used to be. Overflowing here is silent and
 ; vicious: the stack sits in .bss directly above the pool's own globals, so an
 ; overflow rewrites the allocator's free list and the machine dies far from the

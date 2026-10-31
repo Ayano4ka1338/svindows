@@ -26,6 +26,13 @@
  */
 void W32kInitializeServerInfo(void);
 
+/* Map the shared SERVERINFO page read-only into the process being created.
+ * Called with the new address space active; without it GetSystemMetrics and
+ * GetSysColor read a zeroed page and answer nonsense. */
+BOOLEAN W32kMapServerInfo(void);
+UINT64 NtUserGetSystemMetrics(UINT64 *args);
+UINT64 NtUserGetSysColor(UINT64 *args);
+
 /* Zero only the new process's mapped client table, with its CR3 active.
  * Global kernel object ownership is preserved. */
 void W32kInitializeGdi(void);
@@ -38,10 +45,9 @@ void W32kCleanupWindowDc(struct _KPROCESS *process, UINT64 hwnd);
 BOOLEAN W32kClearSharedHandle(struct _KPROCESS *process, BOOLEAN gdi, UINT16 index);
 
 /*
- * Create a device context that draws to the screen inside a window's
- * rectangle, and return its GDI handle (0 on failure). Drawing is clipped to
- * the rectangle and coordinates are relative to it, which is what a client
- * DC's coordinate space means.
+ * Create a device context over a retained window client raster, or the screen
+ * for hwnd == 0. Window coordinates remain local across movement and drawing
+ * into covered regions is retained for later composition.
  */
 UINT64 W32kCreateWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
                           INT32 height);
@@ -57,6 +63,69 @@ UINT64 W32kAcquireWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
 /* Drop a window's cached device context (on window destruction). */
 void W32kDestroyWindowDc(UINT64 hwnd);
 
+/*
+ * The window manager (win32k/UserScreen.inc).
+ *
+ * It owns the desktop backdrop, the z-order, the Windows 10 non-client frame,
+ * the pointer and input routing. Window geometry lives there and nowhere else;
+ * the services in UserWindows.inc forward geometry changes into it and ask it
+ * for rectangles instead of keeping a second copy.
+ */
+
+/* Windows 10 frame metrics at 100% scaling, used by sizing and painting. */
+#define W32K_CAPTION_HEIGHT 30
+#define W32K_BUTTON_WIDTH   45
+#define W32K_BORDER         1
+#define W32K_TITLE_CHARS    80
+
+#define W32K_KIND_NONE     0
+#define W32K_KIND_TOPLEVEL 1
+#define W32K_KIND_DESKTOP  2  /* WorkerW/Progman: the wallpaper layer      */
+#define W32K_KIND_CHILD    4
+#define W32K_KIND_TASKBAR  3  /* Shell_TrayWnd: an always-on-top strip     */
+
+void W32kScreenCompose(void);
+void W32kScreenDamage(INT32 x, INT32 y, INT32 width, INT32 height);
+BOOLEAN W32kBeginWindowPaint(UINT64 hdc, UINT64 hwnd);
+BOOLEAN W32kEndWindowPaint(UINT64 hdc, UINT64 hwnd);
+void W32kCopyWindowClient(UINT16 slot, UINT32 *target, UINT32 stride,
+                          INT32 x, INT32 y, INT32 width, INT32 height);
+BOOLEAN W32kScreenPixelVisible(UINT64 hwnd, INT32 x, INT32 y);
+BOOLEAN W32kScreenRectUnobscured(UINT64 hwnd, INT32 x, INT32 y,
+                                 INT32 width, INT32 height);
+void W32kSetFocus(UINT64 hwnd);
+
+/* The window manager classifies a window from its class name and style:
+ * WorkerW/Progman become the wallpaper layer, Shell_TrayWnd a topmost strip. */
+UINT8 W32kClassifyWindow(const UINT16 *class_name, UINT32 style);
+void W32kScreenWindowCreated(UINT16 slot, const UINT16 *title, UINT32 style,
+                             INT32 x, INT32 y, UINT32 w, UINT32 h, UINT8 kind);
+void W32kScreenWindowDestroyed(UINT16 slot);
+void W32kScreenSetParent(UINT16 slot, UINT16 parent);
+UINT16 W32kWindowParent(UINT16 slot);
+UINT16 W32kRootSlot(UINT16 slot);
+void W32kScreenSetTitle(UINT16 slot, const UINT16 *title);
+void W32kSetWindowText(UINT64 hwnd, const UINT16 *text);
+void W32kShowWindow(UINT64 hwnd, UINT32 command);
+void W32kMoveWindow(UINT64 hwnd, INT32 x, INT32 y, UINT32 width, UINT32 height);
+void W32kRaiseSlot(UINT16 slot);
+void W32kInvalidateFrame(UINT16 slot);
+
+BOOLEAN W32kWindowExists(UINT16 slot);
+BOOLEAN W32kWindowRect(UINT16 slot, INT32 *x, INT32 *y, UINT32 *width,
+                       UINT32 *height);
+void W32kClientOrigin(UINT16 slot, INT32 *x, INT32 *y, INT32 *width,
+                      INT32 *height);
+UINT16 W32kActiveSlot(void);
+BOOLEAN W32kGetRect(UINT64 hwnd, INT32 *rect, BOOLEAN client);
+
+/* Input arrives from the HAL through the kernel input worker. */
+void W32kInputMouse(INT32 x, INT32 y, UINT8 buttons);
+void W32kInputKey(UINT16 event);
+void W32kPostCharacter(UINT16 character);
+/* TRUE when the focused window manager should receive keyboard events. */
+BOOLEAN W32kKeyboardOwner(void);
+
 /* The win32k system services, dispatched from KiServiceTable. */
 UINT64 NtGdiGetEntry(UINT64 *args);
 UINT64 NtGdiCreateSolidBrush(UINT64 *args);
@@ -67,6 +136,7 @@ UINT64 NtGdiSelectBitmap(UINT64 *args);
 UINT64 NtGdiDeleteObjectApp(UINT64 *args);
 UINT64 NtGdiPatBlt(UINT64 *args);
 UINT64 NtGdiBitBlt(UINT64 *args);
+UINT64 NtGdiBlitUserBuffer(UINT64 *args);
 UINT64 NtGdiExtTextOutW(UINT64 *args);
 UINT64 NtGdiGetTextMetricsW(UINT64 *args);
 UINT64 NtGdiGetTextExtent(UINT64 *args);
@@ -85,5 +155,7 @@ UINT64 NtGdiCreateRectRgn(UINT64 *args);
 UINT64 NtGdiCreatePen(UINT64 *args);
 UINT64 NtGdiGetDeviceCaps(UINT64 *args);
 UINT64 NtGdiGetCurrentDpiInfo(UINT64 *args);
+
+void W32kActivateWindow(UINT64 hwnd);
 
 #endif /* _SVINDOWS_WIN32K_H_ */

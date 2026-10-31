@@ -36,7 +36,7 @@ BOOLEAN GfxInitialize(void)
     UINT64 size = (UINT64)GfxFramebuffer.Pitch * GfxFramebuffer.Height;
     for (UINT64 off = 0; off < size; off += PAGE_SIZE) {
         if (!MmMapPage((UINT64)(ULONG_PTR)MmPhysToVirt(phys + off), phys + off,
-                       PTE_WRITE)) {
+                       PTE_WRITE | PTE_PCD | PTE_PWT)) {
             GfxFramebuffer.Base = NULL;
             return FALSE;
         }

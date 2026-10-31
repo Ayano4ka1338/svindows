@@ -34,6 +34,7 @@
 #include <svindows/Ps.h>
 #include <svindows/Mm.h>
 #include <svindows/Gfx.h>
+#include <svindows/UiFont.h>
 #include <svindows/Ex.h>
 #include <svindows/Ke.h>
 #include <svindows/Rtl.h>
@@ -43,5 +44,6 @@ extern const UINT8 Font9x20[95][20][5];
 
 
 #include "gdi/Objects.inc"
+#include "gdi/WindowSurfaces.inc"
 #include "gdi/Drawing.inc"
 #include "gdi/Device.inc"

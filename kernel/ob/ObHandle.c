@@ -81,9 +81,11 @@ static void release_handle_entry(HANDLE_ENTRY *entry)
     POBJECT_HEADER header = ObHeaderFromObject(object);
     entry->Object = NULL;
     entry->GrantedAccess = 0;
-    InterlockedDecrement(&header->HandleCount);
+    LONG handles = InterlockedDecrement(&header->HandleCount);
     if (header->Type->TotalHandles)
         header->Type->TotalHandles--;
+    if (handles == 0 && header->Type->UnlinkNameOnLastHandle)
+        ObRemoveObjectName(object);
     ObDereferenceObject(object);
 }
 
@@ -178,8 +180,17 @@ NTSTATUS ObDuplicateHandleToTable(HANDLE source,
 NTSTATUS ObReferenceObjectByHandle(HANDLE handle, ACCESS_MASK desired,
                                    POBJECT_TYPE type, POBJECT *out_object)
 {
+    return ObReferenceObjectByHandleInTable(current_handle_table(), handle,
+                                             desired, type, out_object, NULL);
+}
+
+NTSTATUS ObReferenceObjectByHandleInTable(POB_HANDLE_TABLE table,
+                                          HANDLE handle, ACCESS_MASK desired,
+                                          POBJECT_TYPE type,
+                                          POBJECT *out_object,
+                                          ACCESS_MASK *granted_access)
+{
     UINT32 index;
-    POB_HANDLE_TABLE table = current_handle_table();
     if (!out_object || !table || !handle_to_index(handle, &index))
         return STATUS_INVALID_HANDLE;
 
@@ -203,8 +214,37 @@ NTSTATUS ObReferenceObjectByHandle(HANDLE handle, ACCESS_MASK desired,
     }
     ObReferenceObject(entry->Object);
     *out_object = entry->Object;
+    if (granted_access) *granted_access = entry->GrantedAccess;
     KiIrqRestore(flags);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS ObDuplicateHandleBetweenTables(POB_HANDLE_TABLE source_table,
+                                         HANDLE source_handle,
+                                         POB_HANDLE_TABLE target_table,
+                                         ACCESS_MASK desired_access,
+                                         BOOLEAN same_access,
+                                         BOOLEAN close_source,
+                                         HANDLE *out_handle)
+{
+    if (!target_table || !out_handle) return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    ACCESS_MASK source_access;
+    NTSTATUS status = ObReferenceObjectByHandleInTable(
+        source_table, source_handle, 0, NULL, &object, &source_access);
+    if (!NT_SUCCESS(status)) return status;
+    ACCESS_MASK granted = source_access & GENERIC_ALL ? ~(ACCESS_MASK)0 :
+                                                    source_access;
+    ACCESS_MASK target_access = same_access ? source_access : desired_access;
+    if ((target_access & granted) != target_access)
+        status = STATUS_ACCESS_DENIED;
+    else
+        status = ObCreateHandleInTable(target_table, object,
+                                        target_access, out_handle);
+    if (NT_SUCCESS(status) && close_source)
+        ObCloseHandleForObject(source_table, source_handle, object);
+    ObDereferenceObject(object);
+    return status;
 }
 
 NTSTATUS ObCloseHandle(HANDLE handle)

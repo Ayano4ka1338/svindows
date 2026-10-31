@@ -21,8 +21,22 @@ def main():
                 command += ["-std=gnu11", "-mgeneral-regs-only", "-Ikernel/include",
                             "-Wno-multichar", "-Xanalyzer", "-analyzer-disable-checker",
                             "-Xanalyzer", "core.FixedAddressDereference"]
+            elif source.relative_to(ROOT).parts[:2] == ("user", "w"):
+                command += ["--target=x86_64-pc-windows-msvc", "-Iuser/w/include",
+                            "-Iuser/w/gdi32", "-Iuser/w/user32", "-Iuser/w/uxtheme",
+                            "-Iuser/w/comctl32"]
+                if source.parent.name == "gdi32":
+                    command.append("-DSV_GDI32_BUILD")
+                elif "user32" in source.parts:
+                    command.append("-DSV_USER32_BUILD")
+                elif source.parent.name == "uxtheme":
+                    command.append("-DSV_UXTHEME_BUILD")
+                elif "comctl32" in source.parts:
+                    command.append("-DSV_COMCTL32_BUILD")
             else:
-                command += ["--target=x86_64-pc-windows-msvc", "-Iuser/include"]
+                # Linux guest fixtures use the SysV ABI and inline syscall
+                # assembly. DOS fixtures are assembly-only at present.
+                command += ["--target=x86_64-unknown-linux-gnu", "-std=gnu11"]
             command.append(str(source.relative_to(ROOT)))
             result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
             count += 1

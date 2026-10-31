@@ -50,11 +50,15 @@ enum {
     ConsoleControlSetCursorInfo,
     ConsoleControlFillCharacter,
     ConsoleControlFillAttribute,
+    ConsoleControlSetInputMode,
 };
 
 void ConInitialize(void);
+void ConRedraw(void);
 void ConQueueInputCharacter(char character);
 SIZE_T ConRead(void *buffer, SIZE_T length);
+SIZE_T ConTryRead(void *buffer, SIZE_T length);
+BOOLEAN ConInputAvailable(void);
 SIZE_T ConWrite(const void *buffer, SIZE_T length);
 /* Append kernel boot text to the process-visible screen buffer without
  * sending it to the serial stream a second time. */

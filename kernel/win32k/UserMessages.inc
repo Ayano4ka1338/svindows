@@ -26,7 +26,7 @@ typedef struct _USER_MSG_LOCAL {
 
 /*
  * Per-thread posted-message queues. Real USER owns a queue per GUI thread;
- * cross-thread hand-offs (explorer's desktop bootstrap posts to the creating
+ * cross-thread hand-offs (a desktop bootstrap posts to the creating
  * thread) only work if the posted message cannot be consumed by another
  * thread's GetMessage. Threads are few, so queues are keyed by thread id.
  */
@@ -39,6 +39,7 @@ typedef struct _USER_MSG_QUEUE {
     USER_MSG_LOCAL Msgs[USER_MESSAGE_QUEUE_CAPACITY];
     UINT32 Head;
     UINT32 Tail;
+    UINT8 KeyState[256];
     /* The thread's USER "input event": a notification event ring 3 waits on
      * through MsgWaitForMultipleObjects. Created lazily the first time the
      * thread asks for it, signaled while the queue is non-empty. */
@@ -92,6 +93,7 @@ static void KiUserSyncInputEvent(USER_MSG_QUEUE *queue)
 static UINT32 g_window_owner[128];
 static PKPROCESS g_window_process[128];
 static UINT16 g_window_generation[128];
+static BOOLEAN g_window_destroying[128];
 static void KiUserDropWindow(UINT16 slot);
 
 static UINT64 KiUserWindowHandle(UINT16 slot)
@@ -211,9 +213,9 @@ static UINT8 g_user_mouse_buttons;
 
 void KiUserQueueCharacter(UINT16 character)
 {
-    if (!g_user_active_hwnd)
-        return;
-    KiUserEnqueueMessage(g_user_active_hwnd, WM_CHAR, character, 1, 0, 0);
+    /* Characters go to the focused window; the window manager decides which
+     * one that is, and drops the character when no window has focus. */
+    W32kPostCharacter(character);
 }
 
 void KiUserQueueMouse(INT32 x, INT32 y, UINT8 buttons)
@@ -303,6 +305,12 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
     *out = queue->Msgs[queue->Tail];
     if (remove) {
         queue->Tail = (queue->Tail + 1) % USER_MESSAGE_QUEUE_CAPACITY;
+        if ((out->Message == 0x0100 || out->Message == 0x0101) && out->WParam < 256)
+            queue->KeyState[out->WParam] = out->Message == 0x0100;
+        if (out->Message >= 0x0200 && out->Message <= 0x020A) {
+            queue->KeyState[0x10] = !!(out->WParam & 4);
+            queue->KeyState[0x11] = !!(out->WParam & 8);
+        }
         KiUserSyncInputEvent(queue);
     }
     KiIrqRestore(flags);
@@ -427,7 +435,7 @@ static UINT64 NtUserRegisterWindowMessage(UINT64 *a)
 {
     /* NtUserRegisterWindowMessage(PUNICODE_STRING MessageName): the id must be
      * the same for every caller that asks for the same string, which is what
-     * makes cross-process shell messages (Shell_TrayWnd's "TaskbarCreated" and
+     * makes cross-process shell convention messages (Shell_TrayWnd's "TaskbarCreated" and
      * friends) work at all. Interning gives that for free. */
     WCHAR name[USER_ATOM_CHARS];
     UINT32 n = KiCaptureAtomName(a[0], name, USER_ATOM_CHARS);
@@ -448,7 +456,7 @@ static UINT64 NtUserSystemParametersInfo(UINT64 *a)
     KeLog("[user] NtUserSystemParametersInfo(action=0x%lx, param=%lu, out=%p, flags=0x%lx)\n",
           (unsigned long)a[0], (unsigned long)a[1], (void *)a[2],
           (unsigned long)a[3]);
-    /* SPI_GETDRAGFULLWINDOWS (0x26) is Explorer's first query. Supply the
+    /* SPI_GETDRAGFULLWINDOWS (0x26) is queried during desktop setup. Supply the
      * disabled policy value through pvParam. This is a genuine empty USER
      * policy state, not framebuffer desktop emulation. */
     if ((UINT32)a[0] == 0x26 &&
@@ -457,7 +465,7 @@ static UINT64 NtUserSystemParametersInfo(UINT64 *a)
         return 1;
     }
 
-    /* SPI_GETCLIENTAREAANIMATION (0x1042). Explorer's SHCore worker asks for
+    /* SPI_GETCLIENTAREAANIMATION (0x1042). A shell worker asks for
      * this after its startup hand-off. We currently have no compositor
      * animations, so publish the disabled BOOL as a successful query. */
     if ((UINT32)a[0] == 0x1042 &&
@@ -534,7 +542,7 @@ static UINT64 NtUserPostThreadMessage(UINT64 *a)
 
     /* The message is delivered to the target thread's own queue; only that
      * thread's GetMessage/PeekMessage can consume it, preserving per-thread
-     * message semantics for explorer's desktop hand-off. */
+     * message semantics for desktop hand-offs. */
     return KiUserEnqueueThreadMessage(thread_id, message, a[2],
                                       (INT64)a[3]);
 }
@@ -681,4 +689,11 @@ static UINT64 NtUserGetAtomName(UINT64 *a)
         buffer[i] = name[i];
     buffer[n] = 0;
     return n;
+}
+
+static UINT64 NtUserGetKeyState(UINT64 *a)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    USER_MSG_QUEUE *queue = KiUserQueueForThread(thread ? thread->ThreadId : 0);
+    return queue && a[0] < 256 && queue->KeyState[a[0]] ? 0x8000 : 0;
 }

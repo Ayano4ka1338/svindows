@@ -1,11 +1,10 @@
 /*
  * win32k/Serverinfo.c - the SERVERINFO shared page (USER32's `gpsi`).
  *
- * USER32 receives a pointer to this page during DLL_PROCESS_ATTACH, through
- * SHAREDINFO.psi in the connection block, and from then on answers
- * GetSystemMetrics, GetSysColor and GetSysColorBrush straight out of it with no
- * syscall at all. That is why a shell running on an empty (zeroed) SERVERINFO
- * believes the screen is 0x0 pixels: it never asks.
+ * Native USER32 receives a pointer to this page through SHAREDINFO.psi and
+ * reads metrics and system colours directly. Svindows user32 currently uses
+ * native queries against these same pages until direct client mapping is
+ * validated.
  *
  * Windows keeps the page writable only by win32k and read-only for the client,
  * and the supplied user32 confirms it -- it writes the `gpsi` pointer itself but
@@ -140,8 +139,14 @@ static const UINT32 g_sys_colors[SYSCOLOR_COUNT] = {
     0x00F0F0F0, /* 30 MENUBAR                */
 };
 
+/* Physical frames holding the page, kept so every new process can map the same
+ * read-only copy instead of receiving a private, empty one. */
+static UINT64 g_server_info_phys[PROCESS_SERVER_INFO_SIZE / PAGE_SIZE];
+static BOOLEAN g_server_info_ready;
+
 void W32kInitializeServerInfo(void)
 {
+    UINT32 page_index = 0;
     for (UINT64 off = 0; off < PROCESS_SERVER_INFO_SIZE; off += PAGE_SIZE) {
         UINT64 pa = MmAllocatePage();
         if (pa == MM_INVALID_PHYS ||
@@ -150,6 +155,7 @@ void W32kInitializeServerInfo(void)
             KeLog("[w32k] no memory for the SERVERINFO page\n");
             return;
         }
+        g_server_info_phys[page_index++] = pa;
         memset((void *)(PROCESS_SERVER_INFO_VA + off), 0, PAGE_SIZE);
     }
 
@@ -164,11 +170,16 @@ void W32kInitializeServerInfo(void)
     met[SM_CYSCREEN] = height;
     met[SM_CXVSCROLL] = 17;
     met[SM_CYHSCROLL] = 17;
-    met[SM_CYCAPTION] = 23;
+    /* Frame metrics match the frames win32k actually draws (see
+     * win32k/UserScreen.inc): a 30 pixel caption, a 1 pixel border and 45x30
+     * caption buttons, which is what Windows 10 shows at 100% scaling. Keeping
+     * these in step is what makes AdjustWindowRectEx and GetSystemMetrics
+     * agree with the window a client gets. */
+    met[SM_CYCAPTION] = 30;
     met[SM_CXBORDER] = 1;
     met[SM_CYBORDER] = 1;
-    met[SM_CXDLGFRAME] = 3;
-    met[SM_CYDLGFRAME] = 3;
+    met[SM_CXDLGFRAME] = 1;
+    met[SM_CYDLGFRAME] = 1;
     met[SM_CYVTHUMB] = 17;
     met[SM_CXHTHUMB] = 17;
     met[SM_CXICON] = 32;
@@ -183,10 +194,10 @@ void W32kInitializeServerInfo(void)
     met[SM_CXHSCROLL] = 17;
     met[SM_CXMIN] = 132;
     met[SM_CYMIN] = 39;
-    met[SM_CXSIZE] = 18;
-    met[SM_CYSIZE] = 22;
-    met[SM_CXFRAME] = 4;
-    met[SM_CYFRAME] = 4;
+    met[SM_CXSIZE] = 45;
+    met[SM_CYSIZE] = 30;
+    met[SM_CXFRAME] = 1;
+    met[SM_CYFRAME] = 1;
     met[SM_CXMINTRACK] = 132;
     met[SM_CYMINTRACK] = 39;
     met[SM_CXDOUBLECLK] = 4;
@@ -235,7 +246,56 @@ void W32kInitializeServerInfo(void)
      * documented failure; a fabricated handle would be dereferenced. */
 
     MmProtectRange(PROCESS_SERVER_INFO_VA, PROCESS_SERVER_INFO_SIZE, FALSE);
+    g_server_info_ready = TRUE;
     KeLog("[w32k] SERVERINFO at 0x%lx: screen %ldx%ld, %u system colours\n",
           (unsigned long)PROCESS_SERVER_INFO_VA, (long)width, (long)height,
           SYSCOLOR_COUNT);
+}
+
+/*
+ * Map the one shared SERVERINFO page into a new process, read-only.
+ *
+ * The pages are the same physical frames for every process, which makes the
+ * values global and preserves the mapping expected by native USER32 clients.
+ */
+BOOLEAN W32kMapServerInfo(void)
+{
+    if (!g_server_info_ready)
+        return FALSE;
+    UINT32 page_index = 0;
+    for (UINT64 off = 0; off < PROCESS_SERVER_INFO_SIZE; off += PAGE_SIZE) {
+        if (!MmMapPage(PROCESS_SERVER_INFO_VA + off,
+                       g_server_info_phys[page_index++], PTE_USER))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* Svindows user32 asks win32k for values until the per-process read-only
+ * SERVERINFO mapping can be relied on. Read the same shared physical pages
+ * that native clients are meant to see, so the two paths cannot drift. */
+static const UINT8 *server_info_at(UINT32 offset)
+{
+    if (!g_server_info_ready || offset >= PROCESS_SERVER_INFO_SIZE)
+        return NULL;
+    return (const UINT8 *)MmPhysToVirt(g_server_info_phys[offset / PAGE_SIZE]) +
+           offset % PAGE_SIZE;
+}
+
+UINT64 NtUserGetSystemMetrics(UINT64 *args)
+{
+    if (args[0] >= SM_COUNT)
+        return 0;
+    const INT32 *value = (const INT32 *)server_info_at(
+        SI_AISYSMET + (UINT32)args[0] * sizeof(INT32));
+    return value ? (UINT64)(INT64)*value : 0;
+}
+
+UINT64 NtUserGetSysColor(UINT64 *args)
+{
+    if (args[0] >= SYSCOLOR_COUNT)
+        return 0;
+    const UINT32 *value = (const UINT32 *)server_info_at(
+        SI_ARGBSYSTEM + (UINT32)args[0] * sizeof(UINT32));
+    return value ? *value : 0;
 }

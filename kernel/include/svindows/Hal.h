@@ -115,6 +115,9 @@ void HalConsoleSetUserCursor(UINT32 x, UINT32 y, BOOLEAN visible, UINT32 size,
                              UINT8 attribute);
 void HalConsolePutUserStreamChar(char character, UINT8 attribute);
 void HalConsoleUpdateCursor(UINT64 tick);
+void HalConsoleSetGraphicsMode(BOOLEAN enabled);
+void HalConsoleAcquireFramebuffer(void);
+BOOLEAN HalConsoleReleaseFramebuffer(void);
 void HalConsoleWrite(const char *s);
 
 /* ------------------------------------------------------------------ */

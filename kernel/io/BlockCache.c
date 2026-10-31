@@ -41,7 +41,7 @@ static BOOLEAN IopWriteSector(UINT32 lba, const void *data)
         g_write_fault_after = -1;
         return FALSE;
     }
-    if (!AtaWriteSectors(lba, 1, data))
+    if (!IoDiskWriteSectors(lba, 1, data))
         return FALSE;
     g_physical_write_count++;
     if (g_write_fault_after > 0)
@@ -86,14 +86,14 @@ static IO_BLOCK_CACHE_ENTRY *IopAcquireBlock(UINT32 lba, BOOLEAN load)
     }
     if (entry->Valid && entry->Dirty) {
         if (!IopWriteSector(entry->Lba, entry->Data) ||
-            !AtaFlushCache())
+            !IoDiskFlush())
             return NULL;
         entry->Dirty = FALSE;
     }
     /* A failed ATA read may partially overwrite the buffer. Do not leave
      * those bytes published under the evicted block's old identity. */
     entry->Valid = FALSE;
-    if (load && !AtaReadSectors(lba, 1, entry->Data))
+    if (load && !IoDiskReadSectors(lba, 1, entry->Data))
         return NULL;
     entry->Lba = lba;
     entry->Stamp = ++g_block_stamp;
@@ -161,7 +161,7 @@ BOOLEAN IoBlockFlush(void)
         if (!IopWriteSector(entry->Lba, entry->Data))
             return FALSE;
     }
-    if (dirty && !AtaFlushCache())
+    if (dirty && !IoDiskFlush())
         return FALSE;
     for (UINT32 i = 0; i < IO_BLOCK_CACHE_ENTRIES; i++)
         g_block_cache[i].Dirty = FALSE;

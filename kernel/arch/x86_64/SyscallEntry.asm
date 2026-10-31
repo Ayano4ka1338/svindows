@@ -23,6 +23,7 @@ bits 64
 section .text
 
 extern KiSystemServiceDispatch
+extern KiRejectUserReturn
 
 global KiSystemCallEntry
 ; KTHREAD field offsets for the callback redirect (see Ke.h; _Static_asserts in
@@ -35,6 +36,7 @@ global KiSystemCallEntry
 %define KTH_CB_RSP        0xAE0
 %define KTH_CB_FLAGS      0xAE8
 %define KTH_REDIRECT      0xB29
+%define KTH_LINUX_THREAD  0x11A8
 
 KiSystemCallEntry:
     swapgs                        ; GS -> kernel KPCR
@@ -55,6 +57,32 @@ KiSystemCallEntry:
     push    rdi
     push    rsi
 
+    ; clone children must resume with the parent's preserved user registers.
+    ; Save these for Linux clone(56) and fork(57). The Linux context
+    ; begins with LINUX_CLONE_REGISTERS (asserted in linux/Thread.c).
+    cmp     rax, 56
+    je      .capture_clone
+    cmp     rax, 57
+    jne     .skip_clone_capture
+.capture_clone:
+    mov     r11, [gs:16]
+    mov     r11, [r11+KTH_LINUX_THREAD]
+    test    r11, r11
+    jz      .skip_clone_capture
+    mov     [r11+0x00], rbx
+    mov     [r11+0x08], rbp
+    mov     [r11+0x10], r12
+    mov     [r11+0x18], r13
+    mov     [r11+0x20], r14
+    mov     [r11+0x28], r15
+    mov     [r11+0x30], rdi
+    mov     [r11+0x38], rsi
+    mov     [r11+0x40], rdx
+    mov     [r11+0x48], r8
+    mov     [r11+0x50], r9
+    mov     [r11+0x58], r10
+.skip_clone_capture:
+
     ; Mirror the user trap frame into the KTHREAD so in-service callbacks can
     ; redirect the return path. R11 and RDI are scratch here (their user values
     ; were just pushed); RAX must survive: it carries the service number.
@@ -65,30 +93,97 @@ KiSystemCallEntry:
     mov     rdi, [rsp+0x20]       ; user RSP (pushed above)
     mov     [r11+KTH_USER_RSP], rdi
 
-    ; Put the four register arguments in an array on the kernel stack, and hand
-    ; the C dispatcher the user RSP so it can gather any stack arguments safely
+    ; Keep the Windows register arguments plus the saved user RDI/RSI. The
+    ; dispatcher selects Windows or Linux register order from the process ABI.
+    ; Hand it user RSP for Windows stack arguments.
     ; (probing each, since a low-argument call may leave RSP near the top of the
     ; stack where [RSP+0x28] is unmapped). Interrupts are masked (SFMASK clears
     ; IF), so [gs:0] is a stable copy of the user RSP.
-    sub     rsp, 32               ; 4 * 8 bytes
+    sub     rsp, 80               ; 6 args + 4 Linux-preserved registers
     mov     [rsp+0x00], r10       ; arg1
     mov     [rsp+0x08], rdx       ; arg2
     mov     [rsp+0x10], r8        ; arg3
     mov     [rsp+0x18], r9        ; arg4
+    mov     [rsp+0x30], rdx
+    mov     [rsp+0x38], r8
+    mov     [rsp+0x40], r9
+    mov     [rsp+0x48], r10
+    mov     rdi, [rsp+0x58]       ; saved user RDI
+    mov     [rsp+0x20], rdi
+    mov     rdi, [rsp+0x50]       ; saved user RSI
+    mov     [rsp+0x28], rdi
 
     mov     rdi, rax              ; num       -> arg1
     mov     rsi, rsp              ; reg args  -> arg2 (pointer)
     mov     rdx, [gs:0]           ; user RSP  -> arg3
 
-    ; Realign to 16: 5 pushes (40) + 32 = 72, so drop 8 more.
+    ; Realign to 16: 5 pushes (40) + 80 = 120, so drop 8 more.
     sub     rsp, 8
     call    KiSystemServiceDispatch
     add     rsp, 8
-    add     rsp, 32               ; drop the register-argument array
+    mov     rdx, [rsp+0x30]
+    mov     r8,  [rsp+0x38]
+    mov     r9,  [rsp+0x40]
+    mov     r10, [rsp+0x48]
+    add     rsp, 80               ; drop arguments and saved registers
     ; return value already in RAX for the user
 
     pop     rsi                   ; restore caller's RSI
     pop     rdi                   ; restore caller's RDI
+    ; execve replaces the image while keeping this kernel thread. Enter its
+    ; new entry point and stack after returning from the dispatcher.
+    mov     r11, [gs:16]
+    mov     r11, [r11+KTH_LINUX_THREAD]
+    test    r11, r11
+    jz      .check_callback
+    cmp     byte [r11+113], 0
+    je      .check_callback
+    mov     r10, r11              ; keep the Linux thread context
+    mov     byte [r11+113], 0
+    cmp     byte [r10+114], 0     ; WindowsExec: execve loaded a PE image
+    jne     .windows_exec
+    mov     r11, [gs:16]
+    mov     rcx, [r11+KTH_USER_RIP]
+    mov     [rsp+8], rcx
+    mov     rcx, [r11+KTH_USER_RSP]
+    mov     [rsp+16], rcx
+    xor     eax, eax
+    xor     edx, edx
+    jmp     .check_callback
+
+.windows_exec:
+    ; A PE image was exec'd. SYSRET forces RCX = RIP, so it cannot deliver the
+    ; Windows first argument; build an IRETQ frame instead (as KiEnterUserMode
+    ; does) and pass the LDR init block in RCX. The stack contract mirrors
+    ; KiEnterUserMode: RSP is 16-aligned minus 8 with mapped home space.
+    mov     r11, [gs:16]
+    mov     rcx, [r11+KTH_USER_RIP]   ; PE bootstrap entry
+    mov     rdx, [r11+KTH_USER_RSP]   ; PE stack top
+    mov     r9,  [r10+120]            ; entry argument
+    mov     r8, rcx
+    shr     r8, 47
+    jnz     .bad_normal_return
+    mov     r8, rdx
+    shr     r8, 47
+    jnz     .bad_normal_return
+    and     rdx, -16
+    sub     rdx, 0x28
+    mov     qword [rdx], 0            ; stray `ret` from the entry faults at 0
+    add     rsp, 24                   ; drop this frame's RFLAGS/RIP/RSP
+    mov     eax, 0x1B                 ; user data selectors
+    mov     ds, ax
+    mov     es, ax
+    push    0x1B                      ; SS
+    push    rdx                       ; RSP
+    push    0x202                     ; RFLAGS: IF=1, reserved bit set
+    push    0x23                      ; CS
+    push    rcx                       ; RIP
+    mov     rcx, r9                   ; entry argument (Win64 first argument)
+    xor     eax, eax
+    xor     edx, edx
+    swapgs
+    iretq
+.check_callback:
     ; A kernel->user callback armed a one-shot redirect: send this sysret into
     ; the callback trampoline instead of the original caller. R11 is scratch
     ; until the normal path reloads the user RFLAGS into it below, and RAX (the
@@ -97,19 +192,49 @@ KiSystemCallEntry:
     cmp     byte [r11+KTH_REDIRECT], 1
     jne     .return_normal
     mov     byte [r11+KTH_REDIRECT], 0
+    mov     rcx, [r11+KTH_CB_RIP]
+    shr     rcx, 47
+    jnz     .bad_callback_return
+    mov     rcx, [r11+KTH_CB_RSP]
+    shr     rcx, 47
+    jnz     .bad_callback_return
     add     rsp, 24               ; drop this frame's RFLAGS/RIP/RSP
     mov     rcx, [r11+KTH_CB_RIP]
     mov     rdx, [r11+KTH_CB_RSP]
     mov     r11, [r11+KTH_CB_FLAGS]
+    and     r11d, 0x240fd7        ; user flags only: clear IOPL/NT/VM/RF
+    or      r11d, 0x202           ; reserved bit and IF must be set
     mov     rsp, rdx
     swapgs                        ; GS -> user
     o64 sysret
 .return_normal:
+    ; SYSRET with a non-user or non-canonical RCX may #GP in ring 0. Reject
+    ; the frame while still on the kernel stack, before swapping GS or RSP.
+    mov     rcx, [rsp+8]
+    shr     rcx, 47
+    jnz     .bad_normal_return
+    mov     rcx, [rsp+16]
+    shr     rcx, 47
+    jnz     .bad_normal_return
     pop     r11                   ; user RFLAGS
     pop     rcx                   ; user RIP
     pop     rsp                   ; user RSP (from this thread's kernel stack)
+    and     r11d, 0x240fd7
+    or      r11d, 0x202
     swapgs                        ; GS -> user
     o64 sysret                    ; back to ring 3 (RIP=RCX, RFLAGS=R11)
+
+.bad_callback_return:
+    mov     rdi, [r11+KTH_CB_RIP]
+    mov     rsi, [r11+KTH_CB_RSP]
+    jmp     .reject_return
+.bad_normal_return:
+    mov     rdi, [rsp+8]
+    mov     rsi, [rsp+16]
+.reject_return:
+    sub     rsp, 8                ; align for the SysV C call
+    call    KiRejectUserReturn    ; terminates the current thread
+    ud2
 
 ; void KiEnterUserMode(UINT64 entry /*rdi*/, UINT64 user_stack /*rsi*/,
 ;                      UINT64 arg /*rdx*/);

@@ -57,7 +57,12 @@ typedef struct _W32K_SURFACE {
 
 typedef struct _W32K_DC {
     W32K_SURFACE *Surface;
-    W32K_SURFACE  ScreenSurface; /* used when the DC draws to the screen */
+    W32K_SURFACE  DeviceSurface; /* screen DC or retained window drawing buffer */
+    W32K_SURFACE  PresentedSurface; /* last completed window paint */
+    void *WindowStorage;
+    BOOLEAN Painting;
+    BOOLEAN Dirty;
+    INT32 DirtyLeft, DirtyTop, DirtyRight, DirtyBottom;
     UINT64 Hwnd;
     INT32  OrgX, OrgY;           /* where (0,0) of the DC lands on the surface */
     INT32  ClipX, ClipY, ClipW, ClipH; /* in surface coordinates */
@@ -67,6 +72,11 @@ typedef struct _W32K_DC {
     UINT64 SelectedFont;
     UINT64 SelectedBitmap;
 } W32K_DC;
+
+static BOOLEAN dc_prepare_window(W32K_DC *dc);
+static void dc_dispose_window(W32K_DC *dc);
+static void dc_damage(W32K_DC *dc, INT32 x, INT32 y, INT32 w, INT32 h);
+static void dc_present(W32K_DC *dc);
 
 typedef struct _W32K_BRUSH {
     UINT32 Color;   /* COLORREF */
@@ -166,6 +176,8 @@ static void gdi_free(UINT64 handle)
     UINT16 index = (UINT16)(handle & 0xFFFF);
     if (object->Type == GDI_TYPE_BITMAP && object->u.Bitmap.Storage)
         ExFreePool(object->u.Bitmap.Storage);
+    if (object->Type == GDI_TYPE_DC)
+        dc_dispose_window(&object->u.Dc);
     object->Type = 0;
     object->Owner = NULL;
     object->UserInfo = 0;
@@ -271,7 +283,25 @@ static void dc_fill(W32K_DC *dc, INT32 x, INT32 y, INT32 w, INT32 h,
 {
     if (!dc_clip(dc, &x, &y, &w, &h))
         return;
-    surface_fill(dc->Surface, x, y, w, h, gdi_pixel(colorref));
+    UINT32 pixel = gdi_pixel(colorref);
+    dc_damage(dc, x, y, w, h);
+    if (!dc->Surface->IsScreen || !dc->Hwnd ||
+        W32kScreenRectUnobscured(dc->Hwnd, x, y, w, h)) {
+        surface_fill(dc->Surface, x, y, w, h, pixel);
+        return;
+    }
+    for (INT32 row = 0; row < h; ++row)
+        for (INT32 col = 0; col < w; ++col)
+            if (W32kScreenPixelVisible(dc->Hwnd, x + col, y + row))
+                surface_pixel(dc->Surface, x + col, y + row, pixel);
+}
+
+static void dc_pixel(W32K_DC *dc, INT32 x, INT32 y, UINT32 pixel)
+{
+    dc_damage(dc, x, y, 1, 1);
+    if (!dc->Surface->IsScreen || !dc->Hwnd ||
+        W32kScreenPixelVisible(dc->Hwnd, x, y))
+        surface_pixel(dc->Surface, x, y, pixel);
 }
 
 static UINT32 blend_pixel(UINT32 fg, UINT32 bg, UINT8 alpha)
@@ -282,35 +312,65 @@ static UINT32 blend_pixel(UINT32 fg, UINT32 bg, UINT8 alpha)
     UINT32 br = (bg >> GfxFramebuffer.RedShift) & 0xff;
     UINT32 bgreen = (bg >> GfxFramebuffer.GreenShift) & 0xff;
     UINT32 bb = (bg >> GfxFramebuffer.BlueShift) & 0xff;
-    return GfxColor((UINT8)((fr * alpha + br * (15 - alpha) + 7) / 15),
-                    (UINT8)((fgreen * alpha + bgreen * (15 - alpha) + 7) / 15),
-                    (UINT8)((fb * alpha + bb * (15 - alpha) + 7) / 15));
+    UINT32 inverse = 255u - alpha;
+    return GfxColor((UINT8)((fr * alpha + br * inverse + 127) / 255),
+                    (UINT8)((fgreen * alpha + bgreen * inverse + 127) / 255),
+                    (UINT8)((fb * alpha + bb * inverse + 127) / 255));
 }
 
-/* Draw one 9x20 glyph at a DC-relative position, clipped, with an opaque or
- * transparent background. */
-static void dc_glyph(W32K_DC *dc, INT32 x, INT32 y, char c, UINT32 fg,
-                     UINT32 bg, BOOLEAN opaque)
+/*
+ * Draw one character of the UI face at a DC-relative position, clipped, with an
+ * opaque or transparent background.
+ *
+ * The face is the proportional Selawik atlas - the same one the window manager
+ * draws captions with - because every Win32 text path (TextOut, ExtTextOut,
+ * DrawText, GetTextExtent) has to agree on advances, and a fixed 9 pixel grid
+ * would mis-measure every string a client lays out. The character cell keeps
+ * the console font's 20 pixel line box for vertical placement, which is what a
+ * DC's text metrics report.
+ */
+static void dc_glyph(W32K_DC *dc, INT32 x, INT32 y, UINT32 codepoint,
+                     UINT32 fg, UINT32 bg, BOOLEAN opaque)
 {
-    UINT8 uc = (UINT8)c;
-    const UINT8 (*glyph)[5] =
-        (uc >= 32 && uc < 127) ? Font9x20[uc - 32] : Font9x20[0];
     UINT32 fg_pixel = gdi_pixel(fg), bg_pixel = gdi_pixel(bg);
+    const GFX_FONT_GLYPH *glyph = GfxUiGlyph(codepoint);
+    INT32 baseline = y + GfxUiAscent();
+    INT32 advance = (INT32)GfxUiCharWidth(codepoint);
 
-    for (INT32 row = 0; row < GFX_FONT_H; row++) {
-        for (INT32 col = 0; col < GFX_FONT_W; col++) {
-            UINT8 packed = glyph[row][col / 2];
-            UINT8 alpha = (col & 1) ? packed >> 4 : packed & 0x0f;
-            if (!alpha && !opaque)
-                continue;
-            INT32 px = x + col, py = y + row, pw = 1, ph = 1;
+    if (opaque) {
+        /* The background fills the whole cell, as Windows does, so a cleared
+         * line has no gaps between glyphs. */
+        for (INT32 row = 0; row < GFX_FONT_H; ++row) {
+            INT32 px = x, py = y + row, pw = advance, ph = 1;
             if (!dc_clip(dc, &px, &py, &pw, &ph))
                 continue;
-            UINT32 under = opaque ? bg_pixel :
-                dc->Surface->Bits[(UINT32)py * dc->Surface->Stride +
-                                  (UINT32)px];
-            surface_pixel(dc->Surface, px, py,
-                          alpha ? blend_pixel(fg_pixel, under, alpha) : under);
+            for (INT32 col = 0; col < pw; ++col)
+                dc_pixel(dc, px + col, py, bg_pixel);
+        }
+    }
+    if (!glyph || !glyph->Width || !glyph->Height)
+        return;
+    const UINT8 *bits = SvUiFontUiFace.Pixels + glyph->Offset;
+    INT32 left = x + glyph->BearingX;
+    INT32 top = baseline - glyph->BearingY;
+    for (UINT32 row = 0; row < glyph->Height; ++row) {
+        INT32 py = top + (INT32)row;
+        const UINT8 *source = bits + (UINT64)row * glyph->Width;
+        for (UINT32 col = 0; col < glyph->Width; ++col) {
+            UINT32 coverage = source[col];
+            if (!coverage)
+                continue;
+            INT32 px = left + (INT32)col, clip_y = py, pw = 1, ph = 1;
+            if (!dc_clip(dc, &px, &clip_y, &pw, &ph))
+                continue;
+            if (dc->Surface->IsScreen && dc->Hwnd &&
+                !W32kScreenPixelVisible(dc->Hwnd, px, clip_y))
+                continue;
+            UINT32 under = dc->Surface->Bits[(UINT32)clip_y *
+                                             dc->Surface->Stride +
+                                             (UINT32)px];
+            dc_pixel(dc, px, clip_y,
+                      blend_pixel(fg_pixel, under, (UINT8)coverage));
         }
     }
 }
@@ -346,8 +406,8 @@ UINT64 W32kCreateWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
         return 0;
 
     W32K_DC *dc = &object->u.Dc;
-    screen_surface(&dc->ScreenSurface);
-    dc->Surface = &dc->ScreenSurface;
+    screen_surface(&dc->DeviceSurface);
+    dc->Surface = &dc->DeviceSurface;
     dc->Hwnd = hwnd;
 
     /* A window with no size yet still gets a DC; it simply clips everything
@@ -360,6 +420,10 @@ UINT64 W32kCreateWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
     dc->ClipY = y;
     dc->ClipW = width;
     dc->ClipH = height;
+    if (hwnd && !dc_prepare_window(dc)) {
+        gdi_free(hdc);
+        return 0;
+    }
 
     /* Defaults a fresh DC starts with: black text on white, white brush. */
     *(UINT32 *)(attr + DCATTR_CRFOREGND) = 0x00000000;
@@ -384,7 +448,9 @@ void W32kReleaseDc(UINT64 hdc)
 static W32K_DC *dc_from_handle(UINT64 hdc)
 {
     W32K_OBJECT *object = gdi_object(hdc, GDI_TYPE_DC);
-    return object ? &object->u.Dc : NULL;
+    if (!object) return NULL;
+    W32K_DC *dc = &object->u.Dc;
+    return !dc->Hwnd || dc_prepare_window(dc) ? dc : NULL;
 }
 
 /* The DC's user-mode attribute block, or 0. */
@@ -404,6 +470,8 @@ void W32kCleanupProcessGdi(PKPROCESS process)
         UINT64 handle = ((UINT64)object->Upper << 16) | i;
         if (object->Type == GDI_TYPE_BITMAP && object->u.Bitmap.Storage)
             ExFreePool(object->u.Bitmap.Storage);
+        if (object->Type == GDI_TYPE_DC)
+            dc_dispose_window(&object->u.Dc);
         object->Type = 0;
         object->Owner = NULL;
         object->UserInfo = 0;

@@ -26,22 +26,28 @@ UINT64 W32kAcquireWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
         for (UINT16 i = 1; i < GDI_MAX_OBJECTS; i++) {
             W32K_OBJECT *object = &g_gdi_objects[i];
             if (object->Type == GDI_TYPE_DC && object->Owner == gdi_current_process() &&
-                !object->u.Dc.Hwnd && object->u.Dc.ScreenSurface.IsScreen) {
+                !object->u.Dc.Hwnd && object->u.Dc.DeviceSurface.IsScreen) {
                 cached = ((UINT64)object->Upper << 16) | i;
                 break;
             }
         }
     }
-    W32K_DC *dc = cached ? dc_from_handle(cached) : NULL;
+    W32K_OBJECT *cached_object = cached ? gdi_object(cached, GDI_TYPE_DC) : NULL;
+    W32K_DC *dc = cached_object ? &cached_object->u.Dc : NULL;
     if (dc && dc->Hwnd == hwnd) {
+        /* Resize failure leaves the existing DC and completed raster intact;
+         * do not replace the cache with another DC and orphan its buffers. */
+        if (hwnd && !dc_prepare_window(dc)) return 0;
         /* Refresh the geometry: the window may have been moved or resized
          * since the DC was first handed out. */
-        dc->OrgX = x;
-        dc->OrgY = y;
-        dc->ClipX = x;
-        dc->ClipY = y;
-        dc->ClipW = width < 0 ? 0 : width;
-        dc->ClipH = height < 0 ? 0 : height;
+        if (!hwnd) {
+            dc->OrgX = x;
+            dc->OrgY = y;
+            dc->ClipX = x;
+            dc->ClipY = y;
+            dc->ClipW = width < 0 ? 0 : width;
+            dc->ClipH = height < 0 ? 0 : height;
+        }
         return cached;
     }
 
@@ -73,6 +79,7 @@ void W32kCleanupWindowDc(PKPROCESS process, UINT64 hwnd)
     if (object->Type != GDI_TYPE_DC || object->Owner != process ||
         object->u.Dc.Hwnd != hwnd || object->Upper != (UINT16)(handle >> 16)) return;
     (void)W32kClearSharedHandle(process, TRUE, index);
+    dc_dispose_window(&object->u.Dc);
     object->Type = 0;
     object->Owner = NULL;
     object->UserInfo = 0;
@@ -120,9 +127,10 @@ UINT64 NtGdiGetDeviceCaps(UINT64 *a)
     if (!dc)
         return 0;
     W32K_SURFACE *surface = dc->Surface;
-    INT32 width = surface ? (INT32)surface->Width : (INT32)GfxFramebuffer.Width;
-    INT32 height = surface ? (INT32)surface->Height
-                           : (INT32)GfxFramebuffer.Height;
+    INT32 width = surface && !dc->Hwnd ? (INT32)surface->Width :
+                                        (INT32)GfxFramebuffer.Width;
+    INT32 height = surface && !dc->Hwnd ? (INT32)surface->Height :
+                                         (INT32)GfxFramebuffer.Height;
 
     switch ((UINT32)a[1]) {
     case DEVCAP_DRIVERVERSION: return 0x4000;

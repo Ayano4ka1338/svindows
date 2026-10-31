@@ -157,6 +157,20 @@ BOOLEAN MmUnmapPageInAddressSpace(UINT64 root, UINT64 virt)
     return TRUE;
 }
 
+/* Release thread-owned mappings even when another process is current. */
+void MmReleaseUserPagesInAddressSpace(UINT64 root, UINT64 base, SIZE_T pages)
+{
+    if (!root || !base || (base & PAGE_MASK) || base >= MM_USER_MAX ||
+        pages > (MM_USER_MAX - base) / PAGE_SIZE)
+        return;
+    for (SIZE_T i = 0; i < pages; ++i) {
+        UINT64 va = base + i * PAGE_SIZE;
+        UINT64 pa = MmGetPhysicalAddressInAddressSpace(root, va);
+        if (pa != MM_INVALID_PHYS && MmUnmapPageInAddressSpace(root, va))
+            MmFreePages(PAGE_ALIGN(pa), 1);
+    }
+}
+
 UINT64 MmGetPhysicalAddress(UINT64 virt)
 {
     return MmGetPhysicalAddressInAddressSpace(MmGetCurrentAddressSpace(), virt);

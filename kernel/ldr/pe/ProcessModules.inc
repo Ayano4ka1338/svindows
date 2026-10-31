@@ -170,6 +170,52 @@ BOOLEAN LdrDescribeUserAddress(UINT64 addr, const char **name_out,
     return FALSE;
 }
 
+BOOLEAN LdrQueryImageSection(UINT64 addr, UINT64 *allocation_base,
+                             UINT64 *section_base, UINT64 *section_size,
+                             UINT32 *protection)
+{
+    for (int i = 0; i < MAX_LOADED_MODULES; ++i) {
+        if (!g_loaded[i].Valid || !g_loaded[i].Base ||
+            !MmProbeForRead(g_loaded[i].Base, sizeof(IMAGE_DOS_HEADER)))
+            continue;
+        UINT64 image = g_loaded[i].Base;
+        PIMAGE_NT_HEADERS64 nt = nt_headers(image);
+        if (!nt || addr < image ||
+            addr >= image + nt->OptionalHeader.SizeOfImage)
+            continue;
+        PIMAGE_SECTION_HEADER sec = (PIMAGE_SECTION_HEADER)(
+            (UINT8 *)&nt->OptionalHeader + nt->FileHeader.SizeOfOptionalHeader);
+        for (UINT16 n = 0; n < nt->FileHeader.NumberOfSections; ++n) {
+            UINT64 start = sec[n].VirtualAddress;
+            UINT64 span = sec[n].VirtualSize;
+            if (sec[n].SizeOfRawData > span) span = sec[n].SizeOfRawData;
+            if (!span || addr < image + start || addr >= image + start + span)
+                continue;
+            UINT64 first = PAGE_ALIGN(start);
+            UINT64 last = PAGE_ALIGN_UP(start + span);
+            UINT32 flags = sec[n].Characteristics;
+            UINT32 p = (flags & IMAGE_SCN_MEM_EXECUTE)
+                ? ((flags & IMAGE_SCN_MEM_WRITE) ? 0x40 : 0x20)
+                : ((flags & IMAGE_SCN_MEM_WRITE) ? 0x04 : 0x02);
+            if (allocation_base) *allocation_base = image;
+            if (section_base) *section_base = image + first;
+            if (section_size) *section_size = last - first;
+            if (protection) *protection = p;
+            return TRUE;
+        }
+        /* Headers have their own read-only mapped range. */
+        UINT64 headers = PAGE_ALIGN_UP(nt->OptionalHeader.SizeOfHeaders);
+        if (addr < image + headers) {
+            if (allocation_base) *allocation_base = image;
+            if (section_base) *section_base = image;
+            if (section_size) *section_size = headers;
+            if (protection) *protection = 0x02;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 BOOLEAN LdrDescribeUserSymbol(UINT64 addr, const char **module_out,
                               UINT64 *module_base_out,
                               const char **symbol_out,

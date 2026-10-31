@@ -181,19 +181,22 @@ static NTSTATUS LdrpMapImage(const void *file, SIZE_T file_size, UINT64 *base_ou
         return STATUS_INVALID_IMAGE_FORMAT;
 
     /*
-     * Resource-only images: a localized binary keeps its strings, dialogs and
-     * menus in a companion .mui, and those are built machine-neutral PE32 with
-     * no entry point and no imports -- notepad.exe.mui here is Machine 0x014C,
-     * Magic 0x10B, AddressOfEntryPoint 0. Windows maps them as
-     * LOAD_LIBRARY_AS_IMAGE_RESOURCE, where bitness is irrelevant because no
-     * code ever runs. Rejecting them on Machine/Magic (which is what the check
-     * below does for real code) is why LoadString found nothing.
+     * A resource-only image has no entry point or imports, so its contents
+     * are address-independent even when it has no relocation directory.
+     * Localized .mui files are often PE32, while imageres.dll is PE32+ with
+     * a fixed base occupied by ntdll. Both must take the resource mapping
+     * path before code-module base selection and machine checks.
      */
     {
         const UINT8 *opt = (const UINT8 *)&nt->OptionalHeader;
         UINT16 magic = *(const UINT16 *)opt;
         UINT32 entry = *(const UINT32 *)(opt + 16);
-        if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC && entry == 0)
+        UINT32 directories = magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ? 96 : 112;
+        UINT32 imports = *(const UINT32 *)(opt + directories + 8);
+        UINT32 resources = *(const UINT32 *)(opt + directories + 16);
+        if ((magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+             magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) &&
+            entry == 0 && imports == 0 && resources != 0)
             return LdrpMapResourceImage(file, file_size, base_out);
     }
 

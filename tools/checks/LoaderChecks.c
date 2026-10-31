@@ -227,6 +227,29 @@ int main(void)
     assert(LdrpAllocateImagePages(0x100000, PAGE_SIZE) == STATUS_CONFLICTING_ADDRESSES);
     assert(frees == freed_before + 2);
     puts("PASS image allocation and mapping failure cleanup");
+    fail_map = 0;
+    UINT64 tls_start = g_early_context.TlsRegionNext;
+    freed_before = frees;
+    fail_allocate = 1;
+    assert(!LdrpTlsAllocate(&g_early_context, 3 * PAGE_SIZE));
+    assert(frees == freed_before + 1 &&
+           g_early_context.TlsRegionNext == tls_start &&
+           MmGetPhysicalAddress(tls_start) == MM_INVALID_PHYS);
+    fail_allocate = -1;
+    fail_map = 1;
+    assert(!LdrpTlsAllocate(&g_early_context, PAGE_SIZE));
+    assert(frees == freed_before + 2 &&
+           g_early_context.TlsRegionNext == tls_start);
+    fail_map = 0;
+    puts("PASS TLS allocation failure rollback");
+    UINT64 first = LdrpTlsAllocate(&g_early_context, 2 * PAGE_SIZE);
+    assert(first == tls_start);
+    UINT64 highwater = g_early_context.TlsRegionNext;
+    LdrpTlsReleasePages(first, first + 2 * PAGE_SIZE);
+    assert(LdrpTlsAllocate(&g_early_context, 2 * PAGE_SIZE) == first);
+    assert(g_early_context.TlsRegionNext == highwater);
+    LdrpTlsReleasePages(first, first + 2 * PAGE_SIZE);
+    puts("PASS TLS virtual-address reuse after thread release");
     free(child); free(target); free(image); free(dep);
     return 0;
 }

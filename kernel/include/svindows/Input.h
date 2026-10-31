@@ -20,6 +20,15 @@ void    HalInitializeKeyboard(void);
 /* Non-blocking: return the next typed character, or 0 if none is queued. */
 char    KbdReadChar(void);
 BOOLEAN KbdDataAvailable(void);
+#define KBD_INPUT_CHARACTER 0x10000u
+BOOLEAN KbdReadInputEvent(UINT32 *event);
+BOOLEAN KbdInputEventAvailable(void);
+/* An independent raw-event reader for a second input stack. Acquire starts
+ * at the current key state, so a newly opened device gets no stale keys. */
+void KbdInputMirrorAcquire(void);
+void KbdInputMirrorRelease(void);
+BOOLEAN KbdReadMirroredInputEvent(UINT32 *event);
+BOOLEAN KbdMirroredInputEventAvailable(void);
 
 /* ------------------------------------------------------------------ */
 /* Mouse                                                              */
@@ -43,5 +52,9 @@ void HalInitializeMouse(void);
 /* Called once the framebuffer geometry is known, to seat the cursor and set
  * the clamp bounds. */
 void HalMouseSetBounds(INT32 width, INT32 height);
+
+/* Non-blocking read of one decoded packet as an unclamped relative delta plus
+ * the packet's button bitmask. Used by the Linux evdev/REL adapter. */
+BOOLEAN MouseReadRelEvent(INT32 *dx, INT32 *dy, UINT8 *buttons);
 
 #endif /* _SVINDOWS_INPUT_H_ */
