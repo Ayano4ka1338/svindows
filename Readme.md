@@ -1,69 +1,63 @@
-<p align="center">
-  <img src="other/Logo.png" alt="Svindows Logo" width="180"> <img width="1280" height="798" alt="image" src="https://github.com/user-attachments/assets/71df715c-e44f-4b46-964a-1b1937211be4" />
+Svindows
 
-</p>
+<table>
+  <tr>
+    <td width="200" align="center" valign="middle">
+      <img src="other/Logo.png" alt="Svindows Logo" width="180">
+    </td>
+    <td valign="middle">
+      <h1>Svindows</h1>
+      <p><strong>An experimental NT-compatible operating system for x86-64.</strong></p>
+      <p>
+        <img src="https://img.shields.io/github/stars/Ayano4ka1338/svindows?style=flat-square" alt="Stars">
+        <img src="https://img.shields.io/github/issues/Ayano4ka1338/svindows?style=flat-square" alt="Issues">
+        <img src="https://img.shields.io/github/last-commit/Ayano4ka1338/svindows?style=flat-square" alt="Last Commit">
+        <img src="https://img.shields.io/github/repo-size/Ayano4ka1338/svindows?style=flat-square" alt="Repo Size">
+        <img src="https://img.shields.io/github/languages/top/Ayano4ka1338/svindows?style=flat-square" alt="Top Language">
+        <img src="https://img.shields.io/github/license/Ayano4ka1338/svindows?style=flat-square" alt="License">
+      </p>
+    </td>
+  </tr>
+</table><p align="center">
+  <img src="https://github.com/user-attachments/assets/71df715c-e44f-4b46-964a-1b1937211be4" alt="Svindows Screenshot" width="100%">
+</p>---
 
-<h1 align="center">Svindows</h1>
+About
 
-<p align="center">
-  An NT-compatible operating system for x86-64
-</p>
+Svindows is an experimental x86-64 operating system built from scratch around an NT-inspired kernel. It aims to run software from multiple operating system ecosystems through independent compatibility layers, without using Microsoft source code.
 
-<p align="center">
-  <img src="https://img.shields.io/github/stars/Ayano4ka1338/svindows?style=flat-square" alt="Stars">
-  <img src="https://img.shields.io/github/issues/Ayano4ka1338/svindows?style=flat-square" alt="Issues">
-  <img src="https://img.shields.io/github/last-commit/Ayano4ka1338/svindows?style=flat-square" alt="Last Commit">
-  <img src="https://img.shields.io/github/repo-size/Ayano4ka1338/svindows?style=flat-square" alt="Repo Size">
-  <img src="https://img.shields.io/github/languages/top/Ayano4ka1338/svindows?style=flat-square" alt="Top Language">
-  <img src="https://img.shields.io/github/license/Ayano4ka1338/svindows?style=flat-square" alt="License">
-</p>
+Features
 
----
+- NT kernel: Multiboot2/GRUB boot, long mode, ring 0/3, virtual memory, processes, threads, scheduler, kernel objects and system calls.
+- Win32: PE32+ EXE/DLL loading, PEB/TEB, native "Nt*" services, Win32 runtime, console, USER32 and GDI APIs.
+- DOS: COM and MZ executables, DOS/BIOS interrupts, partial 386 protected mode and DPMI, with virtual VGA, PIC, PIT and keyboard devices.
+- Linux ABI: x86-64 ELF and musl interpreter, Linux-style syscalls, file descriptors, "mmap", "futex", "poll"/"epoll", processes and AF_INET sockets.
+- Networking: VirtIO-net, lwIP, IPv4, DHCP, DNS, ICMP, UDP and TCP; basic HTTP client support.
+- Storage & graphics: FAT32/VFAT, framebuffer console, Win32 GDI and experimental Xorg/X11 desktop support.
+- Userland: "cmd.exe", Alpine-based "curl", "fastfetch", Xorg utilities, "feh" and a DOS/4G DOOM compatibility target.
 
-## About
+Compatibility is incomplete. DOS/DPMI gameplay, sound, full POSIX/Linux behavior, Linux signals, TLS/HTTPS and broad Windows API coverage are not guaranteed. X11 applications require a running X server. See "docs/" for implementation details and limitations.
 
-Svindows is an experimental x86-64 operating system built from scratch around an NT-inspired kernel. It aims to run several program formats through separate compatibility layers, without using Microsoft source code.
+Build and run
 
-## Features
+Build on Linux with GCC/binutils, Clang/LLD, NASM, GNU Make, Python 3, GRUB tools, "xorriso", "mtools" and QEMU. The first build may download pinned dependencies and Alpine packages.
 
-- **NT kernel:** Multiboot2/GRUB boot, long mode, ring 0/3, virtual memory, processes, threads, scheduler, kernel objects and system calls.
-- **Win32:** PE32+ EXE/DLL loading, PEB/TEB, native `Nt*` services, Win32 runtime, console, USER32 and GDI APIs.
-- **DOS:** COM and MZ executables, DOS/BIOS interrupts, partial 386 protected mode and DPMI, with virtual VGA, PIC, PIT and keyboard devices.
-- **Linux ABI:** x86-64 ELF and musl interpreter, Linux-style syscalls, file descriptors, `mmap`, `futex`, `poll`/`epoll`, processes and AF_INET sockets.
-- **Networking:** VirtIO-net, lwIP, IPv4, DHCP, DNS, ICMP, UDP and TCP; basic HTTP client support.
-- **Storage & graphics:** FAT32/VFAT, framebuffer console, Win32 GDI, and experimental Xorg/X11 desktop support.
-- **Userland:** `cmd.exe`, Alpine-based `curl`, `fastfetch`, Xorg utilities and `feh`; bundled DOS/4G DOOM compatibility target.
-
-Compatibility is incomplete. DOS/DPMI gameplay, sound, full POSIX/Linux behavior, Linux signals, TLS/HTTPS and broad Windows API coverage are not guaranteed. X11 applications require a running X server. See `docs/` for implementation details and limitations.
-
-## Build and run
-
-Build on Linux with GCC/binutils, Clang/LLD, NASM, GNU Make, Python 3, GRUB tools, `xorriso`, `mtools` and QEMU. The first build may download pinned dependencies and Alpine packages.
-
-```sh
 make             # build the ISO and FAT disk image
 make run         # boot in QEMU using the serial console
 make run-gui     # boot in a graphical QEMU window
 make run-net     # run the network smoke test
 make clean       # remove generated files
-```
 
-At the Svindows prompt, enter `help` to list shell commands. Run `startx.elf` from the graphical image to start the experimental X11 session.
+At the Svindows prompt, enter "help" to list available shell commands. Run "startx.elf" from the graphical image to start the experimental X11 session.
 
-```
+Project layout
 
-## Project layout
+- "kernel/" — NT-style kernel, DOS VM, Linux ABI, networking, FAT and Win32 graphics.
+- "user/" — native PE programs, Linux ELF launchers and DOS applications.
+- "boot/" — GRUB configuration.
+- "tools/" — build, staging and validation scripts.
+- "docs/" — subsystem documentation and implementation notes.
 
-- `kernel/` — NT-style kernel, DOS VM, Linux ABI, networking, FAT and Win32 graphics.
-- `user/` — native PE programs, Linux ELF launchers and DOS applications.
-- `boot/` — GRUB configuration; `tools/` — build, staging and checks; `docs/` — subsystem notes.
+License
 
-## License
-
-MIT. Third-party components and Alpine packages retain their respective licenses. See [License](License).
-
----
-
-<p align="center">
-  <sub>Svindows — an experimental NT-compatible operating system for x86-64.</sub>
-</p>
+MIT. Third-party components and Alpine packages retain their respective licenses. See "License" (License).
