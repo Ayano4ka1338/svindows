@@ -9,6 +9,8 @@
 #define _SVINDOWS_MM_H_
 
 #include <nt/Ntdef.h>
+struct _KPROCESS;
+void MmCleanupProcessSections(struct _KPROCESS *process);
 
 /* The kernel image is linked here and loaded at physical KERNEL_PHYS_BASE. */
 #define KERNEL_VIRT_BASE 0xFFFFFFFF80000000ULL
@@ -105,10 +107,14 @@ const char *MmRegionTypeName(MM_REGION_TYPE type);
 void   MmInitializePhysicalMemory(const MM_MEMORY_MAP *map);
 UINT64 MmAllocatePage(void);                 /* one 4 KiB frame, or MM_INVALID_PHYS */
 UINT64 MmAllocatePages(SIZE_T count);        /* `count` contiguous frames          */
+/* DMA32 allocations are physically below 4 GiB for legacy bus masters. */
+UINT64 MmAllocatePageBelow4G(void);
+UINT64 MmAllocatePagesBelow4G(SIZE_T count);
 void   MmFreePages(UINT64 phys, SIZE_T count);
 
 UINT64 MmTotalPages(void);
 UINT64 MmFreePageCount(void);
+UINT64 MmUsablePageCount(void);
 
 /* ------------------------------------------------------------------ */
 /* Virtual memory (VMM)                                               */
@@ -118,6 +124,7 @@ void    MmInitializeVirtualMemory(const MM_MEMORY_MAP *map);
 BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags);
 BOOLEAN MmUnmapPage(UINT64 virt);
 BOOLEAN MmUnmapPageInAddressSpace(UINT64 root, UINT64 virt);
+void    MmReleaseUserPagesInAddressSpace(UINT64 root, UINT64 base, SIZE_T pages);
 UINT64  MmGetPhysicalAddress(UINT64 virt);   /* MM_INVALID_PHYS if not mapped */
 UINT64  MmGetPhysicalAddressInAddressSpace(UINT64 root, UINT64 virt);
 UINT64  MmGetPageFlags(UINT64 virt);         /* effective flags; zero if unmapped */

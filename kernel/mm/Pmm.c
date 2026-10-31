@@ -19,6 +19,7 @@ typedef struct _PMM_STATE {
     UINT64 total_pages;   /* frames covered (highest_address / PAGE)    */
     UINT64 free_pages;
     UINT64 used_pages;
+    UINT64 usable_pages; /* available RAM after permanent reservations */
     UINT64 next_hint;     /* frame index to start the next search from  */
 } PMM_STATE;
 
@@ -54,6 +55,8 @@ static void reserve_range(UINT64 base, UINT64 length)
             bit_set(f);
             if (g_pmm.free_pages)
                 g_pmm.free_pages--;
+            if (g_pmm.usable_pages)
+                g_pmm.usable_pages--;
             g_pmm.used_pages++;
         }
     }
@@ -68,6 +71,7 @@ static void free_range(UINT64 base, UINT64 length)
         if (bit_test(f)) {
             bit_clear(f);
             g_pmm.free_pages++;
+            g_pmm.usable_pages++;
             if (g_pmm.used_pages)
                 g_pmm.used_pages--;
         }
@@ -88,6 +92,7 @@ void MmInitializePhysicalMemory(const MM_MEMORY_MAP *map)
     memset(pmm_bitmap(), 0xFF, g_pmm.bitmap_bytes);
     g_pmm.free_pages = 0;
     g_pmm.used_pages = g_pmm.total_pages;
+    g_pmm.usable_pages = 0;
 
     for (UINT32 i = 0; i < map->count; i++) {
         const MM_MEMORY_REGION *r = &map->regions[i];
@@ -154,6 +159,68 @@ UINT64 MmAllocatePages(SIZE_T count)
     return MM_INVALID_PHYS;
 }
 
+
+/* Legacy PCI bus masters (including transitional VirtIO) use 32-bit DMA
+ * addresses. Keep this constraint in the physical allocator instead of
+ * allocating arbitrary RAM and rejecting it later in each device driver. */
+#define PMM_DMA32_PAGE_LIMIT (0x100000000ULL >> PAGE_SHIFT)
+
+UINT64 MmAllocatePageBelow4G(void)
+{
+    UINT64 flags = KiIrqSave();
+    UINT64 limit = g_pmm.total_pages < PMM_DMA32_PAGE_LIMIT ?
+                   g_pmm.total_pages : PMM_DMA32_PAGE_LIMIT;
+    UINT64 start = g_pmm.next_hint < limit ? g_pmm.next_hint : 0;
+    for (UINT64 scan = 0; scan < limit; ++scan) {
+        UINT64 frame = start + scan;
+        if (frame >= limit) frame -= limit;
+        if (!bit_test(frame)) {
+            bit_set(frame);
+            g_pmm.free_pages--;
+            g_pmm.used_pages++;
+            g_pmm.next_hint = frame + 1;
+            UINT64 result = frame << PAGE_SHIFT;
+            KiIrqRestore(flags);
+            return result;
+        }
+    }
+    KiIrqRestore(flags);
+    return MM_INVALID_PHYS;
+}
+
+UINT64 MmAllocatePagesBelow4G(SIZE_T count)
+{
+    if (!count) return MM_INVALID_PHYS;
+    if (count == 1) return MmAllocatePageBelow4G();
+    UINT64 flags = KiIrqSave();
+    UINT64 limit = g_pmm.total_pages < PMM_DMA32_PAGE_LIMIT ?
+                   g_pmm.total_pages : PMM_DMA32_PAGE_LIMIT;
+    if ((UINT64)count > limit) {
+        KiIrqRestore(flags);
+        return MM_INVALID_PHYS;
+    }
+    UINT64 run = 0, start = 0;
+    for (UINT64 frame = 0; frame < limit; ++frame) {
+        if (!bit_test(frame)) {
+            if (!run) start = frame;
+            if (++run == count) {
+                for (UINT64 page = start; page < start + count; ++page)
+                    bit_set(page);
+                g_pmm.free_pages -= count;
+                g_pmm.used_pages += count;
+                g_pmm.next_hint = start + count;
+                UINT64 result = start << PAGE_SHIFT;
+                KiIrqRestore(flags);
+                return result;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    KiIrqRestore(flags);
+    return MM_INVALID_PHYS;
+}
+
 void MmFreePages(UINT64 phys, SIZE_T count)
 {
     UINT64 first = phys >> PAGE_SHIFT;
@@ -170,3 +237,4 @@ void MmFreePages(UINT64 phys, SIZE_T count)
 
 UINT64 MmTotalPages(void)     { return g_pmm.total_pages; }
 UINT64 MmFreePageCount(void)  { return g_pmm.free_pages; }
+UINT64 MmUsablePageCount(void) { return g_pmm.usable_pages; }

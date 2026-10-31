@@ -9,6 +9,7 @@
 #define _SVINDOWS_GFX_H_
 
 #include <nt/Ntdef.h>
+#include <svindows/UiFont.h>
 
 typedef struct _GFX_FRAMEBUFFER {
     UINT64  PhysAddr;
@@ -44,5 +45,32 @@ void GfxDrawString(UINT32 x, UINT32 y, const char *s, UINT32 fg, UINT32 bg);
 
 #define GFX_FONT_W 9
 #define GFX_FONT_H 20
+
+/*
+ * Proportional UI text (Selawik, the Segoe UI metric-compatible face).
+ *
+ * The fixed 9x20 console font above belongs to the character console; window
+ * chrome and GDI text use the proportional face, whose metrics mirror Segoe UI
+ * at 96 DPI so layout numbers can be written the way Windows does.
+ */
+int    GfxUiAscent(void);
+int    GfxUiDescent(void);
+int    GfxUiLineHeight(void);
+/* Glyph lookup, shared with win32k's GDI: it rasterizes the same atlas into a
+ * device context instead of straight onto the framebuffer. */
+const GFX_FONT_GLYPH *GfxUiGlyph(UINT32 codepoint);
+UINT32 GfxUiCharWidth(UINT32 codepoint);
+UINT32 GfxUiTextWidth(const char *text);
+UINT32 GfxUiTextWidthW(const UINT16 *text);
+UINT32 GfxUiTextWidthCountW(const UINT16 *text, UINT32 count);
+UINT32 GfxUiTextFitCountW(const UINT16 *text, UINT32 count, UINT32 max_width,
+                          UINT32 *width_out);
+/* Draw with the pen origin at x on the baseline; coverage is blended over the
+ * existing pixels, so callers paint the background first. */
+void   GfxDrawUiText(UINT32 x, UINT32 baseline, const char *text, UINT32 color);
+void   GfxDrawUiTextW(UINT32 x, UINT32 baseline, const UINT16 *text,
+                      UINT32 color);
+/* Largest prefix of text that fits in max_width pixels. */
+UINT32 GfxUiTextFitW(const UINT16 *text, UINT32 max_width);
 
 #endif /* _SVINDOWS_GFX_H_ */

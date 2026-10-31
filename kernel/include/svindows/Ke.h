@@ -172,6 +172,7 @@ typedef enum _KTHREAD_STATE {
     ThreadStateRunning,
     ThreadStateWaiting,
     ThreadStateTerminated,
+    ThreadStateSuspended,
 } KTHREAD_STATE;
 
 typedef void (*PKSTART_ROUTINE)(PVOID StartContext);
@@ -252,18 +253,38 @@ typedef struct _KMUTANT {
  * KTHREAD - a schedulable thread of execution. Each thread owns a kernel stack;
  * KernelStackPointer holds its saved RSP while it is not the running thread.
  */
+/* Bounded user APC queue: no pool allocation while waking a target thread. */
+#define KE_MAXIMUM_USER_APCS 16
+#define KE_MAXIMUM_KERNEL_APCS 16
+typedef void (*PKKERNEL_APC_ROUTINE)(PVOID context, PVOID argument1,
+                                     PVOID argument2);
+typedef struct _KKERNEL_APC {
+    PKKERNEL_APC_ROUTINE Routine;
+    PVOID Context;
+    PVOID Argument1;
+    PVOID Argument2;
+} KKERNEL_APC, *PKKERNEL_APC;
+typedef struct _KUSER_APC {
+    UINT64 Routine;
+    UINT64 Context;
+    UINT64 Argument1;
+    UINT64 Argument2;
+} KUSER_APC, *PKUSER_APC;
+
 typedef struct _KTHREAD {
     UINT64          KernelStackPointer; /* saved RSP when switched out       */
     UINT64          KernelStackBase;    /* allocation base (for teardown)    */
     SIZE_T          KernelStackSize;
     KTHREAD_STATE   State;
     LONG            Priority;
+    LONG            RelativePriority;
     LONG            Quantum;            /* ticks left in the current slice   */
     PKSTART_ROUTINE StartRoutine;
     PVOID           StartContext;
     LIST_ENTRY      ReadyEntry;         /* link in the scheduler ready queue */
     LIST_ENTRY      ProcessEntry;       /* link in the owning process        */
     ULONG           ThreadId;
+    ULONG           SuspendCount;
     const char     *Name;
     struct _KPROCESS *Process;
 
@@ -331,7 +352,39 @@ typedef struct _KTHREAD {
     /* Appended: assembly-visible callback/trap field offsets stay unchanged. */
     UINT64           UserCallbackBase;
     KIRQL            SavedIrql;
+    KUSER_APC        UserApcs[KE_MAXIMUM_USER_APCS];
+    UINT8            UserApcHead;
+    UINT8            UserApcCount;
+    BOOLEAN          WaitAlertable;
+    /* Mappings owned by NtCreateThreadEx; main-thread mappings belong to the
+     * process image and are intentionally left at zero. */
+    UINT64           OwnedUserStackBase;
+    SIZE_T           OwnedUserStackPages;
+    UINT64           OwnedUserTebBase;
+    SIZE_T           OwnedUserTebPages;
+    UINT64           OwnedTlsBase;
+    SIZE_T           OwnedTlsPages;
+    KKERNEL_APC      KernelApcs[KE_MAXIMUM_KERNEL_APCS];
+    UINT8            KernelApcHead;
+    UINT8            KernelApcCount;
+    /* Nested USER callbacks preserve the interrupted continuation in kernel
+     * memory. Appended so assembly-visible offsets remain unchanged. */
+    UINT8            UserCallbackDepth;
+    struct {
+        UINT64 OrigRip, OrigRsp, OrigRflags, SavedReturnAddress;
+        UINT64 Continue, Window, Msg, LParam;
+    } UserCallbackFrames[7];
+    PVOID           DosContext; /* appended; syscall assembly offsets fixed */
+    UINT64          UserFsBase; /* architectural user FS base */
+    struct _LINUX_THREAD_CONTEXT *LinuxThread;
 } KTHREAD, *PKTHREAD;
+
+_Static_assert(__builtin_offsetof(KTHREAD, UserRip) == 0xAC0,
+               "KTHREAD.UserRip offset changed");
+_Static_assert(__builtin_offsetof(KTHREAD, UserRsp) == 0xAC8,
+               "KTHREAD.UserRsp offset changed");
+_Static_assert(__builtin_offsetof(KTHREAD, RedirectPending) == 0xB29,
+               "KTHREAD.RedirectPending offset changed");
 
 
 /*
@@ -349,6 +402,8 @@ typedef struct _MM_PROCESS_REGION {
     ULONG  Type;
     BOOLEAN InUse;
     UINT8  Padding[3];
+    PVOID  Section; /* referenced section object for MEM_MAPPED views */
+    UINT64 SectionOffset;
 } MM_PROCESS_REGION, *PMM_PROCESS_REGION;
 
 typedef struct _KPROCESS {
@@ -357,24 +412,41 @@ typedef struct _KPROCESS {
     struct _LDR_PROCESS_CONTEXT *LoaderContext;
     PVOID      Object;
     LIST_ENTRY ThreadListHead;
+    LIST_ENTRY JobEntry;
+    PVOID      JobObject;
     ULONG      ProcessId;
     ULONG      ParentProcessId;
+    ULONG      SecurityUserRid;
+    UCHAR      PriorityClass;  /* native PROCESS_PRIORITY_CLASS value */
+    LONG       BasePriority;
     NTSTATUS   ExitStatus;
     BOOLEAN    Exiting;
     UINT8      ProcessPadding[3];
+    ULONG      ShutdownLevel;
+    ULONG      ShutdownFlags;
+    volatile ULONG ErrorMode;
     UINT64     UserAllocationNext;
     UINT64     ThreadAllocationNext;
     HANDLE     StandardInput;
     HANDLE     StandardOutput;
     HANDLE     StandardError;
     const char *Name;
+    char       ImagePath[260];
     char       CurrentDirectory[260];
+    /* NUL-separated NAME=value entries, terminated by a second NUL.
+     * Kept with the process so ELF/PE transitions preserve the environment. */
+    char       Environment[2048];
     MM_PROCESS_REGION VmRegions[MM_MAX_PROCESS_REGIONS];
+    struct _LINUX_PROCESS_CONTEXT *LinuxContext;
 } KPROCESS, *PKPROCESS;
 
 void      KeInitializeScheduler(void);
 PKTHREAD  KeCreateThread(const char *name, PKSTART_ROUTINE routine,
                          PVOID context, LONG priority);
+PKTHREAD  KeCreateKernelThreadForProcess(PKPROCESS process, const char *name,
+                                         PKSTART_ROUTINE routine, PVOID context,
+                                         PDISPATCHER_HEADER termination,
+                                         LONG priority);
 PKTHREAD  KeCreateUserThread(const char *name, UINT64 user_entry,
                             UINT64 user_stack, UINT64 user_gs_base,
                             UINT64 user_arg, LONG priority);
@@ -383,6 +455,12 @@ PKTHREAD  KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
                                        UINT64 user_gs_base, UINT64 user_arg,
                                        LONG priority);
 PKTHREAD  KeGetCurrentThread(void);
+void      KeSetUserFsBase(UINT64 base);
+void      KeSetUserGsBase(UINT64 base);
+PKTHREAD  KeLookupThreadById(ULONG thread_id);
+NTSTATUS  KeSuspendThread(PKTHREAD thread, ULONG *previous_count);
+NTSTATUS  KeResumeThread(PKTHREAD thread, ULONG *previous_count);
+NTSTATUS  KeTerminateThreadByPointer(PKTHREAD thread, NTSTATUS exit_status);
 void      KeYield(void);
 NORETURN void KeTerminateThread(void);
 
@@ -403,6 +481,7 @@ void      KiUserQueueMouse(INT32 x, INT32 y, UINT8 buttons);
  * current so ring 3 can read the tick count / system time without a syscall. */
 void      KeInitializeSharedData(void);
 void      KeUpdateSharedData(UINT64 ticks);
+UINT64    KeQuerySystemTimeFileTime(void);
 
 /* Scheduler hooks used by the dispatcher (interrupts must be disabled). */
 void      KiReadyThread(PKTHREAD thread);   /* move a waiting thread to Ready */
@@ -431,6 +510,20 @@ NTSTATUS KeWaitForSingleObjectTimeout(PDISPATCHER_HEADER object,
 NTSTATUS KeWaitForMultipleObjects(ULONG count,
                                   PDISPATCHER_HEADER *objects,
                                   BOOLEAN wait_all, UINT64 timeout_ticks);
+NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
+                                          PDISPATCHER_HEADER *objects,
+                                          BOOLEAN wait_all, UINT64 timeout_ticks,
+                                          BOOLEAN alertable);
+NTSTATUS KeWaitForSingleObjectTimeoutAlertable(PDISPATCHER_HEADER object,
+                                               UINT64 timeout_ticks,
+                                               BOOLEAN alertable);
+NTSTATUS KeQueueUserApc(PKTHREAD thread, const KUSER_APC *apc);
+NTSTATUS KeDequeueUserApc(PKTHREAD thread, PKUSER_APC apc);
+BOOLEAN KeHasUserApc(PKTHREAD thread);
+/* Special kernel APCs run in the target thread at APC_LEVEL. Callbacks must
+ * not block. They do not turn a wait into STATUS_USER_APC. */
+NTSTATUS KeQueueKernelApc(PKTHREAD thread, const KKERNEL_APC *apc);
+void KiDeliverKernelApcs(void);
 
 /* Cancel a pending dispatcher wait and make the thread runnable. Called by the
  * clock when a wait deadline expires (interrupts already disabled). */

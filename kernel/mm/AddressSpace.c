@@ -94,6 +94,80 @@ UINT64 MmCreateAddressSpace(void)
     return root;
 }
 
+/* Eagerly duplicate user leaves. Device aliases are shared only when the
+ * owning subsystem identifies them; ordinary pages get independent frames. */
+UINT64 MmCloneUserAddressSpace(UINT64 source, PMM_SHARED_PAGE shared,
+                               PVOID context)
+{
+    if (!source || source != MmGetCurrentAddressSpace())
+        return MM_INVALID_PHYS;
+    UINT64 clone = MmCreateAddressSpace();
+    if (clone == MM_INVALID_PHYS) return clone;
+    UINT64 *pml4 = table(source);
+    for (UINT32 i = 0; i < PT_ENTRIES / 2; i++) {
+        if (!(pml4[i] & PTE_PRESENT)) continue;
+        UINT64 *pdpt = table(pml4[i]);
+        for (UINT32 j = 0; j < PT_ENTRIES; j++) {
+            if (!(pdpt[j] & PTE_PRESENT)) continue;
+            UINT64 *pd = table(pdpt[j]);
+            for (UINT32 k = 0; k < PT_ENTRIES; k++) {
+                if (!(pd[k] & PTE_PRESENT)) continue;
+                if (pd[k] & PTE_LARGE) goto failed;
+                UINT64 *pt = table(pd[k]);
+                for (UINT32 n = 0; n < PT_ENTRIES; n++) {
+                    UINT64 pte = pt[n];
+                    if (!(pte & PTE_PRESENT)) continue;
+                    UINT64 va = ((UINT64)i << 39) | ((UINT64)j << 30) |
+                                ((UINT64)k << 21) | ((UINT64)n << 12);
+                    if (va == 0x7ffe0000ULL) continue; /* shared KUSER */
+                    BOOLEAN alias = shared && shared(va, context);
+                    UINT64 pa = pte & PTE_ADDR_MASK;
+                    UINT64 destination = alias ? pa : MmAllocatePage();
+                    if (destination == MM_INVALID_PHYS) goto failed;
+                    if (!alias)
+                        memcpy(MmPhysToVirt(destination), MmPhysToVirt(pa),
+                               PAGE_SIZE);
+                    if (!MmMapPageInAddressSpace(clone, va, destination,
+                                                 pte & ~PTE_ADDR_MASK)) {
+                        if (!alias) MmFreePages(destination, 1);
+                        goto failed;
+                    }
+                }
+            }
+        }
+    }
+    return clone;
+
+failed:
+    /* The generic destructor owns RAM leaves but never device aliases. */
+    if (shared) {
+        for (UINT32 i = 0; i < PT_ENTRIES / 2; i++) {
+            if (!(pml4[i] & PTE_PRESENT)) continue;
+            UINT64 *pdpt = table(pml4[i]);
+            for (UINT32 j = 0; j < PT_ENTRIES; j++) {
+                if (!(pdpt[j] & PTE_PRESENT)) continue;
+                UINT64 *pd = table(pdpt[j]);
+                for (UINT32 k = 0; k < PT_ENTRIES; k++) {
+                    if (!(pd[k] & PTE_PRESENT) || (pd[k] & PTE_LARGE))
+                        continue;
+                    UINT64 *pt = table(pd[k]);
+                    for (UINT32 n = 0; n < PT_ENTRIES; n++) {
+                        if (!(pt[n] & PTE_PRESENT)) continue;
+                        UINT64 va = ((UINT64)i << 39) |
+                                    ((UINT64)j << 30) |
+                                    ((UINT64)k << 21) |
+                                    ((UINT64)n << 12);
+                        if (shared(va, context))
+                            MmUnmapPageInAddressSpace(clone, va);
+                    }
+                }
+            }
+        }
+    }
+    MmDestroyAddressSpace(clone);
+    return MM_INVALID_PHYS;
+}
+
 void MmDestroyAddressSpace(UINT64 root)
 {
     root &= PTE_ADDR_MASK;

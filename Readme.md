@@ -9,204 +9,57 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/uriyovsiannikov/svindows?style=flat-square" alt="Stars">
-  <img src="https://img.shields.io/github/issues/uriyovsiannikov/svindows?style=flat-square" alt="Issues">
-  <img src="https://img.shields.io/github/last-commit/uriyovsiannikov/svindows?style=flat-square" alt="Last Commit">
-  <img src="https://img.shields.io/github/repo-size/uriyovsiannikov/svindows?style=flat-square" alt="Repo Size">
-  <img src="https://img.shields.io/github/languages/top/uriyovsiannikov/svindows?style=flat-square" alt="Top Language">
-  <img src="https://img.shields.io/github/license/uriyovsiannikov/svindows?style=flat-square" alt="License">
+  <img src="https://img.shields.io/github/stars/Ayano4ka1338/svindows?style=flat-square" alt="Stars">
+  <img src="https://img.shields.io/github/issues/Ayano4ka1338/svindows?style=flat-square" alt="Issues">
+  <img src="https://img.shields.io/github/last-commit/Ayano4ka1338/svindows?style=flat-square" alt="Last Commit">
+  <img src="https://img.shields.io/github/repo-size/Ayano4ka1338/svindows?style=flat-square" alt="Repo Size">
+  <img src="https://img.shields.io/github/languages/top/Ayano4ka1338/svindows?style=flat-square" alt="Top Language">
+  <img src="https://img.shields.io/github/license/Ayano4ka1338/svindows?style=flat-square" alt="License">
 </p>
 
 ---
 
 ## About
 
-Svindows is a from-scratch `x86_64` operating system aiming for **binary compatibility with the Windows NT family**.
+Svindows is an experimental x86-64 operating system built from scratch around an NT-inspired kernel. It aims to run several program formats through separate compatibility layers, without using Microsoft source code.
 
-The goal is to load and execute native NT `PE/COFF` executables (`.exe` / `.dll`) without using Microsoft's code.
+## Features
 
-The project is built bottom-up around NT-style components:
+- **NT kernel:** Multiboot2/GRUB boot, long mode, ring 0/3, virtual memory, processes, threads, scheduler, kernel objects and system calls.
+- **Win32:** PE32+ EXE/DLL loading, PEB/TEB, native `Nt*` services, Win32 runtime, console, USER32 and GDI APIs.
+- **DOS:** COM and MZ executables, DOS/BIOS interrupts, partial 386 protected mode and DPMI, with virtual VGA, PIC, PIT and keyboard devices.
+- **Linux ABI:** x86-64 ELF and musl interpreter, Linux-style syscalls, file descriptors, `mmap`, `futex`, `poll`/`epoll`, processes and AF_INET sockets.
+- **Networking:** VirtIO-net, lwIP, IPv4, DHCP, DNS, ICMP, UDP and TCP; basic HTTP client support.
+- **Storage & graphics:** FAT32/VFAT, framebuffer console, Win32 GDI, and experimental Xorg/X11 desktop support.
+- **Userland:** `cmd.exe`, Alpine-based `curl`, `fastfetch`, Xorg utilities and `feh`; bundled DOS/4G DOOM compatibility target.
 
-`Ke` · `Mm` · `Ob` · `Ps` · `Io` · `Ex` · `Rtl` · `Hal`
+Compatibility is incomplete. DOS/DPMI gameplay, sound, full POSIX/Linux behavior, Linux signals, TLS/HTTPS and broad Windows API coverage are not guaranteed. X11 applications require a running X server. See `docs/` for implementation details and limitations.
 
-Svindows is intended for educational and research purposes.
+## Build and run
 
-> Svindows is not affiliated with Microsoft and contains no Microsoft code.
+Build on Linux with GCC/binutils, Clang/LLD, NASM, GNU Make, Python 3, GRUB tools, `xorriso`, `mtools` and QEMU. The first build may download pinned dependencies and Alpine packages.
 
-## Current Status
-
-- Boots via **Multiboot2/GRUB** and enters 64-bit long mode
-- GDT/TSS and IDT
-- CPU exception handling
-- Serial and VGA console
-- Higher-half kernel
-- Physical-frame allocator
-- Page tables and direct map
-- Kernel pool
-- NT-style object manager
-- Per-process handles and namespaces
-- Kernel threads
-- Preemptive scheduler
-- Ring-3 processes through `syscall`/`sysret`
-- NT-style `Nt*` service table
-- PE32+ executable and DLL loader
-- Writable FAT32 disk image support with subdirectories
-- Import resolution
-- Windows-compatible PEB/TEB structures
-- Static PE thread-local storage and `DLL_PROCESS_ATTACH` TLS callbacks
-- NT file I/O
-- Events, semaphores, threads and waits
-- Registry APIs
-- User-pointer validation
-- Ring-3 exception dispatch: vectored handlers, C `__try/__except` and
-  `__finally`, and C++ `throw`/`catch` through the MSVC x64 personality
-- `kernel32.dll`
-- `advapi32.dll`
-- `msvcrt.dll`
-- Small CRT for C/Win32 programs
-- Win32 TLS
-- Process/thread identity
-- Virtual memory APIs
-- Timing and synchronization
-- Dynamic DLL loading
-- 32-bpp framebuffer
-- PS/2 keyboard and mouse input
-- User-mode `cmd.exe` with PATH lookup, variables, batch files, redirection,
-  pipelines, history, arrow-key recall and in-line editing; stateless commands
-  such as `dir`, `type`, `copy`, `hostname` and `ver` are separate PE programs
-- Character console subsystem with screen buffers, colors, cursor and modes
-
-### Compatibility
-
-Svindows boots its own PE32+ command processor by default. The shell can launch
-child PE processes in isolated address spaces, search `PATH`, expand variables,
-run `.bat` files, connect processes with anonymous pipes, redirect standard
-handles, and mutate files and directories on the writable FAT32 volume.
-Child processes inherit the shell's current directory through the native
-process-parameters block, so external commands behave consistently after `cd`.
-
-## Roadmap
-
-See [`docs/Roadmap.md`](docs/Roadmap.md) for the planned development roadmap.
-
-## Building
-
-You need a Linux host with:
-
-- `gcc` or `clang`
-- `ld`
-- `nasm`
-- `grub-mkrescue`
-- `xorriso`
-- `mtools`
-- `qemu-system-x86_64`
-- `clang` and `lld-link` for Win64 PE images and host checks
-
-Build the complete system (kernel, user-mode runtime, disk and ISO):
-
-```bash
-make
-# or, equivalently:
-make all
+```sh
+make             # build the ISO and FAT disk image
+make run         # boot in QEMU using the serial console
+make run-gui     # boot in a graphical QEMU window
+make run-net     # run the network smoke test
+make clean       # remove generated files
 ```
 
-Verification (no test programs are installed on the OS disk):
+At the Svindows prompt, enter `help` to list shell commands. Run `startx.elf` from the graphical image to start the experimental X11 session.
 
-```bash
-make check        # host regressions with AddressSanitizer/UBSan
-make audit        # Clang analysis of all kernel/user C translation units
-make test-release # clean release build, host checks and headless QEMU smoke
-python3 tools/QemuSmoke.py --repeat 3
 ```
 
-QEMU checks use a disposable copy of the disk; logs are kept in `build/checks/`.
-See [`docs/KernelAudit.md`](docs/KernelAudit.md) for verified fixes, remaining
-limitations and the next NT-kernel milestones. Passing these checks is not a
-claim of complete Windows compatibility.
+## Project layout
 
-FAT write-failure testing can be enabled at build time. The following build
-fails the first physical sector write once while keeping disk reads and
-rollback writes operational:
-
-```bash
-make clean
-make CONFIG=release FAT_FAULT_AFTER=0
-```
-
-Positive values allow that many physical sector writes before the one-shot
-failure; the default `-1` disables fault injection.
-
-Remove all generated files:
-
-```bash
-make clean
-```
-
-Run in the current terminal (serial input/output):
-
-```bash
-make run-serial
-```
-
-Run with a graphical QEMU window:
-
-```bash
-make run-gui
-```
-
-Both run targets boot the same user-mode `cmd.exe`; `run-gui` opens QEMU's VGA
-window while `run-serial` stays entirely in the terminal.
-
-User-space executables are stored on the FAT32 disk image:
-
-```text
-build/disk.img
-```
-
-## Project Structure
-
-```text
-boot/            GRUB configuration
-
-kernel/
-  arch/x86_64/   Architecture-specific boot & CPU code
-  include/       Public kernel headers
-    nt/          NT ABI types and status codes
-    svindows/    Executive component interfaces
-  ke/            Kernel core, threads, scheduler
-  hal/            HAL, serial, VGA, framebuffer, PS/2, PIC, PIT
-  rtl/            Runtime Library
-  mm/             Memory Manager
-  ex/             Executive support
-  ob/             Object Manager
-  ldr/            PE/COFF image loader
-  ps/             Process manager, PEB/TEB
-  io/             ATA/FAT32 I/O
-  cm/             Configuration Manager / registry
-
-user/             User-space DLLs, CRT, and programs
-docs/             Architecture notes and roadmap
-tools/            Helper scripts
-```
-
-## Architecture
-
-Svindows follows an NT-inspired architecture with separate kernel subsystems for:
-
-- **Ke** — kernel core, threads and scheduler
-- **Mm** — memory management
-- **Ob** — object manager
-- **Ps** — process and thread management
-- **Io** — I/O subsystem
-- **Ex** — executive support
-- **Rtl** — runtime library
-- **Hal** — hardware abstraction layer
-
-The kernel is designed from the bottom up rather than being based on the Windows source code.
+- `kernel/` — NT-style kernel, DOS VM, Linux ABI, networking, FAT and Win32 graphics.
+- `user/` — native PE programs, Linux ELF launchers and DOS applications.
+- `boot/` — GRUB configuration; `tools/` — build, staging and checks; `docs/` — subsystem notes.
 
 ## License
 
-See [`License`](License).
+MIT. Third-party components and Alpine packages retain their respective licenses. See [License](License).
 
 ---
 

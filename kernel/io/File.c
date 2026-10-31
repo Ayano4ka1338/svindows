@@ -12,6 +12,7 @@
  * perform the normal handle-based seek, truncate, rename and delete operations.
  */
 #include <svindows/Io.h>
+#include "Internal.h"
 #include <svindows/Ob.h>
 #include <svindows/Ex.h>
 #include <svindows/Ke.h>
@@ -26,6 +27,7 @@ typedef enum _FILE_KIND {
     FileKindConsole,
     FileKindPipe,
     FileKindDirectory,
+    FileKindCharDevice,
 } FILE_KIND;
 
 typedef struct _IO_VNODE {
@@ -60,9 +62,178 @@ typedef struct _FILE_OBJECT {
     IO_VNODE *Vnode;
     IO_PIPE_BUFFER *Pipe;
     BOOLEAN   PipeWriter;
+    POBJECT   CompletionPort;
+    ULONG_PTR CompletionKey;
+    UINT64    CharTag;
+    void     *CharContext;
+    const IO_CHAR_DEVICE_OPS *CharOps;
 } FILE_OBJECT;
 
 static POBJECT_TYPE g_file_type;
+
+NTSTATUS IoReferenceFileData(HANDLE handle, PVOID *file_object,
+                             const UINT8 **data, SIZE_T *size)
+{
+    if (!file_object || !data || !size)
+        return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                 &object);
+    if (!NT_SUCCESS(status))
+        return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (file->Kind != FileKindDisk || !file->Vnode) {
+        ObDereferenceObject(object);
+        return STATUS_INVALID_HANDLE;
+    }
+    *file_object = object;
+    *data = file->Vnode->Data;
+    *size = file->Vnode->Size;
+    return STATUS_SUCCESS;
+}
+
+/* Kernel clients such as the DOS personality use the same process handles as
+ * native programs. No user-pointer probe is appropriate for their buffers. */
+static NTSTATUS io_read_handle_kernel(HANDLE handle, void *buffer,
+                                      SIZE_T length, SIZE_T *read_out,
+                                      BOOLEAN wait)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    SIZE_T n = 0;
+    if (file->Kind == FileKindConsole)
+        n = wait ? ConRead(buffer, length) : ConTryRead(buffer, length);
+    else if (file->Kind == FileKindCharDevice && file->CharOps) {
+        if (wait && file->CharOps->Read)
+            n = file->CharOps->Read(file->CharContext, buffer, length);
+        else if (!wait && file->CharOps->TryRead)
+            n = file->CharOps->TryRead(file->CharContext, buffer, length);
+    }
+    else if (file->Kind == FileKindPipe) {
+        IO_PIPE_BUFFER *pipe = file->Pipe;
+        while (!n && length) {
+            UINT64 irq = KiIrqSave();
+            while (n < length && pipe->Count) {
+                ((UINT8 *)buffer)[n++] = pipe->Data[pipe->ReadPosition];
+                pipe->ReadPosition = (pipe->ReadPosition + 1) % IO_PIPE_CAPACITY;
+                pipe->Count--;
+            }
+            BOOLEAN eof = !pipe->Writers;
+            KiIrqRestore(irq);
+            if (!n && !eof && wait) KeYield(); else break;
+        }
+    } else if (file->Kind == FileKindDisk && file->Vnode &&
+               file->Position < file->Vnode->Size) {
+        SIZE_T available = file->Vnode->Size - file->Position;
+        n = length < available ? length : available;
+        memcpy(buffer, file->Vnode->Data + file->Position, n);
+        file->Position += n;
+    }
+    *read_out = n;
+    ObDereferenceObject(object);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS IoReadHandleKernel(HANDLE handle, void *buffer, SIZE_T length,
+                            SIZE_T *read_out)
+{
+    return io_read_handle_kernel(handle, buffer, length, read_out, TRUE);
+}
+
+NTSTATUS IoTryReadHandleKernel(HANDLE handle, void *buffer, SIZE_T length,
+                               SIZE_T *read_out)
+{
+    return io_read_handle_kernel(handle, buffer, length, read_out, FALSE);
+}
+
+NTSTATUS IoHandleInputAvailableKernel(HANDLE handle, BOOLEAN *available)
+{
+    if (!available) return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (file->Kind == FileKindConsole)
+        *available = ConInputAvailable();
+    else if (file->Kind == FileKindCharDevice && file->CharOps &&
+             file->CharOps->InputAvailable)
+        *available = file->CharOps->InputAvailable(file->CharContext);
+    else if (file->Kind == FileKindPipe) {
+        UINT64 irq = KiIrqSave();
+        *available = file->Pipe->Count != 0;
+        KiIrqRestore(irq);
+    } else
+        *available = file->Kind == FileKindDisk && file->Vnode &&
+                     file->Position < file->Vnode->Size;
+    ObDereferenceObject(object);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
+                             SIZE_T *written_out)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    SIZE_T n = 0;
+    if (file->Kind == FileKindConsole) n = ConWrite(buffer, length);
+    else if (file->Kind == FileKindCharDevice && file->CharOps &&
+             file->CharOps->Write)
+        n = file->CharOps->Write(file->CharContext, buffer, length);
+    else if (file->Kind == FileKindPipe) {
+        IO_PIPE_BUFFER *pipe = file->Pipe;
+        while (n < length) {
+            UINT64 irq = KiIrqSave();
+            if (!pipe->Readers) {status = STATUS_PIPE_BROKEN;KiIrqRestore(irq);break;}
+            while (n < length && pipe->Count < IO_PIPE_CAPACITY) {
+                pipe->Data[pipe->WritePosition] = ((const UINT8 *)buffer)[n++];
+                pipe->WritePosition = (pipe->WritePosition + 1) % IO_PIPE_CAPACITY;
+                pipe->Count++;
+            }
+            KiIrqRestore(irq);
+            if (n < length) KeYield();
+        }
+    } else if (file->Kind == FileKindDisk && file->Vnode &&
+               (file->Access & GENERIC_WRITE)) {
+        IO_VNODE *vnode = file->Vnode;
+        if (length > (SIZE_T)-1 - file->Position) {
+            status = STATUS_INVALID_PARAMETER;
+        } else {
+            SIZE_T end = file->Position + length;
+            if (end > vnode->Capacity) {
+                SIZE_T capacity = (end + PAGE_SIZE - 1) & ~PAGE_MASK;
+                UINT8 *expanded = ExAllocatePoolWithTag(NonPagedPool,
+                                                         capacity, 'wIoF');
+                if (!expanded) status = STATUS_NO_MEMORY;
+                else {
+                    memset(expanded, 0, capacity);
+                    if (vnode->Data && vnode->Size)
+                        memcpy(expanded, vnode->Data, vnode->Size);
+                    if (vnode->Data) ExFreePool(vnode->Data);
+                    vnode->Data = expanded;
+                    vnode->Capacity = capacity;
+                }
+            }
+            if (NT_SUCCESS(status)) {
+                memcpy(vnode->Data + file->Position, buffer, length);
+                file->Position = end;
+                if (end > vnode->Size) vnode->Size = end;
+                status = FatStoreFile(vnode->Name, vnode->Data,
+                                      vnode->Size, FALSE);
+                if (NT_SUCCESS(status)) n = length;
+            }
+        }
+    } else status = STATUS_NOT_SUPPORTED;
+    *written_out = n;
+    ObDereferenceObject(object);
+    return status;
+}
 static POBJECT      g_console_file;
 static LIST_ENTRY   g_open_disk_files;
 static LIST_ENTRY   g_vnodes;
@@ -75,78 +246,6 @@ static LIST_ENTRY   g_vnodes;
 #define FILE_WRITE_DATA_LOCAL   0x00000002u
 #define FILE_APPEND_DATA_LOCAL  0x00000004u
 #define FILE_EXECUTE_LOCAL      0x00000020u
-
-static char IopLower(char c)
-{
-    return c >= 'A' && c <= 'Z' ? (char)(c + ('a' - 'A')) : c;
-}
-
-static BOOLEAN IopSamePath(const char *left, const char *right)
-{
-    while (*left && IopLower(*left) == IopLower(*right)) {
-        left++;
-        right++;
-    }
-    return (BOOLEAN)(*left == 0 && *right == 0);
-}
-
-static BOOLEAN IopCanonicalizeDosPath(const char *input, char output[260])
-{
-    if (!input || !*input)
-        return FALSE;
-    UINT32 in = 0, out = 0;
-    if (input[1] == ':') {
-        if (IopLower(input[0]) != 'c')
-            return FALSE;
-        in = 2;
-    }
-    output[out++] = 'C';
-    output[out++] = ':';
-    output[out++] = '\\';
-    while (input[in] == '\\' || input[in] == '/') in++;
-
-    while (input[in]) {
-        char component[260];
-        UINT32 length = 0;
-        while (input[in] && input[in] != '\\' && input[in] != '/') {
-            if (length + 1 >= sizeof(component))
-                return FALSE;
-            component[length++] = input[in++];
-        }
-        while (input[in] == '\\' || input[in] == '/') in++;
-        component[length] = 0;
-        if (!length || (length == 1 && component[0] == '.'))
-            continue;
-        if (length == 2 && component[0] == '.' && component[1] == '.') {
-            if (out > 3) {
-                out--;
-                while (out > 3 && output[out - 1] != '\\') out--;
-            }
-            continue;
-        }
-        if (out > 3 && output[out - 1] != '\\') {
-            if (out + 1 >= 260) return FALSE;
-            output[out++] = '\\';
-        }
-        if (out + length >= 260)
-            return FALSE;
-        memcpy(output + out, component, length);
-        out += length;
-    }
-    output[out] = 0;
-    return TRUE;
-}
-
-static BOOLEAN IopPathIsWithin(const char *directory, const char *path)
-{
-    while (*directory && IopLower(*directory) == IopLower(*path)) {
-        directory++;
-        path++;
-    }
-    if (*directory)
-        return FALSE;
-    return *path == 0 || *path == '\\' || *path == '/';
-}
 
 static BOOLEAN IopWantsRead(ACCESS_MASK access)
 {
@@ -167,15 +266,15 @@ static NTSTATUS IopCheckShareAccess(const char *name, ACCESS_MASK access,
          entry != &g_vnodes; entry = entry->Flink) {
         IO_VNODE *vnode = CONTAINING_RECORD(entry, IO_VNODE, Entry);
         if (vnode->DeletePending &&
-            (IopSamePath(vnode->Name, name) ||
+            (IoPathSame(vnode->Name, name) ||
              ((vnode->Attributes & 0x10) &&
-              IopPathIsWithin(vnode->Name, name))))
+              IoPathIsWithin(vnode->Name, name))))
             return STATUS_DELETE_PENDING;
     }
     PLIST_ENTRY head = &g_open_disk_files;
     for (PLIST_ENTRY entry = head->Flink; entry != head; entry = entry->Flink) {
         FILE_OBJECT *open = CONTAINING_RECORD(entry, FILE_OBJECT, OpenEntry);
-        if (!open->Vnode || !IopSamePath(open->Vnode->Name, name))
+        if (!open->Vnode || !IoPathSame(open->Vnode->Name, name))
             continue;
         if ((IopWantsRead(access) &&
              !(open->ShareAccess & FILE_SHARE_READ_LOCAL)) ||
@@ -201,7 +300,7 @@ static IO_VNODE *IopAcquireVnode(const char *name, UINT8 *data, SIZE_T size,
     for (PLIST_ENTRY entry = g_vnodes.Flink;
          entry != &g_vnodes; entry = entry->Flink) {
         IO_VNODE *vnode = CONTAINING_RECORD(entry, IO_VNODE, Entry);
-        if (!IopSamePath(vnode->Name, name))
+        if (!IoPathSame(vnode->Name, name))
             continue;
         vnode->References++;
         KiIrqRestore(flags);
@@ -267,6 +366,236 @@ static void IopReleaseVnode(IO_VNODE *vnode)
     ExFreePool(vnode);
 }
 
+/* Kernel personalities use the same vnodes and handle table as NtCreateFile.
+ * The input is a DOS-style path already translated by the caller. */
+NTSTATUS IoOpenFileKernel(const char *path, ULONG access, BOOLEAN create,
+                          BOOLEAN exclusive, BOOLEAN truncate,
+                          HANDLE *handle_out)
+{
+    if (!handle_out) return STATUS_INVALID_PARAMETER;
+    *handle_out = NULL;
+    char name[260];
+    if (!IoCanonicalizeDosPathKernel(path, name))
+        return STATUS_OBJECT_NAME_INVALID;
+    UINT64 irq = KiIrqSave();
+    NTSTATUS status = IopCheckShareAccess(name, access,
+        FILE_SHARE_READ_LOCAL | FILE_SHARE_WRITE_LOCAL | FILE_SHARE_DELETE_LOCAL);
+    KiIrqRestore(irq);
+    if (!NT_SUCCESS(status)) return status;
+
+    FAT_FIND_DATA info;
+    status = FatQueryPath(name, &info);
+    BOOLEAN exists = NT_SUCCESS(status);
+    if (exists && (info.Attributes & 0x10u)) return STATUS_ACCESS_DENIED;
+    if (exists && create && exclusive) return STATUS_OBJECT_NAME_COLLISION;
+    if (!exists && !create) return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (!exists || truncate) {
+        status = FatStoreFile(name, NULL, 0, !exists);
+        if (!NT_SUCCESS(status)) return status;
+    }
+    void *data = NULL;
+    SIZE_T size = 0;
+    status = FatLoadFile(name, &data, &size, &info);
+    if (!NT_SUCCESS(status)) return status;
+    IO_VNODE *vnode = IopAcquireVnode(name, data, size, &info, truncate);
+    if (!vnode) return STATUS_NO_MEMORY;
+
+    POBJECT object;
+    status = ObCreateObject(g_file_type, sizeof(FILE_OBJECT), &object);
+    if (!NT_SUCCESS(status)) {
+        IopReleaseVnode(vnode);
+        return status;
+    }
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    file->Kind = FileKindDisk;
+    file->Access = access;
+    file->ShareAccess = FILE_SHARE_READ_LOCAL | FILE_SHARE_WRITE_LOCAL |
+                        FILE_SHARE_DELETE_LOCAL;
+    file->Vnode = vnode;
+    InitializeListHead(&file->OpenEntry);
+    irq = KiIrqSave();
+    InsertTailList(&g_open_disk_files, &file->OpenEntry);
+    KiIrqRestore(irq);
+    status = ObCreateHandle(object, GENERIC_ALL, handle_out);
+    ObDereferenceObject(object);
+    return status;
+}
+
+NTSTATUS IoSeekHandleKernel(HANDLE handle, INT64 offset, UINT32 whence,
+                            UINT64 *position_out)
+{
+    if (!position_out || whence > 2) return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                 &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (file->Kind != FileKindDisk || !file->Vnode) {
+        status = STATUS_INVALID_PARAMETER;
+    } else {
+        UINT64 base = whence == 0 ? 0 : whence == 1 ? file->Position :
+                      file->Vnode->Size;
+        UINT64 next;
+        if (offset < 0) {
+            UINT64 distance = 0 - (UINT64)offset;
+            if (distance > base) status = STATUS_INVALID_PARAMETER;
+            next = base - distance;
+        } else {
+            next = base + (UINT64)offset;
+            if (next < base) status = STATUS_INVALID_PARAMETER;
+        }
+        if (NT_SUCCESS(status)) {
+            file->Position = (SIZE_T)next;
+            *position_out = next;
+        }
+    }
+    ObDereferenceObject(object);
+    return status;
+}
+
+NTSTATUS IoQueryFileStatKernel(HANDLE handle, IO_KERNEL_FILE_STAT *out)
+{
+    if (!out) return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                 &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    IO_VNODE *vnode = file->Vnode;
+    memset(out, 0, sizeof(*out));
+    out->Kind = file->Kind;
+    if (vnode) {
+        out->Size = vnode->Size;
+        out->Attributes = vnode->Attributes;
+        out->FatWriteDate = vnode->FatWriteDate;
+        out->FatWriteTime = vnode->FatWriteTime;
+        FAT_FIND_DATA current_info;
+        if (NT_SUCCESS(FatQueryPath(vnode->Name, &current_info))) {
+            out->FatWriteDate = current_info.WriteDate;
+            out->FatWriteTime = current_info.WriteTime;
+        }
+        UINT64 hash = 14695981039346656037ULL;
+        for (const char *p = vnode->Name; *p; p++) {
+            hash ^= (UINT8)IoPathLower(*p);
+            hash *= 1099511628211ULL;
+        }
+        out->FileId = hash ? hash : 1;
+    } else {
+        out->FileId = file->Kind + 1;
+    }
+    ObDereferenceObject(object);
+    return STATUS_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Character-device file objects                                       */
+/* ------------------------------------------------------------------ */
+
+NTSTATUS IoCreateCharDeviceFile(UINT64 tag, void *context,
+                                const IO_CHAR_DEVICE_OPS *ops, HANDLE *out)
+{
+    if (!out || !ops || !ops->Close) return STATUS_INVALID_PARAMETER;
+    *out = NULL;
+    POBJECT object;
+    NTSTATUS status = ObCreateObject(g_file_type, sizeof(FILE_OBJECT), &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    file->Kind = FileKindCharDevice;
+    file->Access = GENERIC_READ | GENERIC_WRITE;
+    file->CharTag = tag;
+    file->CharContext = context;
+    file->CharOps = ops;
+    status = ObCreateHandle(object, GENERIC_ALL, out);
+    ObDereferenceObject(object);
+    return status;
+}
+
+NTSTATUS IoQueryCharDeviceFileInTable(POB_HANDLE_TABLE table, HANDLE handle,
+                                      UINT64 *tag, void **context)
+{
+    if (!tag || !context) return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandleInTable(table, handle, 0,
+                                                        g_file_type, &object,
+                                                        NULL);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (file->Kind != FileKindCharDevice || !file->CharOps) {
+        ObDereferenceObject(object);
+        return STATUS_INVALID_HANDLE;
+    }
+    *tag = file->CharTag;
+    *context = file->CharContext;
+    ObDereferenceObject(object);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS IoQueryCharDeviceFile(HANDLE handle, UINT64 *tag, void **context)
+{
+    if (!tag || !context) return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                 &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (file->Kind != FileKindCharDevice || !file->CharOps) {
+        ObDereferenceObject(object);
+        return STATUS_INVALID_HANDLE;
+    }
+    *tag = file->CharTag;
+    *context = file->CharContext;
+    ObDereferenceObject(object);
+    return STATUS_SUCCESS;
+}
+
+void IoPrepareFileForWindows(HANDLE handle)
+{
+    POBJECT object;
+    if (!NT_SUCCESS(ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                              &object)))
+        return;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (file->Kind == FileKindCharDevice && file->CharOps &&
+        file->CharOps->PrepareWindows)
+        file->CharOps->PrepareWindows(file->CharContext);
+    ObDereferenceObject(object);
+}
+
+NTSTATUS IoOpenConsoleKernel(HANDLE *out)
+{
+    if (!out) return STATUS_INVALID_PARAMETER;
+    *out = NULL;
+    if (!g_console_file) return STATUS_DEVICE_NOT_READY;
+    return ObCreateHandle(g_console_file, GENERIC_ALL, out);
+}
+
+NTSTATUS IoIsConsoleFileInTable(POB_HANDLE_TABLE table, HANDLE handle)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandleInTable(table, handle, 0,
+                                                        g_file_type, &object,
+                                                        NULL);
+    if (!NT_SUCCESS(status)) return STATUS_INVALID_HANDLE;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    status = file->Kind == FileKindConsole ? STATUS_SUCCESS :
+                                          STATUS_INVALID_HANDLE;
+    ObDereferenceObject(object);
+    return status;
+}
+
+NTSTATUS IoIsConsoleFile(HANDLE handle)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                 &object);
+    if (!NT_SUCCESS(status)) return STATUS_INVALID_HANDLE;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    status = file->Kind == FileKindConsole ? STATUS_SUCCESS :
+                                          STATUS_INVALID_HANDLE;
+    ObDereferenceObject(object);
+    return status;
+}
+
 void IoConsoleInputCharacter(char c)
 {
     ConQueueInputCharacter(c);
@@ -275,6 +604,10 @@ void IoConsoleInputCharacter(char c)
 static void IopFileDelete(POBJECT object)
 {
     FILE_OBJECT *f = (FILE_OBJECT *)object;
+    if (f->CompletionPort) {
+        ObDereferenceObject(f->CompletionPort);
+        f->CompletionPort = NULL;
+    }
     BOOLEAN disk_backed = f->Kind == FileKindDisk ||
                           f->Kind == FileKindDirectory;
     if ((f->Kind == FileKindDisk || f->Kind == FileKindDirectory) &&
@@ -299,6 +632,10 @@ static void IopFileDelete(POBJECT object)
             ExFreePool(f->Pipe);
         }
     }
+    if (f->Kind == FileKindCharDevice && f->CharOps) {
+        f->CharOps->Close(f->CharContext);
+        return;
+    }
     IopReleaseVnode(f->Vnode);
     if (disk_backed) {
         NTSTATUS status = FatFlush();
@@ -311,6 +648,7 @@ static void IopFileDelete(POBJECT object)
 void IoInitializeObjects(void)
 {
     ConInitialize();
+    IoInitializeCompletionObjects();
     InitializeListHead(&g_open_disk_files);
     InitializeListHead(&g_vnodes);
     g_file_type = ObCreateObjectType("File", IopFileDelete);
@@ -373,7 +711,10 @@ UINT64 NtCreateFile(UINT64 *a)
     } else {
         /* Otherwise pass the complete DOS-style path to FAT. */
         char canonical_name[260];
-        if (!IopCanonicalizeDosPath(name, canonical_name)) {
+        PKPROCESS current = KeGetCurrentThread()->Process;
+        if (!IoResolveDosPathKernel(name,
+                                    current ? current->CurrentDirectory : NULL,
+                                    canonical_name)) {
             status = STATUS_OBJECT_NAME_INVALID;
             goto create_done;
         }
@@ -488,6 +829,19 @@ create_done:
     return (UINT64)status;
 }
 
+UINT64 NtOpenFile(UINT64 *a)
+{
+    UINT64 create_args[11] = {0};
+    create_args[0] = a[0]; /* PHANDLE */
+    create_args[1] = a[1]; /* DesiredAccess */
+    create_args[2] = a[2]; /* ObjectAttributes */
+    create_args[3] = a[3]; /* IoStatusBlock */
+    create_args[6] = a[4]; /* ShareAccess */
+    create_args[7] = FILE_OPEN;
+    create_args[8] = a[5]; /* OpenOptions */
+    return NtCreateFile(create_args);
+}
+
 /*
  * NtReadFile / NtWriteFile real signature (through the argument array):
  *   a0 HANDLE File   a1 HANDLE Event   a2 PIO_APC_ROUTINE   a3 PVOID ApcContext
@@ -500,10 +854,14 @@ UINT64 NtReadFile(UINT64 *a)
     PIO_STATUS_BLOCK iosb   = (PIO_STATUS_BLOCK)a[4];
     void            *buffer = (void *)a[5];
     UINT64           length = (UINT32)a[6]; /* ULONG Length; upper stack half is undefined */
+    UINT64           offset = 0;
+    BOOLEAN          explicit_offset = a[7] != 0;
 
     if (!MmProbeForWrite((UINT64)iosb, sizeof(IO_STATUS_BLOCK)) ||
-        !MmProbeForWrite((UINT64)buffer, length))
+        !MmProbeForWrite((UINT64)buffer, length) ||
+        (explicit_offset && !MmProbeForRead(a[7], sizeof(offset))))
         return (UINT64)STATUS_ACCESS_VIOLATION;
+    if (explicit_offset) memcpy(&offset, (PVOID)a[7], sizeof(offset));
 
     POBJECT obj;
     if (!NT_SUCCESS(ObReferenceObjectByHandle(handle, 0, g_file_type, &obj)))
@@ -513,6 +871,9 @@ UINT64 NtReadFile(UINT64 *a)
     UINT64 n = 0;
     if (f->Kind == FileKindConsole) {
         n = ConRead(buffer, length);
+    } else if (f->Kind == FileKindCharDevice && f->CharOps) {
+        if (f->CharOps->Read)
+            n = f->CharOps->Read(f->CharContext, buffer, length);
     } else if (f->Kind == FileKindPipe) {
         IO_PIPE_BUFFER *pipe = f->Pipe;
         UINT8 *out = (UINT8 *)buffer;
@@ -530,18 +891,22 @@ UINT64 NtReadFile(UINT64 *a)
             KeYield();
         }
     } else if (f->Kind == FileKindDisk && f->Vnode &&
-               f->Position < f->Vnode->Size) {
-        SIZE_T avail = f->Vnode->Size - f->Position;
+               (explicit_offset ? offset : f->Position) < f->Vnode->Size) {
+        SIZE_T position = explicit_offset ? (SIZE_T)offset : f->Position;
+        SIZE_T avail = f->Vnode->Size - position;
         n = length < avail ? length : avail;
-        memcpy(buffer, f->Vnode->Data + f->Position, n);
-        f->Position += n;
+        memcpy(buffer, f->Vnode->Data + position, n);
+        if (!explicit_offset) f->Position += n;
     }
 
-    ObDereferenceObject(obj);
     if (iosb) {
         iosb->Status = STATUS_SUCCESS;
         iosb->Information = n;
     }
+    if (f->CompletionPort && explicit_offset)
+        IoPostCompletion(f->CompletionPort, f->CompletionKey, iosb,
+                         STATUS_SUCCESS, n);
+    ObDereferenceObject(obj);
     return (UINT64)STATUS_SUCCESS;
 }
 
@@ -551,10 +916,14 @@ UINT64 NtWriteFile(UINT64 *a)
     PIO_STATUS_BLOCK iosb   = (PIO_STATUS_BLOCK)a[4];
     const void      *buffer = (const void *)a[5];
     UINT64           length = (UINT32)a[6]; /* ULONG Length; upper stack half is undefined */
+    UINT64           offset = 0;
+    BOOLEAN          explicit_offset = a[7] != 0;
 
     if (!MmProbeForWrite((UINT64)iosb, sizeof(IO_STATUS_BLOCK)) ||
-        !MmProbeForRead((UINT64)buffer, length))
+        !MmProbeForRead((UINT64)buffer, length) ||
+        (explicit_offset && !MmProbeForRead(a[7], sizeof(offset))))
         return (UINT64)STATUS_ACCESS_VIOLATION;
+    if (explicit_offset) memcpy(&offset, (PVOID)a[7], sizeof(offset));
 
     POBJECT obj;
     if (!NT_SUCCESS(ObReferenceObjectByHandle(handle, 0, g_file_type, &obj)))
@@ -564,6 +933,9 @@ UINT64 NtWriteFile(UINT64 *a)
     UINT64 n = 0;
     if (f->Kind == FileKindConsole) {
         n = ConWrite(buffer, length);
+    } else if (f->Kind == FileKindCharDevice && f->CharOps) {
+        if (f->CharOps->Write)
+            n = f->CharOps->Write(f->CharContext, buffer, length);
     } else if (f->Kind == FileKindPipe) {
         IO_PIPE_BUFFER *pipe = f->Pipe;
         const UINT8 *input = (const UINT8 *)buffer;
@@ -592,8 +964,9 @@ UINT64 NtWriteFile(UINT64 *a)
             iosb->Information = 0;
             return (UINT64)STATUS_ACCESS_DENIED;
         }
-        UINT64 end = f->Position + length;
-        if (end < f->Position) {
+        UINT64 position = explicit_offset ? offset : f->Position;
+        UINT64 end = position + length;
+        if (end < position) {
             ObDereferenceObject(obj);
             return (UINT64)STATUS_INVALID_PARAMETER;
         }
@@ -618,10 +991,10 @@ UINT64 NtWriteFile(UINT64 *a)
             vnode->Data = expanded;
             vnode->Capacity = capacity;
         }
-        memcpy(vnode->Data + f->Position, buffer, length);
-        f->Position += length;
-        if (f->Position > vnode->Size)
-            vnode->Size = f->Position;
+        memcpy(vnode->Data + position, buffer, length);
+        if (!explicit_offset) f->Position += length;
+        if (end > vnode->Size)
+            vnode->Size = end;
         NTSTATUS write_status = FatStoreFile(vnode->Name, vnode->Data,
                                              vnode->Size, FALSE);
         if (!NT_SUCCESS(write_status)) {
@@ -633,12 +1006,40 @@ UINT64 NtWriteFile(UINT64 *a)
         n = length;
     }
 
-    ObDereferenceObject(obj);
     if (iosb) {
         iosb->Status = STATUS_SUCCESS;
         iosb->Information = n;
     }
+    if (f->CompletionPort && explicit_offset)
+        IoPostCompletion(f->CompletionPort, f->CompletionKey, iosb,
+                         STATUS_SUCCESS, n);
+    ObDereferenceObject(obj);
     return (UINT64)STATUS_SUCCESS;
+}
+
+UINT64 NtAssociateIoCompletionFile(UINT64 *a)
+{
+    POBJECT file_object;
+    NTSTATUS status = ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)a[0], 0,
+                                                g_file_type, &file_object);
+    if (!NT_SUCCESS(status)) return (UINT64)status;
+    POBJECT port_object;
+    status = IoReferenceCompletionPort((HANDLE)(ULONG_PTR)a[1], &port_object);
+    if (NT_SUCCESS(status)) {
+        FILE_OBJECT *file = file_object;
+        UINT64 flags = KiIrqSave();
+        if (file->CompletionPort ||
+            (file->Kind != FileKindDisk && file->Kind != FileKindPipe)) {
+            status = STATUS_INVALID_PARAMETER;
+        } else {
+            file->CompletionPort = port_object;
+            file->CompletionKey = (ULONG_PTR)a[2];
+        }
+        KiIrqRestore(flags);
+        if (!NT_SUCCESS(status)) ObDereferenceObject(port_object);
+    }
+    ObDereferenceObject(file_object);
+    return (UINT64)status;
 }
 
 static BOOLEAN IopUtf8ToWide(const char *text, UINT16 *wide,
@@ -670,6 +1071,134 @@ static BOOLEAN IopUtf8ToWide(const char *text, UINT16 *wide,
     }
     *bytes_out = units * sizeof(UINT16);
     return TRUE;
+}
+
+static BOOLEAN IopLeapYear(UINT32 year)
+{
+    return (BOOLEAN)((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+}
+
+static UINT64 IopFatWriteTime(const IO_VNODE *vnode)
+{
+    if (!vnode || !vnode->FatWriteDate) return 0;
+    UINT32 year = 1980 + (vnode->FatWriteDate >> 9);
+    UINT32 month = (vnode->FatWriteDate >> 5) & 15;
+    UINT32 day = vnode->FatWriteDate & 31;
+    static const UINT8 days_per_month[12] =
+        {31,28,31,30,31,30,31,31,30,31,30,31};
+    UINT32 month_days = month && month <= 12
+        ? (UINT32)days_per_month[month - 1] : 0;
+    if (month == 2 && IopLeapYear(year)) month_days++;
+    if (!month_days || !day || day > month_days) return 0;
+    UINT64 days = 0;
+    for (UINT32 y = 1601; y < year; ++y)
+        days += IopLeapYear(y) ? 366 : 365;
+    for (UINT32 m = 1; m < month; ++m)
+        days += days_per_month[m - 1] + (m == 2 && IopLeapYear(year));
+    days += day - 1;
+    UINT64 seconds = days * 86400 +
+        ((vnode->FatWriteTime >> 11) & 31) * 3600 +
+        ((vnode->FatWriteTime >> 5) & 63) * 60 +
+        (vnode->FatWriteTime & 31) * 2;
+    return seconds * 10000000ULL;
+}
+
+/* Native file information uses the open file object, including its current
+ * byte offset, and writes the exact per-class NT layout to the caller. */
+UINT64 NtQueryInformationFile(UINT64 *a)
+{
+    PIO_STATUS_BLOCK iosb = (PIO_STATUS_BLOCK)a[1];
+    UINT8 *buffer = (UINT8 *)a[2];
+    UINT32 length = (UINT32)a[3];
+    UINT32 info_class = (UINT32)a[4];
+    if (!MmProbeForWrite((UINT64)iosb, sizeof(*iosb)) ||
+        !MmProbeForWrite((UINT64)buffer, length))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle((HANDLE)a[0], 0,
+                                                 g_file_type, &object);
+    if (!NT_SUCCESS(status)) {
+        iosb->Status = status;
+        iosb->Information = 0;
+        return (UINT64)status;
+    }
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    IO_VNODE *vnode = file->Vnode;
+    UINT32 needed = 0;
+    UINT32 attributes = vnode ? vnode->Attributes : 0x80;
+    UINT64 size = vnode ? vnode->Size : 0;
+    UINT64 write_time = IopFatWriteTime(vnode);
+    switch (info_class) {
+    case 4: /* FILE_BASIC_INFORMATION */
+        needed = 40;
+        if (length >= needed) {
+            memset(buffer, 0, needed);
+            *(UINT64 *)(buffer + 16) = write_time;
+            *(UINT64 *)(buffer + 24) = write_time;
+            *(UINT32 *)(buffer + 32) = attributes;
+        }
+        break;
+    case 5: /* FILE_STANDARD_INFORMATION */
+        needed = 24;
+        if (length >= needed) {
+            memset(buffer, 0, needed);
+            *(UINT64 *)(buffer + 0) = (size + 511) & ~511ULL;
+            *(UINT64 *)(buffer + 8) = size;
+            *(UINT32 *)(buffer + 16) = 1;
+            buffer[21] = file->Kind == FileKindDirectory;
+        }
+        break;
+    case 9: /* FILE_NAME_INFORMATION */
+    case 48: { /* FILE_NORMALIZED_NAME_INFORMATION */
+        UINT16 wide[262];
+        UINT32 bytes = 0;
+        const char *name = vnode ? vnode->Name : NULL;
+        if (name && name[1] == ':') name += 2;
+        BOOLEAN leading = name && (name[0] == '\\' || name[0] == '/');
+        if (!name || !IopUtf8ToWide(name, wide + !leading, 260, &bytes)) {
+            status = STATUS_NOT_SUPPORTED;
+            break;
+        }
+        if (!leading) {
+            wide[0] = '\\';
+            bytes += 2;
+        }
+        needed = 4 + bytes;
+        if (length >= 4) {
+            *(UINT32 *)buffer = bytes;
+            UINT32 copy = length - 4 < bytes ? length - 4 : bytes;
+            copy &= ~1u;
+            memcpy(buffer + 4, wide, copy);
+            if (length < needed) status = STATUS_BUFFER_OVERFLOW;
+        }
+        break;
+    }
+    case 14: /* FILE_POSITION_INFORMATION */
+        needed = 8;
+        if (length >= needed) *(UINT64 *)buffer = file->Position;
+        break;
+    case 16: /* FILE_MODE_INFORMATION */
+        needed = 4;
+        if (length >= needed) *(UINT32 *)buffer = 0;
+        break;
+    case 35: /* FILE_ATTRIBUTE_TAG_INFORMATION */
+        needed = 8;
+        if (length >= needed) {
+            *(UINT32 *)buffer = attributes;
+            *(UINT32 *)(buffer + 4) = 0;
+        }
+        break;
+    default:
+        status = STATUS_INVALID_INFO_CLASS;
+        break;
+    }
+    if (NT_SUCCESS(status) && length < needed)
+        status = STATUS_BUFFER_TOO_SMALL;
+    iosb->Status = status;
+    iosb->Information = NT_SUCCESS(status) ? needed :
+        (status == STATUS_BUFFER_OVERFLOW && length >= 4 ? length : 0);
+    ObDereferenceObject(object);
+    return (UINT64)status;
 }
 
 static BOOLEAN IopWideToUtf8(const UINT16 *wide, UINT32 units,
@@ -834,7 +1363,7 @@ static NTSTATUS IopCheckDirectoryEmpty(const char *path)
             return STATUS_SUCCESS;
         if (!NT_SUCCESS(status))
             return status;
-        if (!IopSamePath(found.Name, ".") && !IopSamePath(found.Name, ".."))
+        if (!IoPathSame(found.Name, ".") && !IoPathSame(found.Name, ".."))
             return STATUS_DIRECTORY_NOT_EMPTY;
     }
 }
@@ -847,8 +1376,8 @@ static BOOLEAN IopCanRenameVnodes(const char *old_name, const char *new_name,
     for (PLIST_ENTRY entry = g_vnodes.Flink;
          entry != &g_vnodes; entry = entry->Flink) {
         IO_VNODE *vnode = CONTAINING_RECORD(entry, IO_VNODE, Entry);
-        BOOLEAN affected = IopSamePath(vnode->Name, old_name) ||
-            (directory && IopPathIsWithin(old_name, vnode->Name));
+        BOOLEAN affected = IoPathSame(vnode->Name, old_name) ||
+            (directory && IoPathIsWithin(old_name, vnode->Name));
         if (affected && new_length + strlen(vnode->Name + old_length) >=
                         sizeof(vnode->Name))
             return FALSE;
@@ -864,8 +1393,8 @@ static void IopRenameVnodes(const char *old_name, const char *new_name,
     for (PLIST_ENTRY entry = g_vnodes.Flink;
          entry != &g_vnodes; entry = entry->Flink) {
         IO_VNODE *vnode = CONTAINING_RECORD(entry, IO_VNODE, Entry);
-        if (!IopSamePath(vnode->Name, old_name) &&
-            !(directory && IopPathIsWithin(old_name, vnode->Name)))
+        if (!IoPathSame(vnode->Name, old_name) &&
+            !(directory && IoPathIsWithin(old_name, vnode->Name)))
             continue;
         char renamed[260];
         memcpy(renamed, new_name, new_length);
@@ -874,7 +1403,7 @@ static void IopRenameVnodes(const char *old_name, const char *new_name,
     }
 }
 
-/* NtSetInformationFile (Windows 7 SP1 x64 service 0x24). */
+/* NtSetInformationFile (native x64 service 0x24). */
 UINT64 NtSetInformationFile(UINT64 *a)
 {
     HANDLE handle = (HANDLE)a[0];
@@ -948,7 +1477,10 @@ UINT64 NtSetInformationFile(UINT64 *a)
             char raw_name[260], new_name[260];
             if (!IopWideToUtf8((const UINT16 *)(information + 20),
                                name_bytes / 2, raw_name, sizeof(raw_name)) ||
-                !IopCanonicalizeDosPath(raw_name, new_name)) {
+                !IoResolveDosPathKernel(raw_name,
+                    KeGetCurrentThread()->Process
+                        ? KeGetCurrentThread()->Process->CurrentDirectory : NULL,
+                    new_name)) {
                 status = STATUS_OBJECT_NAME_INVALID;
             } else {
                 BOOLEAN directory = (vnode->Attributes & 0x10) != 0;
@@ -997,23 +1529,17 @@ UINT64 NtClose(UINT64 *a)
     return (UINT64)ObCloseHandle((HANDLE)a[0]);
 }
 
-UINT64 NtCreatePipeSimple(UINT64 *a)
+NTSTATUS IoCreatePipeKernel(PHANDLE read_out, PHANDLE write_out)
 {
-    PHANDLE read_out = (PHANDLE)a[0];
-    PHANDLE write_out = (PHANDLE)a[1];
-    if (!MmProbeForWrite((UINT64)read_out, sizeof(HANDLE)) ||
-        !MmProbeForWrite((UINT64)write_out, sizeof(HANDLE)))
-        return (UINT64)STATUS_ACCESS_VIOLATION;
-
     IO_PIPE_BUFFER *pipe = ExAllocatePoolWithTag(NonPagedPool,
                                                   sizeof(*pipe), 'pIoB');
     if (!pipe)
-        return (UINT64)STATUS_NO_MEMORY;
+        return STATUS_NO_MEMORY;
     memset(pipe, 0, sizeof(*pipe));
     pipe->Data = ExAllocatePoolWithTag(NonPagedPool, IO_PIPE_CAPACITY, 'dIoP');
     if (!pipe->Data) {
         ExFreePool(pipe);
-        return (UINT64)STATUS_NO_MEMORY;
+        return STATUS_NO_MEMORY;
     }
     pipe->Readers = pipe->Writers = 1;
 
@@ -1022,13 +1548,13 @@ UINT64 NtCreatePipeSimple(UINT64 *a)
                                      &read_object);
     if (!NT_SUCCESS(status)) {
         ExFreePool(pipe->Data); ExFreePool(pipe);
-        return (UINT64)status;
+        return status;
     }
     status = ObCreateObject(g_file_type, sizeof(FILE_OBJECT), &write_object);
     if (!NT_SUCCESS(status)) {
         pipe->Writers = 0;
         ObDereferenceObject(read_object);
-        return (UINT64)status;
+        return status;
     }
     FILE_OBJECT *reader = (FILE_OBJECT *)read_object;
     FILE_OBJECT *writer = (FILE_OBJECT *)write_object;
@@ -1046,11 +1572,56 @@ UINT64 NtCreatePipeSimple(UINT64 *a)
     ObDereferenceObject(write_object);
     if (!NT_SUCCESS(status)) {
         if (read_handle) ObCloseHandle(read_handle);
-        return (UINT64)status;
+        return status;
     }
     *read_out = read_handle;
     *write_out = write_handle;
-    return (UINT64)STATUS_SUCCESS;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS IoReferencePipeForPoll(HANDLE handle, PVOID *object_out)
+{
+    if (!object_out) return STATUS_INVALID_PARAMETER;
+    *object_out = NULL;
+    POBJECT object = NULL;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                &object);
+    if (!NT_SUCCESS(status)) return status;
+    if (((FILE_OBJECT *)object)->Kind != FileKindPipe) {
+        ObDereferenceObject(object);
+        return STATUS_INVALID_HANDLE;
+    }
+    *object_out = object;
+    return STATUS_SUCCESS;
+}
+
+UINT32 IoPollPipeObject(PVOID object)
+{
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (!file || file->Kind != FileKindPipe) return 0;
+    UINT64 irq = KiIrqSave();
+    IO_PIPE_BUFFER *pipe = file->Pipe;
+    UINT32 events = 0;
+    if (file->PipeWriter) {
+        if (pipe->Count < IO_PIPE_CAPACITY && pipe->Readers)
+            events |= IO_POLL_WRITABLE;
+        if (!pipe->Readers) events |= IO_POLL_ERROR;
+    } else {
+        if (pipe->Count || !pipe->Writers) events |= IO_POLL_READABLE;
+        if (!pipe->Writers) events |= IO_POLL_HANGUP;
+    }
+    KiIrqRestore(irq);
+    return events;
+}
+
+UINT64 NtCreatePipeSimple(UINT64 *a)
+{
+    PHANDLE read_out = (PHANDLE)a[0];
+    PHANDLE write_out = (PHANDLE)a[1];
+    if (!MmProbeForWrite((UINT64)read_out, sizeof(HANDLE)) ||
+        !MmProbeForWrite((UINT64)write_out, sizeof(HANDLE)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    return (UINT64)IoCreatePipeKernel(read_out, write_out);
 }
 
 UINT64 NtConsoleControlSimple(UINT64 *a)
@@ -1108,31 +1679,6 @@ UINT64 NtQueryFileInfo(UINT64 *a)
     return (UINT64)STATUS_SUCCESS;
 }
 
-UINT64 NtSetFilePosition(UINT64 *a)
-{
-    UINT64 *new_position = (UINT64 *)a[2];
-    if (new_position &&
-        !MmProbeForWrite((UINT64)new_position, sizeof(*new_position)))
-        return (UINT64)STATUS_ACCESS_VIOLATION;
-
-    POBJECT obj;
-    NTSTATUS status = ObReferenceObjectByHandle((HANDLE)a[0], 0,
-                                                 g_file_type, &obj);
-    if (!NT_SUCCESS(status))
-        return (UINT64)status;
-
-    FILE_OBJECT *file = (FILE_OBJECT *)obj;
-    if (file->Kind != FileKindDisk) {
-        ObDereferenceObject(obj);
-        return (UINT64)STATUS_INVALID_PARAMETER;
-    }
-    file->Position = (SIZE_T)a[1];
-    if (new_position)
-        *new_position = file->Position;
-    ObDereferenceObject(obj);
-    return (UINT64)STATUS_SUCCESS;
-}
-
 UINT64 NtSetFileSizeSimple(UINT64 *a)
 {
     POBJECT obj;
@@ -1144,33 +1690,6 @@ UINT64 NtSetFileSizeSimple(UINT64 *a)
     status = IopResizeFile(file, (SIZE_T)a[1]);
     ObDereferenceObject(obj);
     return (UINT64)status;
-}
-
-static BOOLEAN IopCaptureAsciiPath(UINT64 address, char *path, SIZE_T capacity);
-
-/* Legacy SVINDOWS-private enumeration hooks kept temporarily for older user
- * binaries. New kernel32 and cmd builds use directory File objects through
- * NtQueryDirectoryFile instead. */
-UINT64 NtEnumerateRootFiles(UINT64 *a)
-{
-    FAT_FIND_DATA *out = (FAT_FIND_DATA *)a[1];
-    if (!MmProbeForWrite((UINT64)out, sizeof(*out)))
-        return (UINT64)STATUS_ACCESS_VIOLATION;
-    NTSTATUS status = FatEnumerateRoot((UINT32)a[0], out);
-    if (NT_SUCCESS(status))
-        KeLog("[io]   enumerate root[%u] -> %s (%u bytes)\n",
-              (unsigned)a[0], out->Name, (unsigned)out->Size);
-    return (UINT64)status;
-}
-
-UINT64 NtEnumerateDirectorySimple(UINT64 *a)
-{
-    char path[260];
-    FAT_FIND_DATA *out = (FAT_FIND_DATA *)a[2];
-    if (!IopCaptureAsciiPath(a[0], path, sizeof(path)) ||
-        !MmProbeForWrite((UINT64)out, sizeof(*out)))
-        return (UINT64)STATUS_ACCESS_VIOLATION;
-    return (UINT64)FatEnumerateDirectory(path, (UINT32)a[1], out);
 }
 
 static BOOLEAN IopCaptureAsciiPath(UINT64 address, char *path, SIZE_T capacity)
@@ -1192,23 +1711,27 @@ static BOOLEAN IopCaptureAsciiPath(UINT64 address, char *path, SIZE_T capacity)
  * 5 query attributes (returned as a non-negative service result). */
 UINT64 NtFileSystemControlSimple(UINT64 *a)
 {
-    char first[260], second[260];
-    if (!IopCaptureAsciiPath(a[1], first, sizeof(first)))
+    char raw_first[260], first[260], raw_second[260], second[260];
+    if (!IopCaptureAsciiPath(a[1], raw_first, sizeof(raw_first)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
+    PKPROCESS process = KeGetCurrentThread()->Process;
+    const char *cwd = process ? process->CurrentDirectory : NULL;
+    if (!IoResolveDosPathKernel(raw_first, cwd, first))
+        return (UINT64)STATUS_OBJECT_NAME_INVALID;
     switch ((ULONG)a[0]) {
     case 1:
         for (PLIST_ENTRY entry = g_open_disk_files.Flink;
              entry != &g_open_disk_files; entry = entry->Flink) {
             FILE_OBJECT *open = CONTAINING_RECORD(entry, FILE_OBJECT,
                                                    OpenEntry);
-            if (open->Vnode && IopSamePath(open->Vnode->Name, first) &&
+            if (open->Vnode && IoPathSame(open->Vnode->Name, first) &&
                 !(open->ShareAccess & FILE_SHARE_DELETE_LOCAL))
                 return (UINT64)STATUS_SHARING_VIOLATION;
         }
         for (PLIST_ENTRY entry = g_vnodes.Flink;
              entry != &g_vnodes; entry = entry->Flink) {
             IO_VNODE *vnode = CONTAINING_RECORD(entry, IO_VNODE, Entry);
-            if (IopSamePath(vnode->Name, first)) {
+            if (IoPathSame(vnode->Name, first)) {
                 vnode->DeletePending = TRUE;
                 return (UINT64)STATUS_SUCCESS;
             }
@@ -1219,13 +1742,15 @@ UINT64 NtFileSystemControlSimple(UINT64 *a)
                                                        : delete_status);
         }
     case 2:
-        if (!IopCaptureAsciiPath(a[2], second, sizeof(second)))
+        if (!IopCaptureAsciiPath(a[2], raw_second, sizeof(raw_second)))
             return (UINT64)STATUS_ACCESS_VIOLATION;
+        if (!IoResolveDosPathKernel(raw_second, cwd, second))
+            return (UINT64)STATUS_OBJECT_NAME_INVALID;
         for (PLIST_ENTRY entry = g_open_disk_files.Flink;
              entry != &g_open_disk_files; entry = entry->Flink) {
             FILE_OBJECT *open = CONTAINING_RECORD(entry, FILE_OBJECT,
                                                    OpenEntry);
-            if (open->Vnode && IopSamePath(open->Vnode->Name, first) &&
+            if (open->Vnode && IoPathSame(open->Vnode->Name, first) &&
                 !(open->ShareAccess & FILE_SHARE_DELETE_LOCAL))
                 return (UINT64)STATUS_SHARING_VIOLATION;
         }
@@ -1235,7 +1760,7 @@ UINT64 NtFileSystemControlSimple(UINT64 *a)
                 for (PLIST_ENTRY entry = g_vnodes.Flink;
                      entry != &g_vnodes; entry = entry->Flink) {
                     IO_VNODE *vnode = CONTAINING_RECORD(entry, IO_VNODE, Entry);
-                    if (!IopSamePath(vnode->Name, first))
+                    if (!IoPathSame(vnode->Name, first))
                         continue;
                     UINT32 i = 0;
                     for (; second[i] && i + 1 < sizeof(vnode->Name); i++)

@@ -157,29 +157,33 @@ static UINT64 NtUserBeginPaint(UINT64 *a)
         return 0;
     memset(ps, 0, PAINTSTRUCT_SIZE);
 
-    INT32 w = 0, h = 0;
-    if (slot && slot < WINPAINT_SLOTS) {
-        w = (INT32)g_win_w[slot];
-        h = (INT32)g_win_h[slot];
-    }
+    /* The paint rectangle is the client area: the window manager owns the
+     * caption and the borders, so a client never receives them as paintable. */
+    INT32 x = 0, y = 0, w = 0, h = 0;
+    if (W32kWindowExists(slot))
+        W32kClientOrigin(slot, &x, &y, &w, &h);
     *(UINT32 *)(ps + 8) = 1;  /* fErase: nothing has drawn the background */
     *(INT32 *)(ps + 12) = 0;  /* rcPaint, in client coordinates */
     *(INT32 *)(ps + 16) = 0;
     *(INT32 *)(ps + 20) = w;
     *(INT32 *)(ps + 24) = h;
 
+    UINT64 hdc = W32kAcquireWindowDc(a[0], x, y, w, h);
+    if (!hdc || !W32kBeginWindowPaint(hdc, a[0])) return 0;
     KiUserValidateWindow(slot);
-    UINT64 hdc = W32kAcquireWindowDc(a[0], slot < WINPAINT_SLOTS ?
-                                     g_win_x[slot] : 0,
-                                     slot < WINPAINT_SLOTS ?
-                                     g_win_y[slot] : 0, w, h);
     *(UINT64 *)(ps + 0) = hdc;
-    KeLog("[user] BeginPaint(HWND %p) rcPaint 0,0,%ld,%ld -> hdc %p\n",
-          (void *)a[0], (long)w, (long)h, (void *)hdc);
+    KeLog("[user] BeginPaint(HWND %p) client %ld,%ld %ldx%ld -> hdc %p\n",
+          (void *)a[0], (long)x, (long)y, (long)w, (long)h, (void *)hdc);
     return hdc;
 }
 
-static UINT64 NtUserEndPaint(UINT64 *a) { return 1; }
+static UINT64 NtUserEndPaint(UINT64 *a)
+{
+    if (!KiUserWindowValid(a[0], TRUE) || !a[1] ||
+        !MmProbeForRead(a[1], PAINTSTRUCT_SIZE)) return 0;
+    UINT64 hdc = *(const UINT64 *)a[1];
+    return W32kEndWindowPaint(hdc, a[0]);
+}
 
 /* ------------------------------------------------------------------ */
 /* Kernel -> user callbacks (the KiUserCallbackDispatcher equivalent)  */
@@ -200,12 +204,15 @@ _Static_assert(KI_OFFSETOF(KTHREAD, CallbackFlags) == 0xAE8, "KTH_CB_FLAGS");
 _Static_assert(KI_OFFSETOF(KTHREAD, RedirectPending) == 0xB29, "KTH_REDIRECT");
 
 /* Per-thread resources, reused across callback chains, private to a process.
- * Each slot: unmapped guard, 30 RW/NX stack pages, one client-read-only RX
+ * Each slot: eight guarded two-page RW/NX stacks, one client-read-only RX
  * trampoline page. CREATESTRUCT lives above the callback's home space. */
 #define CALLBACK_STACK_ARENA_VA  0x0000000001400000ULL
 #define CALLBACK_STACK_SLOTS     16
 #define CALLBACK_STACK_SLOT_SIZE 0x0000000000020000ULL
 #define CALLBACK_THUNK_OFFSET (CALLBACK_STACK_SLOT_SIZE - PAGE_SIZE)
+#define CALLBACK_MAX_DEPTH 8
+#define CALLBACK_STACK_SLICE (3 * PAGE_SIZE)
+#define CALLBACK_THUNK_STRIDE 128
 
 static void KiReleaseCallbackResources(PKTHREAD thread)
 {
@@ -218,6 +225,7 @@ static void KiReleaseCallbackResources(PKTHREAD thread)
             MmFreePages(PAGE_ALIGN(pa), 1);
     }
     thread->UserCallbackBase = 0;
+    thread->UserCallbackDepth = 0;
     thread->CallbackActive = thread->RedirectPending = 0;
     thread->CallbackRip = thread->CallbackRsp = thread->CallbackFlags = 0;
     thread->CallbackContinue = thread->CallbackWindow = 0;
@@ -246,6 +254,11 @@ static UINT64 KiClaimCallbackStack(void)
         if (busy) continue;
         thread->UserCallbackBase = base;
         for (UINT64 off = PAGE_SIZE; off < CALLBACK_STACK_SLOT_SIZE; off += PAGE_SIZE) {
+            /* Two stack pages and an unmapped guard per nesting level. */
+            if (off != CALLBACK_THUNK_OFFSET &&
+                (off < 8 * PAGE_SIZE ||
+                 (CALLBACK_THUNK_OFFSET - off) % CALLBACK_STACK_SLICE == 0))
+                continue;
             UINT64 pa = MmAllocatePage();
             if (pa == MM_INVALID_PHYS) { KiReleaseCallbackResources(thread); return 0; }
             UINT64 flags = off == CALLBACK_THUNK_OFFSET ? PTE_USER : PTE_USER | PTE_WRITE | PTE_NX;
@@ -274,9 +287,11 @@ static UINT64 LdrpBuildCallbackThunk(UINT64 target, UINT64 a1, UINT64 a2,
 {
     UINT64 slot = KiClaimCallbackStack(); /* stack top is also the code page VA */
     if (!slot) return 0;
+    PKTHREAD thread = KeGetCurrentThread();
+    slot += (thread->UserCallbackDepth - 1) * CALLBACK_THUNK_STRIDE;
     UINT64 pa = MmGetPhysicalAddress(slot);
     if (pa == MM_INVALID_PHYS) return 0;
-    UINT8 *code = MmPhysToVirt(pa);
+    UINT8 *code = (UINT8 *)MmPhysToVirt(PAGE_ALIGN(pa)) + (slot & (PAGE_SIZE - 1));
     UINT64 args[4] = {a1, a2, a3, a4};
     int o = 0;
     for (int i = 0; i < 4; i++) {
@@ -313,25 +328,34 @@ static UINT64 LdrpBuildCallbackThunk(UINT64 target, UINT64 a1, UINT64 a2,
  * to the service calling this) is redirected into a trampoline that invokes
  * the WndProc. The first callback of a chain captures the original caller's
  * frame in Orig*; the final redirect (KiFinishCallbackToCaller) restores it
- * with the callback's result in RAX. Returns FALSE when a callback chain is
- * already in flight (nested callbacks are refused; the caller falls back to a
- * default result).
+ * with the callback's result in RAX. Returns FALSE when the nesting limit is reached or the user frame is invalid.
  */
 static BOOLEAN KiStartUserCallback(UINT64 target, UINT64 a1, UINT64 a2,
                                    UINT64 a3, UINT64 a4, UINT64 continuation,
                                    UINT64 window, UINT64 msg, UINT64 lparam)
 {
     PKTHREAD t = KeGetCurrentThread();
-    if (!t || t->CallbackActive || t->RedirectPending || !target ||
+    if (!t || t->UserCallbackDepth >= CALLBACK_MAX_DEPTH ||
+        t->RedirectPending || !target ||
         target >= MM_USER_MAX || !MmProbeForRead(target, 1) ||
         (MmGetPageFlags(target) & PTE_NX) ||
         !MmProbeForRead(t->UserRsp, sizeof(UINT64)))
         return FALSE;
 
+    unsigned depth = ++t->UserCallbackDepth;
     UINT64 thunk = LdrpBuildCallbackThunk(target, a1, a2, a3, a4);
-    UINT64 stack = thunk;
-    if (!thunk || !stack)
+    UINT64 stack = t->UserCallbackBase + CALLBACK_THUNK_OFFSET -
+                   (depth - 1) * CALLBACK_STACK_SLICE;
+    if (!thunk || !stack) {
+        if (t->UserCallbackDepth) --t->UserCallbackDepth;
         return FALSE;
+    }
+    if (depth > 1) {
+        __typeof__(t->UserCallbackFrames[0]) *saved = &t->UserCallbackFrames[depth - 2];
+        *saved = (__typeof__(*saved)){t->OrigRip, t->OrigRsp, t->OrigRflags,
+            t->SavedReturnAddress, t->CallbackContinue, t->CallbackWindow,
+            t->CallbackMsg, t->CallbackLParam};
+    }
 
     t->OrigRip = t->UserRip;
     t->OrigRsp = t->UserRsp;
@@ -380,7 +404,9 @@ static BOOLEAN KiChainUserCallback(UINT64 target, UINT64 a1, UINT64 a2,
         return FALSE;
 
     t->CallbackRip = thunk;
-    t->CallbackRsp = ((thunk - 0x100) & ~0xFULL) | 8;
+    UINT64 stack = t->UserCallbackBase + CALLBACK_THUNK_OFFSET -
+                   (t->UserCallbackDepth - 1) * CALLBACK_STACK_SLICE;
+    t->CallbackRsp = ((stack - 0x100) & ~0xFULL) | 8;
     t->CallbackContinue = continuation;
     t->CallbackWindow = window;
     t->CallbackMsg = msg;
@@ -407,7 +433,49 @@ static void KiFinishCallbackToCaller(PKTHREAD t, UINT64 result)
         *(volatile UINT64 *)t->OrigRsp = t->SavedReturnAddress;
     t->CallbackContinue = 0;
     t->CallbackActive = 0;
+    if (t->UserCallbackDepth) --t->UserCallbackDepth;
+    if (t->UserCallbackDepth) {
+        __typeof__(t->UserCallbackFrames[0]) *saved =
+            &t->UserCallbackFrames[t->UserCallbackDepth - 1];
+        t->OrigRip = saved->OrigRip; t->OrigRsp = saved->OrigRsp;
+        t->OrigRflags = saved->OrigRflags;
+        t->SavedReturnAddress = saved->SavedReturnAddress;
+        t->CallbackContinue = saved->Continue; t->CallbackWindow = saved->Window;
+        t->CallbackMsg = saved->Msg; t->CallbackLParam = saved->LParam;
+        t->CallbackActive = 1;
+    }
     t->RedirectPending = 1;
+}
+
+/* Destruction walks the child tree between callbacks. Each window receives
+ * WM_DESTROY before its children and WM_NCDESTROY immediately before release. */
+#define CB_DESTROY_CREATE_FAILURE (1ULL << 63)
+static UINT64 KiContinueDestroy(PKTHREAD thread, UINT16 slot, UINT64 root)
+{
+    UINT64 root_hwnd = root & ~CB_DESTROY_CREATE_FAILURE;
+    UINT64 result = (root & CB_DESTROY_CREATE_FAILURE) ? 0 : 1;
+    for (;;) {
+        if (!KiUserWindowValid(root_hwnd, TRUE)) {
+            KiFinishCallbackToCaller(thread, 0); return 0;
+        }
+        for (UINT16 child = 1; child < 128; ++child) {
+            if (!g_window_owner[child] || W32kWindowParent(child) != slot) continue;
+            UINT64 hwnd = KiUserWindowHandle(child), proc = KiWindowProcOf(hwnd);
+            g_window_destroying[child] = TRUE;
+            if (proc && KiChainUserCallback(proc, hwnd, 0x0002, 0, 0,
+                    CB_CONT_DESTROY_CHILDREN, hwnd, 0x0002, root)) return 0;
+            KiUserDropWindow(child);
+        }
+        UINT64 hwnd = KiUserWindowHandle(slot), proc = KiWindowProcOf(hwnd);
+        if (proc && KiChainUserCallback(proc, hwnd, 0x0082, 0, 0,
+                CB_CONT_DESTROY_FINAL, hwnd, 0x0082, root)) return 0;
+        UINT16 parent = W32kWindowParent(slot);
+        KiUserDropWindow(slot);
+        if (hwnd == root_hwnd || !parent) {
+            KiFinishCallbackToCaller(thread, result); return result;
+        }
+        slot = parent;
+    }
 }
 
 /* NtCallbackReturn: the trampoline re-entered the kernel with the WndProc
@@ -427,6 +495,18 @@ static UINT64 NtCallbackReturn(UINT64 *a)
     KeLog("[user]   callback return: msg 0x%lx -> %p (cont %lu)\n",
           (unsigned long)t->CallbackMsg, (void *)result,
           (unsigned long)t->CallbackContinue);
+
+    if (t->CallbackContinue == CB_CONT_DESTROY_CHILDREN)
+        return KiContinueDestroy(t, (UINT16)t->CallbackWindow, t->CallbackLParam);
+    if (t->CallbackContinue == CB_CONT_DESTROY_FINAL) {
+        UINT64 hwnd = t->CallbackWindow, root = t->CallbackLParam;
+        UINT16 parent = W32kWindowParent((UINT16)hwnd);
+        KiUserDropWindow((UINT16)hwnd);
+        if (hwnd != (root & ~CB_DESTROY_CREATE_FAILURE) && parent)
+            return KiContinueDestroy(t, parent, root);
+        UINT64 status = (root & CB_DESTROY_CREATE_FAILURE) ? 0 : 1;
+        KiFinishCallbackToCaller(t, status); return status;
+    }
 
     if (t->CallbackContinue == CB_CONT_CREATE_NCCREATE) {
         if (result == 0) {
@@ -457,13 +537,18 @@ static UINT64 NtCallbackReturn(UINT64 *a)
     if (t->CallbackContinue == CB_CONT_CREATE_WMCREATE) {
         UINT16 slot = (UINT16)(t->CallbackWindow & 0xFFFF);
         if ((INT64)result == -1) {
-            /* WM_CREATE refused: destroy the half-made window. */
-            if (slot && slot < 128) KiUserDropWindow(slot);
-            KiFinishCallbackToCaller(t, 0);
-            return 0;
+            /* A failed parent creation still tears down its controls through
+             * their window procedures; CreateWindowEx must finally return NULL. */
+            UINT64 hwnd = t->CallbackWindow, proc = KiWindowProcOf(hwnd);
+            UINT64 root = hwnd | CB_DESTROY_CREATE_FAILURE;
+            g_window_destroying[slot] = TRUE;
+            if (proc && KiChainUserCallback(proc, hwnd, 0x0002, 0, 0,
+                    CB_CONT_DESTROY_CHILDREN, hwnd, 0x0002, root)) return 0;
+            return KiContinueDestroy(t, slot, root);
         }
-        KiFinishCallbackToCaller(t, t->CallbackWindow);
-        return t->CallbackWindow;
+        UINT64 created = t->CallbackWindow;
+        KiFinishCallbackToCaller(t, created);
+        return created;
     }
 
     KiFinishCallbackToCaller(t, result);
@@ -476,10 +561,11 @@ static UINT64 NtCallbackReturn(UINT64 *a)
 static UINT64 KiBuildCreateStruct(const UINT64 *a, UINT64 hwnd)
 {
     PKTHREAD thread = KeGetCurrentThread();
-    if (!thread || thread->CallbackActive || thread->RedirectPending) return 0;
+    if (!thread || thread->UserCallbackDepth >= CALLBACK_MAX_DEPTH ||
+        thread->RedirectPending) return 0;
     UINT64 top = KiClaimCallbackStack();
     if (!top) return 0;
-    UINT64 p = top - 0x80;
+    UINT64 p = top - thread->UserCallbackDepth * CALLBACK_STACK_SLICE - 0x80;
     UINT8 *cs = (UINT8 *)p;
     memset(cs, 0, 0x60);
     *(UINT64 *)(cs + 0x00) = a[12];      /* lpCreateParams */
@@ -492,8 +578,11 @@ static UINT64 KiBuildCreateStruct(const UINT64 *a, UINT64 hwnd)
     *(UINT32 *)(cs + 0x2C) = (UINT32)a[5]; /* x            */
     *(UINT32 *)(cs + 0x30) = (UINT32)a[4]; /* style        */
     *(UINT64 *)(cs + 0x38) = a[3];       /* lpszName       */
-    *(UINT64 *)(cs + 0x40) = a[1];       /* lpszClass (or atom) */
-    *(UINT64 *)(cs + 0x48) = hwnd;       /* helper: creator's own HWND */
+    UINT64 class_name = a[1];
+    if (class_name > 0xFFFF && MmProbeForRead(class_name, 16))
+        class_name = *(const UINT64 *)(class_name + 8);
+    *(UINT64 *)(cs + 0x40) = class_name; /* class string or atom, never LARGE_STRING */
+    *(UINT32 *)(cs + 0x48) = (UINT32)a[0]; /* dwExStyle     */
     KeLog("[user]   CREATESTRUCT @ %p for HWND %p\n", (void *)p,
           (void *)hwnd);
     return p;
@@ -529,6 +618,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
 
     PKTHREAD creator = KeGetCurrentThread();
     if (!creator || !creator->Process || creator->Process->Exiting) return 0;
+    if ((a[4] & 0x40000000u) && !a[9]) return 0;
     if (a[9] && !KiUserWindowValid(a[9], TRUE)) return 0;
     if (!KiUserQueueForThread(creator->ThreadId)) return 0;
     UINT16 index;
@@ -546,7 +636,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     window->Handle = hwnd;
     window->LockCount = 1;
     /* Flip the shared handle table writable for the kernel-side fill; ring 3
-     * normally sees it read-only (see PsCreateUserProcess). */
+     * normally sees it read-only (see process environment setup). */
     MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE,
                    TRUE);
     entries[index].Object = (UINT64)window;
@@ -576,32 +666,29 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
               (void *)(cls ? cls->WndProc : 0),
               (unsigned long)(cls ? cls->WndExtra : 0));
     }
-    if (index < WINPAINT_SLOTS) {
-        g_win_kind[index] = WINPAINT_GENERIC;
-        if (cls && KiClassNameIs(cls->Name, "WorkerW"))
-            g_win_kind[index] = WINPAINT_DESKTOP;
-        else if (cls && KiClassNameIs(cls->Name, "Shell_TrayWnd"))
-            g_win_kind[index] = WINPAINT_TASKBAR;
-        g_win_x[index] = (INT32)a[5];
-        g_win_y[index] = (INT32)a[6];
-        g_win_w[index] = (UINT32)a[7];
-        g_win_h[index] = (UINT32)a[8];
-    }
-    /* Bring-up shortcut: the desktop and taskbar are painted the moment
-     * they exist. The shell's own ShowWindow/SetWindowPos traffic does not
-     * reach those services yet, so waiting for a visibility bit would keep
-     * the screen black. */
-    if (index < WINPAINT_SLOTS &&
-        (g_win_kind[index] == WINPAINT_DESKTOP ||
-         g_win_kind[index] == WINPAINT_TASKBAR)) {
-        *(volatile UINT32 *)(PROCESS_USER_OBJECT_ARENA_VA +
-                             (UINT64)index * 0x200 + WND_STYLE_OFF) |=
-            WS_VISIBLE_;
-        KiRepaintAll();
+    /* The window exists: hand it to the window manager, which places it,
+     * decides its kind from the class name and owns its frame, z-order and
+     * input from here on. */
+    {
+        WCHAR title[W32K_TITLE_CHARS];
+        UINT32 length = 0;
+        if (a[3] && MmProbeForRead(a[3], sizeof(WCHAR))) {
+            const WCHAR *name = (const WCHAR *)a[3];
+            for (; length < W32K_TITLE_CHARS - 1; ++length) {
+                if (!MmProbeForRead((UINT64)(name + length), sizeof(WCHAR)))
+                    break;
+                title[length] = name[length];
+                if (!title[length]) break;
+            }
+        }
+        title[length] = 0;
+        UINT8 kind = W32kClassifyWindow(cls ? cls->Name : NULL, (UINT32)a[4]);
+        W32kScreenWindowCreated(index, title, (UINT32)a[4], (INT32)a[5],
+                                (INT32)a[6], (UINT32)a[7], (UINT32)a[8], kind);
+        if (kind == W32K_KIND_CHILD) W32kScreenSetParent(index, (UINT16)a[9]);
     }
     /* A window that is created visible owes its first WM_PAINT immediately. */
-    if (((UINT32)a[4] & WS_VISIBLE_) || g_win_kind[index] == WINPAINT_DESKTOP ||
-        g_win_kind[index] == WINPAINT_TASKBAR)
+    if ((UINT32)a[4] & WS_VISIBLE_)
         KiUserInvalidateWindow(index);
     if (cls && cls->WndProc) {
         UINT64 cs = KiBuildCreateStruct(a, hwnd);
@@ -703,29 +790,34 @@ static UINT64 NtUserChangeWindowMessageFilterEx(UINT64 *a)
 static UINT64 NtUserDestroyWindow(UINT64 *a)
 {
     if (!KiUserWindowValid(a[0], TRUE)) return 0;
-    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
-    W32kDestroyWindowDc(a[0]);
+    UINT16 slot = (UINT16)a[0];
+    if (g_window_destroying[slot]) return 0;
+    UINT64 proc = KiWindowProcOf(a[0]);
+    if (proc) {
+        g_window_destroying[slot] = TRUE;
+        if (KiStartUserCallback(proc, a[0], 0x0002, 0, 0,
+                CB_CONT_DESTROY_CHILDREN, a[0], 0x0002, a[0])) return 0;
+        g_window_destroying[slot] = FALSE;
+        return 0;
+    }
     KiUserDropWindow(slot);
-    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE, TRUE);
-    memset((void *)(PROCESS_USER_SHARED_TABLE_VA + (UINT64)slot * 24), 0, 24);
-    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE, FALSE);
-    KiRepaintAll();
     return 1;
 }
 
-static void KiUserDropWindow(UINT16 slot)
+static void KiUserDropOneWindow(UINT16 slot)
 {
     UINT64 handle = KiUserWindowHandle(slot);
     UINT32 owner = g_window_owner[slot];
     (void)W32kClearSharedHandle(g_window_process[slot], FALSE, slot);
+    W32kScreenWindowDestroyed(slot);
     W32kCleanupWindowDc(g_window_process[slot], handle);
     for (UINT32 i = 0; i < USER_MAX_PROPS; i++)
         if (g_user_props[i].Used && g_user_props[i].Hwnd == handle)
             memset(&g_user_props[i], 0, sizeof(g_user_props[i]));
+    g_window_destroying[slot] = FALSE;
     g_window_owner[slot] = 0;
     g_window_process[slot] = NULL;
     g_window_update[slot] = 0;
-    g_win_kind[slot] = WINPAINT_NONE;
     if (g_user_active_hwnd == handle) g_user_active_hwnd = 0;
     USER_MSG_QUEUE *queue = KiUserQueueForThread(owner);
     if (queue) {
@@ -738,6 +830,21 @@ static void KiUserDropWindow(UINT16 slot)
         }
         queue->Head = write;
         KiUserSyncInputEvent(queue);
+    }
+}
+
+static void KiUserDropWindow(UINT16 root)
+{
+    UINT16 slot = root;
+    for (;;) {
+        UINT16 child;
+        for (child = 1; child < 128; ++child)
+            if (g_window_owner[child] && W32kWindowParent(child) == slot) break;
+        if (child < 128) { slot = child; continue; }
+        UINT16 parent = W32kWindowParent(slot);
+        KiUserDropOneWindow(slot);
+        if (slot == root || !parent) return;
+        slot = parent;
     }
 }
 

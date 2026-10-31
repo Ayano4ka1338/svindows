@@ -72,6 +72,13 @@ static void con_render_all(void)
     }
 }
 
+void ConRedraw(void)
+{
+    if (!g_console.Cells) return;
+    con_render_all();
+    con_restart_cursor_blink();
+}
+
 static void con_fill(UINT32 first, UINT32 count, UINT8 character,
                      UINT8 attribute, BOOLEAN fill_character,
                      BOOLEAN fill_attribute)
@@ -223,6 +230,23 @@ SIZE_T ConRead(void *buffer, SIZE_T length)
     return count;
 }
 
+SIZE_T ConTryRead(void *buffer, SIZE_T length)
+{
+    if (!length) return 0;
+    char character = con_pop_input();
+    if (!character) return 0;
+    if ((g_console.InputMode & CON_INPUT_PROCESSED) && character == '\r')
+        character = '\n';
+    *(char *)buffer = character;
+    if (g_console.InputMode & CON_INPUT_ECHO) ConWrite(&character, 1);
+    return 1;
+}
+
+BOOLEAN ConInputAvailable(void)
+{
+    return g_console.InputHead != g_console.InputTail;
+}
+
 SIZE_T ConWrite(const void *buffer, SIZE_T length)
 {
     const char *characters = (const char *)buffer;
@@ -281,6 +305,10 @@ NTSTATUS ConControl(UINT32 operation, UINT64 argument1, UINT64 argument2,
     case ConsoleControlSetMode:
         g_console.InputMode = (UINT32)argument1 & 0xffff;
         g_console.OutputMode = (UINT32)argument1 & 0xffff;
+        break;
+    case ConsoleControlSetInputMode:
+        g_console.InputMode = (UINT32)argument1 &
+            (CON_INPUT_PROCESSED | CON_INPUT_LINE | CON_INPUT_ECHO);
         break;
     case ConsoleControlGetScreenInfo: {
         CONSOLE_SCREEN_INFO *info = (CONSOLE_SCREEN_INFO *)(UINT_PTR)argument1;

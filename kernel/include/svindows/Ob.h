@@ -38,6 +38,7 @@ typedef struct _OBJECT_TYPE {
     ULONG            TotalHandles;
     SIZE_T           DefaultBodySize; /* informational */
     OB_DELETE_METHOD DeleteProcedure; /* may be NULL */
+    BOOLEAN          UnlinkNameOnLastHandle;
 } OBJECT_TYPE, *POBJECT_TYPE;
 
 /*
@@ -92,6 +93,7 @@ NTSTATUS ObInsertObjectByName(struct _OBJECT_DIRECTORY *dir, const char *name,
 /* Look up an absolute path ("\Foo\Bar"). On success the returned object has an
  * extra reference the caller must release with ObDereferenceObject. */
 NTSTATUS ObLookupObjectByName(const char *path, POBJECT *out_object);
+void ObRemoveObjectName(POBJECT object);
 
 /* ------------------------------------------------------------------ */
 /* Handles                                                            */
@@ -115,6 +117,18 @@ NTSTATUS ObDuplicateHandleToTable(HANDLE source,
  * reference the caller releases with ObDereferenceObject. */
 NTSTATUS ObReferenceObjectByHandle(HANDLE handle, ACCESS_MASK desired,
                                    POBJECT_TYPE type, POBJECT *out_object);
+NTSTATUS ObReferenceObjectByHandleInTable(POB_HANDLE_TABLE table, HANDLE handle,
+                                          ACCESS_MASK desired,
+                                          POBJECT_TYPE type,
+                                          POBJECT *out_object,
+                                          ACCESS_MASK *granted_access);
+NTSTATUS ObDuplicateHandleBetweenTables(POB_HANDLE_TABLE source_table,
+                                         HANDLE source_handle,
+                                         POB_HANDLE_TABLE target_table,
+                                         ACCESS_MASK desired_access,
+                                         BOOLEAN same_access,
+                                         BOOLEAN close_source,
+                                         HANDLE *out_handle);
 
 /* Close a handle (drops its references; may delete the object). */
 NTSTATUS ObCloseHandle(HANDLE handle);

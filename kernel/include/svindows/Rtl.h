@@ -20,6 +20,9 @@ SIZE_T strlen(const char *s);
 int    strcmp(const char *a, const char *b);
 int    strncmp(const char *a, const char *b, SIZE_T n);
 char  *strcpy(char *dst, const char *src);
+char  *strncpy(char *dst, const char *src, SIZE_T n);
+long strtol(const char *nptr, char **endptr, int base);
+unsigned long strtoul(const char *nptr, char **endptr, int base);
 
 /* NT-flavoured aliases. */
 #define RtlCopyMemory(d, s, n)   memcpy((d), (s), (n))

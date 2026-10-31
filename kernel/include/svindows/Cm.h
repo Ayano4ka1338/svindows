@@ -39,6 +39,11 @@ void CmInitialize(void);
 /* Nt* registry services (take the syscall argument array). */
 UINT64 NtCreateKey(UINT64 *args);
 UINT64 NtOpenKey(UINT64 *args);
+UINT64 NtDeleteKey(UINT64 *args);
+UINT64 NtDeleteValueKey(UINT64 *args);
+UINT64 NtEnumerateKey(UINT64 *args);
+UINT64 NtEnumerateValueKey(UINT64 *args);
+UINT64 NtQueryKey(UINT64 *args);
 UINT64 NtSetValueKey(UINT64 *args);
 UINT64 NtQueryValueKey(UINT64 *args);
 

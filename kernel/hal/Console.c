@@ -6,10 +6,34 @@
  */
 #include <svindows/Hal.h>
 #include <svindows/Gfx.h>
+#include <svindows/Ke.h>
 
 static UINT8 g_serial_attribute = 0xff;
 static UINT32 g_user_column;
 static UINT32 g_user_row;
+static BOOLEAN g_graphics_mode;
+static UINT32 g_framebuffer_users;
+
+void HalConsoleSetGraphicsMode(BOOLEAN enabled)
+{
+    g_graphics_mode = enabled;
+}
+
+void HalConsoleAcquireFramebuffer(void)
+{
+    UINT64 flags = KiIrqSave();
+    g_framebuffer_users++;
+    KiIrqRestore(flags);
+}
+
+BOOLEAN HalConsoleReleaseFramebuffer(void)
+{
+    UINT64 flags = KiIrqSave();
+    if (g_framebuffer_users) g_framebuffer_users--;
+    BOOLEAN show_console = !g_framebuffer_users && !g_graphics_mode;
+    KiIrqRestore(flags);
+    return show_console;
+}
 
 static const UINT32 g_vga_rgb[16] = {
     0x000000, 0x0000aa, 0x00aa00, 0x00aaaa,
@@ -26,7 +50,7 @@ static UINT32 fb_color(UINT8 index)
 
 void HalConsoleRenderCell(UINT32 x, UINT32 y, char character, UINT8 attribute)
 {
-    if (!GfxAvailable()) return;
+    if (g_graphics_mode || g_framebuffer_users || !GfxAvailable()) return;
     GfxDrawChar(x * GFX_FONT_W, y * GFX_FONT_H, character,
                 fb_color(attribute), fb_color(attribute >> 4));
 }
@@ -36,7 +60,7 @@ void HalConsoleSetUserCursor(UINT32 x, UINT32 y, BOOLEAN visible, UINT32 size,
 {
     g_user_column = x;
     g_user_row = y;
-    if (!visible || !GfxAvailable()) return;
+    if (g_graphics_mode || g_framebuffer_users || !visible || !GfxAvailable()) return;
     (void)size; /* Keep the public cursor-size value; use a thin insertion caret. */
     /* Use the font's own vertical stroke and coverage levels. A solid filled
      * rectangle looks brighter than antialiased text even with the same RGB.
@@ -91,7 +115,7 @@ static void user_scroll(UINT8 attribute)
 void HalConsolePutUserChar(char character, UINT8 attribute)
 {
     HalConsolePutUserStreamChar(character, attribute);
-    if (!GfxAvailable()) return;
+    if (g_graphics_mode || g_framebuffer_users || !GfxAvailable()) return;
     UINT32 columns = GfxFramebuffer.Width / GFX_FONT_W;
     UINT32 rows = GfxFramebuffer.Height / GFX_FONT_H;
     switch (character) {

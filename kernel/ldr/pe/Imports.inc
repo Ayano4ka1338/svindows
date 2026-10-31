@@ -145,8 +145,7 @@ static UINT64 LdrpProcByOrdinal(UINT64 base, UINT16 ordinal)
     return LdrpExportRvaToAddress(base, function_rva, dir);
 }
 
-/* CFG bootstrap trampolines. This arena must not be used
- * to manufacture missing imports. W^X/CFG enforcement remains separate work. */
+/* CFG bootstrap trampolines. W^X/CFG enforcement remains separate work. */
 #define LDR_STUB_ARENA_VA    0x0000000000069000ULL
 #define LDR_STUB_ARENA_PAGES 32     /* legacy CFG bootstrap arena; not callbacks */
 #define LDR_STUB_SLOT_SIZE   16
@@ -185,7 +184,11 @@ static BOOLEAN LdrpNameContains(const char *name, const char *needle)
 {
     for (; *name; name++) {
         const char *n = needle, *m = name;
-        while (*n && *m && *n == *m) {
+        while (*n && *m) {
+            char a = *n, b = *m;
+            if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+            if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+            if (a != b) break;
             n++;
             m++;
         }
@@ -303,8 +306,7 @@ static NTSTATUS LdrResolveImports(UINT64 base)
                 /* The core COM contract is temporarily hosted by kernel32 for
                  * allocator/bootstrap calls, but object activation must use
                  * the genuine combase implementation once it is loaded. */
-                if (strncmp(dll, "api-ms-win-core-com-",
-                            sizeof("api-ms-win-core-com-") - 1) == 0 &&
+                if (ci_starts_with(dll, "api-ms-win-core-com-") &&
                     strcmp(symbol, "CoCreateInstance") == 0) {
                     UINT64 combase = lookup_module("combase.dll");
                     if (combase)
@@ -404,8 +406,7 @@ static NTSTATUS LdrResolveDelayImports(UINT64 base)
                 if (!symbol || !*symbol) return STATUS_INVALID_IMAGE_FORMAT;
                 if (dll_base)
                     addr = LdrGetProcAddress(dll_base, symbol);
-                if (strncmp(dll, "api-ms-win-core-com-",
-                            sizeof("api-ms-win-core-com-") - 1) == 0 &&
+                if (ci_starts_with(dll, "api-ms-win-core-com-") &&
                     strcmp(symbol, "CoCreateInstance") == 0) {
                     UINT64 combase = lookup_module("combase.dll");
                     if (combase)
@@ -519,20 +520,17 @@ static UINT64 LdrpLoadModuleWorker(const char *name)
     /* Modern Windows binaries import API-set contract names rather than the
      * host DLL directly.  Route each implemented contract family to its real
      * SVINDOWS host instead of treating every API set as kernel32. */
-    if (strncmp(name, "api-ms-win-core-registry-",
-                sizeof("api-ms-win-core-registry-") - 1) == 0)
+    if (ci_starts_with(name, "api-ms-win-core-registry-"))
         return LdrpLoadModule("advapi32.dll");
 
     /* Resolve this API-set family only if its actual host DLL is available. */
-    if (strncmp(name, "api-ms-win-storage-exports-",
-                sizeof("api-ms-win-storage-exports-") - 1) == 0)
+    if (ci_starts_with(name, "api-ms-win-storage-exports-"))
         return LdrpLoadModule("windows.storage.dll");
 
     /* Universal CRT contracts are API-set names whose inbox host is
      * ucrtbase.dll. Windows.Storage and the shell use the private/runtime and
      * string families during their worker-thread bootstrap. */
-    if (strncmp(name, "api-ms-win-crt-",
-                sizeof("api-ms-win-crt-") - 1) == 0)
+    if (ci_starts_with(name, "api-ms-win-crt-"))
         return LdrpLoadModule("ucrtbase.dll");
 
     /* Windows system DLLs forward a large part of their surface to
@@ -551,8 +549,8 @@ static UINT64 LdrpLoadModuleWorker(const char *name)
         return LdrpLoadModule("gdi32.dll");
 
     /* Most of the core contracts implemented so far live in kernel32. */
-    if (strncmp(name, "api-ms-win-core-", 16) == 0 ||
-        strncmp(name, "ext-ms-win-core-", 16) == 0)
+    if (ci_starts_with(name, "api-ms-win-core-") ||
+        ci_starts_with(name, "ext-ms-win-core-"))
         return LdrpLoadModule("kernel32.dll");
     /* VERSION's implemented subset currently lives in kernel32; OLE32 must
      * resolve to its own DLL rather than an unrelated compatibility host. */

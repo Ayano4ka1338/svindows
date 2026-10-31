@@ -6,6 +6,9 @@
 
 #define USER_MAX_CLASSES 64
 
+static BOOLEAN W32kWindowLocalRect(UINT16 slot, INT32 *x, INT32 *y,
+                                    UINT32 *width, UINT32 *height);
+
 typedef struct _USER_CLASS_LOCAL {
     WCHAR Name[32];
     UINT64 WndProc;
@@ -337,84 +340,22 @@ static UINT64 NtUserSetWindowLong(UINT64 *a)
     return 0;
 }
 /* ------------------------------------------------------------------ */
-/* win32k-lite: paint the shell windows on the framebuffer            */
+/* Screen composition lives in UserScreen.inc: z-order, frames, pointer */
 /* ------------------------------------------------------------------ */
-/* There is no compositor yet; the kernel classifies the shell's own
- * windows by class name and paints simple rectangles for them. Enough to
- * make "the desktop is up" visible: WorkerW fills the screen (wallpaper),
- * Shell_TrayWnd becomes the taskbar strip, everything else is a plain
- * surface. Painting happens on create/show/hide/move so ring-3 state
- * changes become visible without any client-side drawing. */
+/* This part owns the window records and the services that change them; the
+ * screen itself - the desktop backdrop, the Windows 10 frame, the z-order and
+ * input routing - is the window manager in UserScreen.inc. Window geometry is
+ * kept there as the single source of truth, which is why the calls below
+ * forward geometry changes instead of storing a second copy. */
 
-#define WINPAINT_NONE     0
-#define WINPAINT_DESKTOP  1
-#define WINPAINT_TASKBAR  2
-#define WINPAINT_GENERIC  3
 #define WINPAINT_SLOTS    128
 
-static UINT8  g_win_kind[WINPAINT_SLOTS];
-static INT32  g_win_x[WINPAINT_SLOTS], g_win_y[WINPAINT_SLOTS];
-static UINT32 g_win_w[WINPAINT_SLOTS], g_win_h[WINPAINT_SLOTS];
-
-static BOOLEAN KiClassNameIs(const WCHAR *name, const char *ascii)
-{
-    UINT32 i = 0;
-    for (; ascii[i]; i++)
-        if (name[i] != (WCHAR)(UINT8)ascii[i])
-            return FALSE;
-    return name[i] == 0;
-}
-
-static void KiPaintWindowBySlot(UINT16 slot)
-{
-    if (!KiUserWindowValid(KiUserWindowHandle(slot), TRUE)) return;
-    UINT32 style = *(volatile UINT32 *)(PROCESS_USER_OBJECT_ARENA_VA +
-                                        (UINT64)slot * 0x200 + WND_STYLE_OFF);
-    if (!(style & WS_VISIBLE_))
-        return;
-
-    UINT32 sw = GfxFramebuffer.Width, sh = GfxFramebuffer.Height;
-
-    if (g_win_kind[slot] == WINPAINT_DESKTOP) {
-        GfxFillRect(0, 0, sw, sh, GfxColor(0x0e, 0x2a, 0x47));
-        return;
-    }
-    if (g_win_kind[slot] == WINPAINT_TASKBAR) {
-        UINT32 h = g_win_h[slot] ? g_win_h[slot] : 40;
-        if (h > sh / 3)
-            h = 40;
-        UINT32 y = sh - h;
-        GfxFillRect(0, y, sw, h, GfxColor(0x1f, 0x1f, 0x1f));
-        GfxFillRect(0, y, sw, 2, GfxColor(0x00, 0x78, 0xd7));
-        GfxFillRect(0, y + 2, 48, h - 2, GfxColor(0x2d, 0x2d, 0x2d));
-        GfxDrawString(14, y + (h - GFX_FONT_H) / 2 + 1, "SVINDOWS",
-                      GfxColor(0xff, 0xff, 0xff), GfxColor(0x2d, 0x2d, 0x2d));
-        return;
-    }
-
-    /* Generic top-level window: a plain surface with a border. */
-    {
-    INT32 x = g_win_x[slot], y = g_win_y[slot];
-    UINT32 w = g_win_w[slot], h = g_win_h[slot];
-    if ((UINT32)x >= sw || (UINT32)y >= sh || !w || !h)
-        return;
-    if (x + (INT32)w > (INT32)sw)
-        w = sw - (UINT32)x;
-    if (y + (INT32)h > (INT32)sh)
-        h = sh - (UINT32)y;
-    GfxFillRect((UINT32)x, (UINT32)y, w, h, GfxColor(0xf0, 0xf0, 0xf0));
-    GfxFillRect((UINT32)x, (UINT32)y, w, 1, GfxColor(0x10, 0x10, 0x10));
-    GfxFillRect((UINT32)x, (UINT32)y, 1, h, GfxColor(0x10, 0x10, 0x10));
-    }
-}
-
-static void KiRepaintAll(void);
 static UINT64 NtUserShowWindow(UINT64 *a)
 {
     if (!KiUserWindowValid(a[0], TRUE)) return 0;
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
     UINT32 cmd = (UINT32)a[1] & 0xF;
-    if (slot && slot < 256) {
+    if (slot && slot < WINPAINT_SLOTS) {
         UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
         if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
             UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
@@ -430,9 +371,9 @@ static UINT64 NtUserShowWindow(UINT64 *a)
         KiUserValidateWindow(slot);
     else
         KiUserInvalidateWindow(slot);
+    W32kShowWindow(a[0], cmd);
     KeLog("[user] ShowWindow(HWND %p, cmd %lu)\n", (void *)a[0],
           (unsigned long)cmd);
-    KiRepaintAll();
     return 1;
 }
 
@@ -440,35 +381,44 @@ static UINT64 NtUserSetWindowPos(UINT64 *a)
 {
     if (!KiUserWindowValid(a[0], TRUE)) return 0;
     /* Genuine win32k argument order: (hwnd, hWndInsertAfter, x, y,
-     * cx, cy, flags). SWP_NOMOVE=0x2, SWP_NOSIZE=0x1, SWP_SHOWWINDOW=0x40,
-     * SWP_HIDEWINDOW=0x80. */
+     * cx, cy, flags). SWP_NOSIZE=0x1, SWP_NOMOVE=0x2, SWP_NOZORDER=0x4,
+     * SWP_NOREDRAW=0x8, SWP_SHOWWINDOW=0x40, SWP_HIDEWINDOW=0x80. */
     UINT32 flags = (UINT32)a[6];
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
-    if (slot && slot < WINPAINT_SLOTS && g_win_kind[slot]) {
-        if (!(flags & 0x2)) {
-            g_win_x[slot] = (INT32)a[2];
-            g_win_y[slot] = (INT32)a[3];
-        }
-        if (!(flags & 0x1)) {
-            g_win_w[slot] = (UINT32)a[4];
-            g_win_h[slot] = (UINT32)a[5];
-        }
-    }
+
+    /* Visibility lives in the shared window record, which is what
+     * IsWindowVisible reads without a syscall. */
     if (flags & 0xC0) {
-        if (slot && slot < 256) {
-            UINT64 window = PROCESS_USER_OBJECT_ARENA_VA +
-                            (UINT64)slot * 0x200;
-            if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
-                UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
-                if (flags & 0x40)
-                    *style |= WS_VISIBLE_;
-                if (flags & 0x80)
-                    *style &= ~WS_VISIBLE_;
-            }
+        UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
+        if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
+            UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
+            if (flags & 0x40)
+                *style |= WS_VISIBLE_;
+            if (flags & 0x80)
+                *style &= ~WS_VISIBLE_;
         }
         if (flags & 0x80)
             KiUserValidateWindow(slot);
     }
+
+    /* Geometry belongs to the window manager; a SWP_NOMOVE or SWP_NOSIZE
+     * request only changes what it names, so the rest is read back first. */
+    INT32 x = 0, y = 0;
+    UINT32 w = 0, h = 0;
+    if (W32kWindowLocalRect(slot, &x, &y, &w, &h)) {
+        /* W32kWindowRect is in screen coordinates for GetWindowRect. The
+         * stored coordinates passed to W32kMoveWindow are parent-client
+         * coordinates for child windows, so SWP_NOMOVE must preserve the
+         * window record's local position instead of round-tripping screen
+         * coordinates through it. */
+        if (!(flags & 0x2)) { x = (INT32)a[2]; y = (INT32)a[3]; }
+        if (!(flags & 0x1)) { w = (UINT32)a[4]; h = (UINT32)a[5]; }
+        W32kMoveWindow(a[0], x, y, w, h);
+    }
+    /* HWND_TOP (0) and HWND_TOPMOST (-1) both mean "go to the top" here. */
+    if (!(flags & 0x4) && ((UINT64)a[1] == 0 || (UINT64)a[1] == (UINT64)-1))
+        W32kRaiseSlot(slot);
+
     /* Anything but a pure no-op move invalidates: a resized or newly shown
      * window has to repaint. SWP_NOREDRAW (0x8) is the caller opting out. */
     if (!(flags & 0x8) && (flags & 0x40 || !(flags & 0x3)))
@@ -477,29 +427,19 @@ static UINT64 NtUserSetWindowPos(UINT64 *a)
           (void *)a[0], (long)(INT32)a[2], (long)(INT32)a[3],
           (unsigned long)(UINT32)a[4], (unsigned long)(UINT32)a[5],
           (unsigned long)flags);
-    KiRepaintAll();
     return 1;
 }
 
-/* Full-screen repaint in creation order, with the desktop underneath. */
-static void KiRepaintAll(void)
+
+static UINT64 NtUserMoveWindow(UINT64 *a)
 {
-    if (!GfxAvailable())
-        return;
-    for (UINT16 slot = 1; slot < WINPAINT_SLOTS; slot++) {
-        if (KiUserWindowValid(KiUserWindowHandle(slot), TRUE) &&
-            g_win_kind[slot] == WINPAINT_DESKTOP &&
-            (*(volatile UINT32 *)(PROCESS_USER_OBJECT_ARENA_VA +
-                                  (UINT64)slot * 0x200 + WND_STYLE_OFF)) &
-                WS_VISIBLE_)
-            KiPaintWindowBySlot(slot);
-    }
-    for (UINT16 slot = 1; slot < WINPAINT_SLOTS; slot++)
-        KiPaintWindowBySlot(slot);
+    if (!KiUserWindowValid(a[0], TRUE))
+        return 0;
+    UINT64 position[7] = {
+        a[0], 0, a[1], a[2], a[3], a[4], 0x14u | (a[5] ? 0 : 0x8u)
+    };
+    return NtUserSetWindowPos(position);
 }
-
-
-static UINT64 NtUserMoveWindow(UINT64 *a) { return 1; }
 
 /* (hwnd, const RECT *rect, BOOL erase). The update region is whole-window, so
  * a partial rectangle just marks the window dirty. */
@@ -540,15 +480,30 @@ static UINT64 NtUserGetUpdateRect(UINT64 *a)
     BOOLEAN dirty = slot && slot < USER_PAINT_SLOTS && g_window_update[slot];
     INT32 *rect = (INT32 *)a[1];
     if (rect && MmProbeForWrite((UINT64)rect, 16)) {
+        INT32 x = 0, y = 0, w = 0, h = 0;
+        if (dirty && W32kWindowExists(slot))
+            W32kClientOrigin(slot, &x, &y, &w, &h);
         rect[0] = 0;
         rect[1] = 0;
-        rect[2] = dirty && slot < WINPAINT_SLOTS ? (INT32)g_win_w[slot] : 0;
-        rect[3] = dirty && slot < WINPAINT_SLOTS ? (INT32)g_win_h[slot] : 0;
+        rect[2] = w;
+        rect[3] = h;
     }
     return dirty ? 1 : 0;
 }
 
-static UINT64 NtUserUpdateWindow(UINT64 *a) { return 1; }
+static BOOLEAN KiSendToWindowProc(UINT64 hwnd, UINT32 message, UINT64 wparam,
+                                  INT64 lparam);
+
+static UINT64 NtUserUpdateWindow(UINT64 *a)
+{
+    if (!KiUserWindowValid(a[0], TRUE))
+        return 0;
+    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+    if (slot < USER_PAINT_SLOTS && g_window_update[slot] &&
+        !KiSendToWindowProc(a[0], 0x000F, 0, 0))
+        return 0;
+    return 1;
+}
 static UINT64 NtUserPostMessage(UINT64 *a)
 {
     return KiUserEnqueueMessage(a[0], (UINT32)a[1], a[2], (INT64)a[3],
@@ -558,6 +513,8 @@ static UINT64 NtUserPostMessage(UINT64 *a)
 /* Continuation codes carried in KTHREAD.CallbackContinue. */
 #define CB_CONT_CREATE_NCCREATE 1 /* next: WM_NCCREATE result handling   */
 #define CB_CONT_CREATE_WMCREATE 2 /* next: WM_CREATE result handling     */
+#define CB_CONT_DESTROY_CHILDREN 4
+#define CB_CONT_DESTROY_FINAL    5
 #define CB_CONT_SIMPLE          3 /* hand the WndProc result to the caller */
 
 /* The kernel->user callback machinery is defined further down (it needs the
@@ -595,7 +552,10 @@ static BOOLEAN KiSendToWindowProc(UINT64 hwnd, UINT32 message, UINT64 wparam,
                                   INT64 lparam)
 {
     UINT64 proc = KiWindowProcOf(hwnd);
-    if (!proc)
+    PKTHREAD caller = KeGetCurrentThread();
+    /* Receiver-thread scheduling for cross-thread SendMessage is not present.
+     * Never execute another GUI thread's window procedure on the caller. */
+    if (!proc || !caller || g_window_owner[(UINT16)hwnd] != caller->ThreadId)
         return FALSE;
     return KiStartUserCallback(proc, hwnd, message, wparam, (UINT64)lparam,
                                CB_CONT_SIMPLE, hwnd, message, (UINT64)lparam);
@@ -633,26 +593,26 @@ static UINT64 NtUserDispatchMessage(UINT64 *a)
 }
 static UINT64 NtUserTranslateMessage(UINT64 *a) { return 0; }
 static UINT64 NtUserTranslateAccelerator(UINT64 *a) { return 0; }
-static UINT64 NtUserSetTimer(UINT64 *a) { return 1; }
-static UINT64 NtUserKillTimer(UINT64 *a) { return 1; }
+static UINT64 NtUserSetTimer(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserKillTimer(UINT64 *a) { (void)a; return 0; }
 static UINT64 NtUserSetActiveWindow(UINT64 *a)
 {
-    UINT64 previous = g_user_active_hwnd;
     if (a[0] && !KiUserWindowValid(a[0], TRUE))
         return 0;
-    g_user_active_hwnd = a[0];
+    UINT64 previous = KiUserWindowHandle(W32kActiveSlot());
+    W32kActivateWindow(a[0]);
     return previous;
 }
-static UINT64 NtUserSetCapture(UINT64 *a) { return 0; }
-static UINT64 NtUserReleaseCapture(UINT64 *a) { return 1; }
 static UINT64 NtUserGetForegroundWindow(UINT64 *a)
 {
-    return g_user_active_hwnd;
+    (void)a;
+    return KiUserWindowHandle(W32kActiveSlot());
 }
 static UINT64 NtUserQueryWindow(UINT64 *a)
 {
     if (!KiUserWindowValid(a[0], FALSE)) return 0;
-    /* QueryWindow(hwnd, type): type 4 = window thread process id. */
+    /* QueryWindow(hwnd, type): type 0 = thread id, 4 = process id. */
+    if ((UINT32)a[1] == 0) return g_window_owner[(UINT16)a[0]];
     if ((UINT32)a[1] == 4) {
         return g_window_process[(UINT16)a[0]]->ProcessId;
     }
@@ -661,8 +621,13 @@ static UINT64 NtUserQueryWindow(UINT64 *a)
 static UINT64 NtUserGetAncestor(UINT64 *a)
 {
     if (!KiUserWindowValid(a[0], TRUE)) return 0;
-    /* GA_ROOT(2)/GA_ROOTOWNER(3): the single top-level window is itself. */
-    return a[0];
+    UINT16 slot = (UINT16)a[0];
+    if (a[1] == 1) {
+        UINT16 parent = W32kWindowParent(slot);
+        return parent ? KiUserWindowHandle(parent) : 0;
+    }
+    if (a[1] == 2 || a[1] == 3) return KiUserWindowHandle(W32kRootSlot(slot));
+    return 0;
 }
 static UINT64 NtUserWaitMessage(UINT64 *a)
 {
@@ -671,15 +636,17 @@ static UINT64 NtUserWaitMessage(UINT64 *a)
         KeYield();
     return 0;
 }
-static UINT64 NtUserGetProcessWindowStation(UINT64 *a) { return 0x1; }
-static UINT64 NtUserGetThreadDesktop(UINT64 *a) { return 0x2; }
-static UINT64 NtUserSetThreadDesktop(UINT64 *a) { return 1; }
-static UINT64 NtUserOpenInputDesktop(UINT64 *a) { return 0x3; }
-static UINT64 NtUserCloseDesktop(UINT64 *a) { return 1; }
-static UINT64 NtUserOpenDesktop(UINT64 *a) { return 0x3; }
-static UINT64 NtUserOpenWindowStation(UINT64 *a) { return 0x4; }
-static UINT64 NtUserSetProcessWindowStation(UINT64 *a) { return 1; }
-static UINT64 NtUserCloseWindowStation(UINT64 *a) { return 1; }
+/* Desktop/window-station objects are not implemented. Do not return fake
+ * handles that clients could later pass to unrelated object services. */
+static UINT64 NtUserGetProcessWindowStation(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserGetThreadDesktop(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserSetThreadDesktop(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserOpenInputDesktop(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserCloseDesktop(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserOpenDesktop(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserOpenWindowStation(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserSetProcessWindowStation(UINT64 *a) { (void)a; return 0; }
+static UINT64 NtUserCloseWindowStation(UINT64 *a) { (void)a; return 0; }
 static UINT64 NtUserNotifyWinEvent(UINT64 *a) { return 0; }
 static UINT64 NtUserCallHwnd(UINT64 *a) { return 0; }
 static UINT64 NtUserCallHwndLock(UINT64 *a) { return 0; }
@@ -689,19 +656,14 @@ static UINT64 NtUserEnumDisplayMonitors(UINT64 *a) { return 0; }
 static UINT64 NtUserGetDC(UINT64 *a)
 {
     if (a[0] && !KiUserWindowValid(a[0], TRUE)) return 0;
-    /* GetDC(NULL) means the whole screen; GetDC(hwnd) is clipped to the
-     * window. Non-client areas are not modelled, so the client rectangle is
-     * the window rectangle. */
+    /* GetDC(NULL) means the whole screen; GetDC(hwnd) is the client area, which
+     * the window manager owns - a client never draws its own caption. */
     UINT64 hwnd = a[0];
     INT32 x = 0, y = 0;
     INT32 w = (INT32)GfxFramebuffer.Width, h = (INT32)GfxFramebuffer.Height;
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);
-    if (hwnd && slot && slot < WINPAINT_SLOTS && g_win_kind[slot]) {
-        x = g_win_x[slot];
-        y = g_win_y[slot];
-        w = (INT32)g_win_w[slot];
-        h = (INT32)g_win_h[slot];
-    }
+    if (hwnd && slot && W32kWindowExists(slot))
+        W32kClientOrigin(slot, &x, &y, &w, &h);
     return W32kAcquireWindowDc(hwnd, x, y, w, h);
 }
 

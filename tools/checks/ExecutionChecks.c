@@ -29,6 +29,8 @@ void HalRegisterIrqHandler(UINT8 irq, HAL_IRQ_HANDLER routine)
 void HalUnmaskIrq(UINT8 irq) { (void)irq; }
 
 static KTHREAD thread;
+static KUSER_APC block_apc;
+static BOOLEAN queue_on_block;
 static jmp_buf fault;
 static ULONG expected_bugcheck;
 NORETURN void KeBugCheck(ULONG code, const char *message)
@@ -40,7 +42,15 @@ NORETURN void KeBugCheck(ULONG code, const char *message)
 PKTHREAD KeGetCurrentThread(void) { return &thread; }
 UINT64 KeGetTickCount(void) { return 10; }
 void KiReadyThread(PKTHREAD t) { t->State = ThreadStateReady; }
-void KiBlockCurrentThread(void) { abort(); }
+void KiBlockCurrentThread(void)
+{
+    if (!queue_on_block) abort();
+    queue_on_block = FALSE;
+    assert(thread.State == ThreadStateWaiting && thread.WaitAlertable);
+    assert(KeQueueUserApc(&thread, &block_apc) == STATUS_SUCCESS);
+    assert(thread.State == ThreadStateReady);
+    thread.State = ThreadStateRunning;
+}
 void ObReferenceObject(POBJECT object) { (void)object; }
 void ObDereferenceObject(POBJECT object) { (void)object; }
 
@@ -166,6 +176,83 @@ static void CheckInput(void)
     puts("PASS real keyboard/mouse ISR-to-DPC decoding, modifiers, arrows and overflow resync");
 }
 
+static void CheckUserApcs(void)
+{
+    KEVENT event;
+    KeInitializeEvent(&event, TRUE, FALSE);
+    thread.UserMode = TRUE;
+    thread.State = ThreadStateRunning;
+    KUSER_APC apc = { .Routine = 0x1000, .Context = 1 };
+    KUSER_APC got;
+    assert(KeQueueUserApc(&thread, &apc) == STATUS_SUCCESS);
+    assert(KeWaitForSingleObjectTimeout(&event.Header, 0) == STATUS_TIMEOUT);
+    assert(KeWaitForSingleObjectTimeoutAlertable(&event.Header, 0, TRUE) ==
+           STATUS_USER_APC);
+    assert(KeDequeueUserApc(&thread, &got) == STATUS_SUCCESS);
+    assert(got.Routine == 0x1000 && got.Context == 1);
+    assert(KeDequeueUserApc(&thread, &got) == STATUS_NOT_FOUND);
+    thread.State = ThreadStateWaiting;
+    thread.WaitAlertable = FALSE;
+    assert(KeQueueUserApc(&thread, &apc) == STATUS_SUCCESS);
+    assert(thread.State == ThreadStateWaiting);
+    thread.State = ThreadStateRunning;
+    assert(KeDequeueUserApc(&thread, &got) == STATUS_SUCCESS);
+    for (UINT64 i = 0; i < KE_MAXIMUM_USER_APCS; i++) {
+        apc.Context = i;
+        assert(KeQueueUserApc(&thread, &apc) == STATUS_SUCCESS);
+    }
+    assert(KeQueueUserApc(&thread, &apc) == STATUS_INSUFFICIENT_RESOURCES);
+    for (UINT64 i = 0; i < KE_MAXIMUM_USER_APCS; i++) {
+        assert(KeDequeueUserApc(&thread, &got) == STATUS_SUCCESS);
+        assert(got.Context == i);
+    }
+    block_apc = apc;
+    queue_on_block = TRUE;
+    assert(KeWaitForSingleObjectTimeoutAlertable(&event.Header,
+           ~(UINT64)0, TRUE) == STATUS_USER_APC);
+    assert(IsListEmpty(&event.Header.WaitListHead) && !thread.WaitAlertable);
+    assert(KeDequeueUserApc(&thread, &got) == STATUS_SUCCESS);
+    thread.UserMode = FALSE;
+    puts("PASS user APC queue: FIFO, limit, non-alertable poll, alertable wake and unlink");
+}
+
+static UINT64 kernel_apc_order[KE_MAXIMUM_KERNEL_APCS + 1];
+static UINT32 kernel_apc_count;
+static void KernelApc(PVOID context, PVOID arg1, PVOID arg2)
+{
+    assert(KeGetCurrentIrql() == APC_LEVEL && !(flags & 0x200));
+    assert(context == &thread && arg2 == (PVOID)0x55);
+    kernel_apc_order[kernel_apc_count++] = (UINT64)arg1;
+}
+
+static void CheckKernelApcs(void)
+{
+    KKERNEL_APC apc = {KernelApc, &thread, NULL, (PVOID)0x55};
+    thread.State = ThreadStateRunning;
+    flags = 0x202;
+    for (UINT64 i = 0; i < KE_MAXIMUM_KERNEL_APCS; ++i) {
+        apc.Argument1 = (PVOID)i;
+        assert(KeQueueKernelApc(&thread, &apc) == STATUS_SUCCESS);
+    }
+    assert(KeQueueKernelApc(&thread, &apc) == STATUS_INSUFFICIENT_RESOURCES);
+    assert(kernel_apc_count == 0);
+    KiDeliverKernelApcs();
+    assert(kernel_apc_count == KE_MAXIMUM_KERNEL_APCS);
+    for (UINT64 i = 0; i < KE_MAXIMUM_KERNEL_APCS; ++i)
+        assert(kernel_apc_order[i] == i);
+    assert(KeGetCurrentIrql() == PASSIVE_LEVEL && flags == 0x202);
+    thread.State = ThreadStateWaiting;
+    assert(KeQueueKernelApc(&thread, &apc) == STATUS_SUCCESS);
+    assert(thread.State == ThreadStateReady && thread.WaitStatus == STATUS_SUCCESS);
+    thread.State = ThreadStateRunning;
+    KiDeliverKernelApcs();
+    assert(kernel_apc_count == KE_MAXIMUM_KERNEL_APCS + 1);
+    thread.State = ThreadStateTerminated;
+    assert(KeQueueKernelApc(&thread, &apc) == STATUS_INVALID_PARAMETER);
+    thread.State = ThreadStateRunning;
+    puts("PASS special kernel APC FIFO, bounded queue, wait restart and APC_LEVEL delivery");
+}
+
 int main(void)
 {
     KIRQL old, nested;
@@ -225,5 +312,7 @@ int main(void)
     puts("PASS UP execution: IRQL/IF restore, nested locks, misuse bugchecks, wait limits, ISR signal rejection");
     CheckDpcs();
     CheckInput();
+    CheckUserApcs();
+    CheckKernelApcs();
     return 0;
 }

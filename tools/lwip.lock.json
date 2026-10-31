@@ -1,0 +1,8 @@
+{
+  "project": "lwip",
+  "version": "2.2.1",
+  "release_tag": "STABLE-2_2_1_RELEASE",
+  "commit": "77dcd25a72509eb83f72b033d219b1d40cd8eb95",
+  "primary_url": "https://github.com/lwip-tcpip/lwip/archive/77dcd25a72509eb83f72b033d219b1d40cd8eb95.tar.gz",
+  "fallback_url": "https://git.savannah.nongnu.org/cgit/lwip.git/snapshot/lwip-STABLE-2_2_1_RELEASE.tar.gz"
+}

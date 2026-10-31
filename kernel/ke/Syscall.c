@@ -2,8 +2,7 @@
  * ke/Syscall.c - the system-call boundary: MSR setup, the per-CPU block, the
  * service dispatcher, and the first handful of Nt* services.
  *
- * This is the interface native (ring 3) code will eventually reach through
- * ntdll. For now a tiny in-kernel user stub exercises it directly.
+ * Native ring-3 code reaches this interface through ntdll.
  */
 #include <svindows/Ke.h>
 #include <svindows/Trace.h>
@@ -13,11 +12,16 @@
 #include <svindows/Ldr.h>
 #include <svindows/Cm.h>
 #include <svindows/Gfx.h>
+#include <svindows/Hal.h>
+#include <svindows/Input.h>
 #include <svindows/Win32k.h>
 #include <svindows/Rtl.h>
 #include <svindows/Ob.h>
+#include <svindows/Ex.h>
+#include <svindows/Linux.h>
 #include <nt/Ntdef.h>
 #include <nt/Ntstatus.h>
+#include <nt/Ntobject.h>
 
 #ifndef _WCHAR_DEFINED
 #define WCHAR UINT16
@@ -30,6 +34,7 @@
 #define MSR_SFMASK        0xC0000084 /* RFLAGS bits cleared on SYSCALL    */
 #define MSR_GS_BASE       0xC0000101
 #define MSR_KERNEL_GS_BASE 0xC0000102
+#define MSR_FS_BASE       0xC0000100
 
 /*
  * KPCR - per-CPU block reached via GS after swapgs. The assembly entry relies
@@ -78,7 +83,16 @@ void KeSetUserGsBase(UINT64 teb)
      * kernel exit. For a user thread that is its TEB; for a kernel thread we
      * park the per-CPU block there. Kept correct on every context switch, so a
      * thread that terminates mid-syscall can't leave it stale. */
-    wrmsr(MSR_KERNEL_GS_BASE, teb ? teb : (UINT64)&g_kpcr);
+    PKTHREAD thread = g_kpcr.CurrentThread;
+    BOOLEAN linux_user = thread && thread->UserMode && thread->Process &&
+                         thread->Process->LinuxContext;
+    wrmsr(MSR_KERNEL_GS_BASE,
+          (teb || linux_user) ? teb : (UINT64)&g_kpcr);
+}
+
+void KeSetUserFsBase(UINT64 base)
+{
+    wrmsr(MSR_FS_BASE, base);
 }
 
 void KiInitializeSystemCalls(void)
@@ -89,6 +103,7 @@ void KiInitializeSystemCalls(void)
      * scheduler (KeSetUserGsBase). */
     wrmsr(MSR_GS_BASE, (UINT64)&g_kpcr);
     wrmsr(MSR_KERNEL_GS_BASE, (UINT64)&g_kpcr);
+    KeSetUserFsBase(0);
 
     /* Enable the SYSCALL/SYSRET instructions. */
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | 1 | (1ULL << 11)); /* SCE + NXE */
@@ -137,29 +152,6 @@ static UINT64 NtDisplayNumber(UINT64 *a)
  * before the service runs; used for diagnostics such as stack walks). */
 static UINT64 g_service_user_rsp;
 static UINT64 g_service_number;
-
-/* Test-only private services used by ABITEST.EXE. Keeping the validation on
- * the kernel side proves that the syscall entry gathered all sixteen Win64
- * arguments from the correct register/stack slots. */
-static UINT64 NtAbiProbe(UINT64 *a)
-{
-    UINT64 count = g_service_number - 0x180;
-    if (count > 16)
-        return 0;
-    for (UINT64 i = 0; i < count; i++)
-        if (a[i] != 0xA810000000000000ULL + i)
-            return 0;
-    return 0xA8100000ULL + count;
-}
-
-static UINT64 NtAbiShadowProbe(UINT64 *a)
-{
-    (void)a;
-    if ((g_service_user_rsp & 15) != 8 ||
-        !MmProbeForWrite(g_service_user_rsp + 8, 32))
-        return 0;
-    return 0xA8105A5AULL;
-}
 
 /* Walk the caller's user stack and annotate values that land inside loaded
  * module images (return addresses), giving a poor-man's exit backtrace. */
@@ -317,14 +309,14 @@ static UINT64 NtTraceCall(UINT64 *a)
     return 0;
 }
 
-/* NtTerminateThread - end the calling thread; does not return. */
+/* NtTerminateThread - terminate the referenced thread or the caller. */
 static UINT64 NtTerminateThread(UINT64 *a)
 {
     KeLog("[user] NtTerminateThread(handle=%p, status=0x%08lx); ending user thread\n",
           (void *)a[0], (unsigned long)(UINT32)a[1]);
     KiDumpUserStack(g_service_user_rsp);
     PKTHREAD thread = KeGetCurrentThread();
-    if (thread) {
+    if (thread && (!a[0] || a[0] == ~(UINT64)1)) {
         thread->ExitStatus = (NTSTATUS)a[1];
         /* KiUserExceptionDispatcher uses this service when no handler accepts
          * a first-chance exception. Windows terminates the process in that
@@ -335,8 +327,12 @@ static UINT64 NtTerminateThread(UINT64 *a)
             thread->ProcessMainThread = TRUE;
         }
     }
-    KeTerminateThread();
-    return 0; /* unreachable */
+    if (!a[0] || a[0] == ~(UINT64)1) {
+        KeTerminateThread();
+        return 0; /* unreachable */
+    }
+    return (UINT64)PsTerminateThreadByHandle((HANDLE)(ULONG_PTR)a[0],
+                                              (NTSTATUS)a[1]);
 }
 
 /* NtContinue's user-mode half restores the AMD64 register image after this
@@ -360,6 +356,7 @@ static UINT64 NtContinue(UINT64 *a)
 #define MEM_RELEASE     0x8000u
 #define MEM_FREE        0x10000u
 #define MEM_PRIVATE     0x20000u
+#define MEM_MAPPED      0x40000u
 #define PAGE_NOACCESS   0x01u
 #define PAGE_READONLY   0x02u
 #define PAGE_READWRITE  0x04u
@@ -524,6 +521,8 @@ static UINT64 NtFreeVirtualMemory(UINT64 *a)
         free_type == MEM_RELEASE ? 1 : size);
     if (!region)
         return (UINT64)STATUS_UNABLE_TO_FREE_VM;
+    if (region->Section)
+        return (UINT64)STATUS_UNABLE_TO_FREE_VM;
     if (free_type == MEM_RELEASE) {
         if (base != region->Base || *size_ptr != 0)
             return (UINT64)STATUS_INVALID_PARAMETER;
@@ -551,7 +550,8 @@ static UINT64 NtFreeVirtualMemory(UINT64 *a)
 /*
  * NtDelayExecution(BOOLEAN Alertable, PLARGE_INTEGER Interval) - block the
  * caller until the relative/absolute 100 ns deadline. Implemented as a
- * dispatcher timer wait (10 ms resolution). APC delivery is not implemented.
+ * dispatcher timer wait (10 ms resolution). An alertable wait is interrupted
+ * by a queued user APC; ntdll invokes the callback before returning to caller.
  */
 static UINT64 NtDelayExecution(UINT64 *a)
 {
@@ -559,9 +559,10 @@ static UINT64 NtDelayExecution(UINT64 *a)
     if (!MmProbeForRead((UINT64)interval, sizeof(*interval)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
 
-    if (a[0]) return (UINT64)STATUS_NOT_IMPLEMENTED;
     INT64 iv;
     memcpy(&iv, interval, sizeof(iv));
+    if (a[0] && KeHasUserApc(KeGetCurrentThread()))
+        return (UINT64)STATUS_USER_APC;
     if (KeDueTimeToTicks(iv) == 0) {
         KeYield();
         return (UINT64)STATUS_SUCCESS;
@@ -570,7 +571,8 @@ static UINT64 NtDelayExecution(UINT64 *a)
     KeInitializeTimerEx(&timer, FALSE);
     timer.StackOwner = KeGetCurrentThread();
     KeSetTimerEx(&timer, iv, 0, NULL);
-    NTSTATUS status = KeWaitForSingleObject(&timer.Header);
+    NTSTATUS status = KeWaitForSingleObjectTimeoutAlertable(
+        &timer.Header, ~(UINT64)0, (BOOLEAN)(a[0] != 0));
     KeCancelTimer(&timer);
     return (UINT64)status;
 }
@@ -579,8 +581,8 @@ static UINT64 NtDelayExecution(UINT64 *a)
  * NtQuerySystemInformation(SystemInformationClass, SystemInformation,
  *                          SystemInformationLength, ReturnLength).
  *
- * Explorer asks for SystemPolicyInformation (class 134) while constructing
- * the desktop.  This is an opaque CLIP/WarBird licensing channel, not a plain
+ * SystemPolicyInformation (class 134) is an opaque CLIP/WarBird licensing
+ * channel, not a plain
  * list of policy values: both its request and response contain encrypted and
  * checksummed blobs.  Expose the native entry point and validate its public
  * descriptor, but report that the licensing provider is absent rather than
@@ -678,15 +680,39 @@ static UINT64 NtProtectVirtualMemory(UINT64 *a)
     UINT64 size = PAGE_ALIGN_UP(*size_ptr);
     PKPROCESS process = KeGetCurrentThread()->Process;
     PMM_PROCESS_REGION region = MiFindRegion(process, base, size);
-    if (!region)
-        return (UINT64)STATUS_CONFLICTING_ADDRESSES;
+    if (!region) {
+        /* Images are mapped page-by-page by the PE loader and are not always
+         * represented as a private VM reservation. Permit protection changes
+         * over a fully resident image range while still rejecting holes. */
+        UINT64 image_base = 0, section_base = 0, section_size = 0;
+        if (!LdrQueryImageSection(base, &image_base, &section_base,
+                                 &section_size, NULL) ||
+            base < section_base || base + size > section_base + section_size)
+            return (UINT64)STATUS_CONFLICTING_ADDRESSES;
+        for (UINT64 va = base; va < base + size; va += PAGE_SIZE) {
+            if (MmGetPhysicalAddress(va) == MM_INVALID_PHYS)
+                return (UINT64)STATUS_CONFLICTING_ADDRESSES;
+            UINT64 flags = MmGetPageFlags(va);
+            *old_ptr = (flags & PTE_NX) ? ((flags & PTE_WRITE) ? 0x04 : 0x02)
+                                        : ((flags & PTE_WRITE) ? 0x40 : 0x20);
+        }
+        MmProtectRangeFlags(base, size, MiProtectionFlags(protect));
+        *base_ptr = (PVOID)base;
+        *size_ptr = size;
+        return (UINT64)STATUS_SUCCESS;
+    }
     for (UINT64 va = base; va < base + size; va += PAGE_SIZE)
         if (MmGetPhysicalAddress(va) == MM_INVALID_PHYS)
             return (UINT64)STATUS_CONFLICTING_ADDRESSES;
 
     *old_ptr = region->Protect;
     MmProtectRangeFlags(base, size, MiProtectionFlags(protect));
-    region->Protect = protect;
+    /* Image and data-section mappings share an allocation region while each
+     * mapped page can have a different initial protection. VirtualProtect
+     * updates only the requested PTE range; do not replace the whole section
+     * region's allocation protection metadata. */
+    if (!region->Section)
+        region->Protect = protect;
     *base_ptr = (PVOID)base;
     *size_ptr = size;
     return (UINT64)STATUS_SUCCESS;
@@ -727,6 +753,23 @@ static UINT64 NtQueryVirtualMemory(UINT64 *a)
     memset(info, 0, sizeof(*info));
     info->BaseAddress = (PVOID)address;
     if (!region) {
+        UINT64 allocation_base = 0, section_base = 0, section_size = 0;
+        UINT32 initial_protect = 0;
+        if (LdrQueryImageSection(address, &allocation_base, &section_base,
+                                 &section_size, &initial_protect)) {
+            memset(info, 0, sizeof(*info));
+            info->BaseAddress = (PVOID)section_base;
+            info->AllocationBase = (PVOID)allocation_base;
+            info->AllocationProtect = initial_protect;
+            info->RegionSize = section_base + section_size - address;
+            info->State = MEM_COMMIT;
+            UINT64 flags = MmGetPageFlags(address);
+            info->Protect = (flags & PTE_NX)
+                ? ((flags & PTE_WRITE) ? 0x04 : 0x02)
+                : ((flags & PTE_WRITE) ? 0x40 : 0x20);
+            info->Type = 0x01000000; /* MEM_IMAGE */
+            return (UINT64)STATUS_SUCCESS;
+        }
         UINT64 next = process->UserAllocationNext;
         for (ULONG i = 0; i < MM_MAX_PROCESS_REGIONS; i++)
             if (process->VmRegions[i].InUse &&
@@ -748,6 +791,8 @@ static UINT64 NtQueryVirtualMemory(UINT64 *a)
     return (UINT64)STATUS_SUCCESS;
 }
 
+#include "../mm/Sections.inc"
+
 /* NtLoadLibrary(name) - load a DLL by name at runtime; returns its base or 0.
  * (Not a real NT service name; our loader hook for kernel32's LoadLibraryA.) */
 static UINT64 NtLoadLibrary(UINT64 *a)
@@ -765,22 +810,26 @@ typedef UINT64 (*KI_SERVICE)(UINT64 *args);
 #include "../win32k/UserMessages.inc"
 #include "../win32k/UserWindows.inc"
 #include "../win32k/UserCallbacks.inc"
+/* Last: the window manager needs the window records, the message queue and the
+ * callback machinery of the parts above. */
+#include "../win32k/UserScreen.inc"
 
 /*
- * The system service table, indexed by real Windows 7 SP1 x64 syscall numbers
+ * The system service table, indexed by NT x64 syscall numbers
  * (from the public NT syscall-number tables). Sparse: most slots are unused.
  * Our ntdll stubs issue these same numbers, and a service's slot holds the
  * routine implementing it. Aligning to a real build's numbering is what would
- * let a genuine ntdll drive this kernel; the exact values target Win7 SP1 x64.
+ * let an ABI-compatible ntdll drive this kernel.
  */
 #define SVINDOWS_MAX_SYSCALL 0x2000
 static KI_SERVICE KiServiceTable[SVINDOWS_MAX_SYSCALL];
 
-/* Number assignments (Win7 SP1 x64). Kept together as the single source of
+/* Number assignments for the supported NT x64 ABI. Kept together as the single source of
  * truth, mirrored by the ntdll stubs. */
 #define SN_NtWaitForSingleObject   0x01
 #define SN_NtWriteFile             0x05
 #define SN_NtReadFile              0x03
+#define SN_NtQueryInformationFile  0x06
 #define SN_NtClose                 0x0C
 #define SN_NtOpenKey               0x0F
 #define SN_NtAllocateVirtualMemory 0x15
@@ -805,28 +854,62 @@ static KI_SERVICE KiServiceTable[SVINDOWS_MAX_SYSCALL];
 #define SN_NtQueryDirectoryFile    0x32
 #define SN_NtQuerySystemInformation 0x33
 #define SN_NtProtectVirtualMemory  0x4D
-/* SVINDOWS-private services (no Windows equivalent) live above the real range. */
+/* SVINDOWS-private service numbers live above the verified native range. Some
+ * names have Windows equivalents but use private numbers until ABI-checked. */
 #define SN_NtDisplayString         0xF0
 #define SN_NtDisplayNumber         0xF1
 #define SN_NtLoadLibrary           0xF2
-#define SN_NtEnumerateRootFiles    0xF3
 #define SN_NtQueryFileInfo         0xF4
-#define SN_NtSetFilePosition       0xF5
 #define SN_NtWaitForMultipleObjects 0xF6
 #define SN_NtResetEvent             0xF7
 #define SN_NtCreateSemaphore        0xF8
 #define SN_NtReleaseSemaphore       0xF9
 #define SN_NtQueryInformationProcess 0xFA
+#define SN_NtOpenThread             0x10E
+#define SN_NtOpenEvent              0x10F
+#define SN_NtCreateJobObject        0x110
+#define SN_NtAssignProcessToJobObject 0x111
+#define SN_NtSetInformationJobObject 0x112
+#define SN_NtQueryInformationJobObject 0x113
+#define SN_NtSuspendThread 0x114
+#define SN_NtResumeThread 0x115
+#define SN_NtSetInformationProcess 0x116
+#define SN_NtQueryThreadPriority 0x117
+#define SN_NtSetThreadPriority 0x118
+#define SN_NtCreateIoCompletion 0x119
+#define SN_NtSetIoCompletion 0x11A
+#define SN_NtRemoveIoCompletion 0x11B
+#define SN_NtAssociateIoCompletionFile 0x11C
+#define SN_NtDuplicateObject 0x11D
+#define SN_NtOpenProcess 0x11E
+#define SN_NtCreateSection 0x11F
+#define SN_NtMapViewOfSection 0x120
+#define SN_NtUnmapViewOfSection 0x121
+#define SN_NtOpenFile 0x122
+
+/*
+ * Window-manager services this kernel needs and the numbering above does not
+ * cover. They are Svindows-defined: the numbers sit in the unused part of the
+ * USER range, and user/w/ntdll/Ntdll.asm issues exactly these.
+ */
+#define SN_NtUserGetWindowRect          0x1031
+#define SN_NtUserGetClientRect          0x1032
+#define SN_NtUserSetFocus               0x1033
+#define SN_NtUserGetFocus               0x1034
+#define SN_NtUserSetWindowText          0x1035
+#define SN_NtUserGetWindowText          0x1036
+#define SN_NtUserWindowFromPoint        0x1037
+#define SN_NtUserGetSystemMetrics       0x1050
+#define SN_NtUserGetSysColor            0x1051
 #define SN_NtTraceCall           0xFB
 #define SN_NtCreateUserProcessSimple 0xFD
 #define SN_NtFileSystemControlSimple 0xFE
 #define SN_NtSetFileSizeSimple       0xFF
 #define SN_NtCreatePipeSimple        0x100
 #define SN_NtConsoleControlSimple     0x101
-#define SN_NtEnumerateDirectorySimple 0x102
-#define SN_NtAbiProbeFirst             0x180
-#define SN_NtAbiProbeLast              0x190
-#define SN_NtAbiShadowProbe            0x191
+#define SN_NtQueueApcThreadSimple      0x103
+#define SN_NtDequeueUserApc            0x104
+#define SN_NtTestAlertSimple           0x105
 #define SN_NtCreateMutant              0x192
 #define SN_NtReleaseMutant             0x193
 
@@ -869,6 +952,8 @@ static KI_SERVICE KiServiceTable[SVINDOWS_MAX_SYSCALL];
 #define SN_NtUserMoveWindow             0x1060
 #define SN_NtUserInvalidateRect         0x1007
 #define SN_NtUserUpdateWindow           0x10E9
+#define SN_NtUserGetKeyState            0x1F00 /* Svindows private USER ABI */
+#define SN_NtUserTrackMouseEvent        0x1F01
 #define SN_NtUserGetAncestor            0x10B4
 #define SN_NtUserRegisterClassExWOW     0x10B2
 #define SN_NtUserUnregisterClass        0x10BD
@@ -918,6 +1003,7 @@ static KI_SERVICE KiServiceTable[SVINDOWS_MAX_SYSCALL];
 #define SN_NtGdiDeleteObjectApp           0x1026
 #define SN_NtGdiPatBlt                    0x105C
 #define SN_NtGdiBitBlt                    0x100B
+#define SN_NtGdiBlitUserBuffer            0x1052
 #define SN_NtGdiExtTextOutW               0x103B
 #define SN_NtGdiGetTextMetricsW           0x1077
 #define SN_NtGdiGetTextExtent             0x1096
@@ -941,6 +1027,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtWaitForSingleObject]   = NtWaitForSingleObject;
     KiServiceTable[SN_NtWriteFile]             = NtWriteFile;
     KiServiceTable[SN_NtReadFile]              = NtReadFile;
+    KiServiceTable[SN_NtQueryInformationFile] = NtQueryInformationFile;
     KiServiceTable[SN_NtClose]                 = NtClose;
     KiServiceTable[SN_NtOpenKey]               = NtOpenKey;
     KiServiceTable[SN_NtAllocateVirtualMemory] = NtAllocateVirtualMemory;
@@ -968,25 +1055,50 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtDisplayString]         = NtDisplayString;
     KiServiceTable[SN_NtDisplayNumber]         = NtDisplayNumber;
     KiServiceTable[SN_NtLoadLibrary]           = NtLoadLibrary;
-    KiServiceTable[SN_NtEnumerateRootFiles]    = NtEnumerateRootFiles;
     KiServiceTable[SN_NtQueryFileInfo]         = NtQueryFileInfo;
-    KiServiceTable[SN_NtSetFilePosition]       = NtSetFilePosition;
     KiServiceTable[SN_NtWaitForMultipleObjects] = NtWaitForMultipleObjects;
     KiServiceTable[SN_NtResetEvent]             = NtResetEvent;
     KiServiceTable[SN_NtCreateSemaphore]        = NtCreateSemaphore;
     KiServiceTable[SN_NtReleaseSemaphore]       = NtReleaseSemaphore;
     KiServiceTable[SN_NtQueryInformationProcess] = NtQueryInformationProcess;
+    KiServiceTable[SN_NtOpenThread] = NtOpenThread;
+    KiServiceTable[SN_NtOpenEvent] = NtOpenEvent;
+    KiServiceTable[SN_NtCreateJobObject] = NtCreateJobObject;
+    KiServiceTable[SN_NtAssignProcessToJobObject] = NtAssignProcessToJobObject;
+    KiServiceTable[SN_NtSetInformationJobObject] = NtSetInformationJobObject;
+    KiServiceTable[SN_NtQueryInformationJobObject] = NtQueryInformationJobObject;
+    KiServiceTable[SN_NtSuspendThread] = NtSuspendThread;
+    KiServiceTable[SN_NtResumeThread] = NtResumeThread;
+    KiServiceTable[SN_NtSetInformationProcess] = NtSetInformationProcess;
+    KiServiceTable[SN_NtQueryThreadPriority] = NtQueryThreadPriority;
+    KiServiceTable[SN_NtSetThreadPriority] = NtSetThreadPriority;
+    KiServiceTable[SN_NtCreateIoCompletion] = NtCreateIoCompletion;
+    KiServiceTable[SN_NtSetIoCompletion] = NtSetIoCompletion;
+    KiServiceTable[SN_NtRemoveIoCompletion] = NtRemoveIoCompletion;
+    KiServiceTable[SN_NtAssociateIoCompletionFile] = NtAssociateIoCompletionFile;
+    KiServiceTable[SN_NtDuplicateObject] = NtDuplicateObject;
+    KiServiceTable[SN_NtOpenProcess] = NtOpenProcess;
+    KiServiceTable[SN_NtCreateSection] = NtCreateSection;
+    KiServiceTable[SN_NtMapViewOfSection] = NtMapViewOfSection;
+    KiServiceTable[SN_NtUnmapViewOfSection] = NtUnmapViewOfSection;
+    KiServiceTable[SN_NtOpenFile] = NtOpenFile;
     KiServiceTable[SN_NtTraceCall] = NtTraceCall;
     KiServiceTable[SN_NtCreateUserProcessSimple] = NtCreateUserProcessSimple;
     KiServiceTable[SN_NtFileSystemControlSimple] = NtFileSystemControlSimple;
     KiServiceTable[SN_NtSetFileSizeSimple] = NtSetFileSizeSimple;
     KiServiceTable[SN_NtCreatePipeSimple] = NtCreatePipeSimple;
     KiServiceTable[SN_NtConsoleControlSimple] = NtConsoleControlSimple;
-    KiServiceTable[SN_NtEnumerateDirectorySimple] = NtEnumerateDirectorySimple;
-    for (UINT64 number = SN_NtAbiProbeFirst;
-         number <= SN_NtAbiProbeLast; number++)
-        KiServiceTable[number] = NtAbiProbe;
-    KiServiceTable[SN_NtAbiShadowProbe] = NtAbiShadowProbe;
+    KiServiceTable[SN_NtQueueApcThreadSimple] = NtQueueApcThread;
+    KiServiceTable[SN_NtDequeueUserApc] = NtDequeueUserApc;
+    KiServiceTable[SN_NtTestAlertSimple] = NtTestAlert;
+    KiServiceTable[0x106] = NtOpenProcessToken;
+    KiServiceTable[0x107] = NtOpenThreadToken;
+    KiServiceTable[0x108] = NtQueryInformationToken;
+    KiServiceTable[0x109] = NtDeleteKey;
+    KiServiceTable[0x10A] = NtDeleteValueKey;
+    KiServiceTable[0x10B] = NtEnumerateKey;
+    KiServiceTable[0x10C] = NtEnumerateValueKey;
+    KiServiceTable[0x10D] = NtQueryKey;
     KiServiceTable[SN_NtCreateMutant] = NtCreateMutant;
     KiServiceTable[SN_NtReleaseMutant] = NtReleaseMutant;
     KiServiceTable[SN_NtCallbackReturn] = NtCallbackReturn;
@@ -995,6 +1107,16 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserCallOneParam] = NtUserCallOneParam;
     KiServiceTable[SN_NtUserGetMessage] = NtUserGetMessage;
     KiServiceTable[SN_NtUserGetDC] = NtUserGetDC;
+    /* Svindows-defined window-manager services (see the SN_ block above). */
+    KiServiceTable[SN_NtUserGetWindowRect] = NtUserGetWindowRect;
+    KiServiceTable[SN_NtUserGetClientRect] = NtUserGetClientRect;
+    KiServiceTable[SN_NtUserSetFocus] = NtUserSetFocus;
+    KiServiceTable[SN_NtUserGetFocus] = NtUserGetFocus;
+    KiServiceTable[SN_NtUserSetWindowText] = NtUserSetWindowText;
+    KiServiceTable[SN_NtUserGetWindowText] = NtUserGetWindowText;
+    KiServiceTable[SN_NtUserWindowFromPoint] = NtUserWindowFromPoint;
+    KiServiceTable[SN_NtUserGetSystemMetrics] = NtUserGetSystemMetrics;
+    KiServiceTable[SN_NtUserGetSysColor] = NtUserGetSysColor;
     KiServiceTable[SN_NtUserPostThreadMessage] = NtUserPostThreadMessage;
     KiServiceTable[SN_NtUserGetCaretBlinkTime] = NtUserGetCaretBlinkTime;
     KiServiceTable[SN_NtUserGetAtomName] = NtUserGetAtomName;
@@ -1028,6 +1150,8 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserMoveWindow] = NtUserMoveWindow;
     KiServiceTable[SN_NtUserInvalidateRect] = NtUserInvalidateRect;
     KiServiceTable[SN_NtUserUpdateWindow] = NtUserUpdateWindow;
+    KiServiceTable[SN_NtUserGetKeyState] = NtUserGetKeyState;
+    KiServiceTable[SN_NtUserTrackMouseEvent] = NtUserTrackMouseEvent;
     KiServiceTable[SN_NtUserGetAncestor] = NtUserGetAncestor;
     KiServiceTable[SN_NtUserRegisterClassExWOW] = NtUserRegisterClassExWOW;
     KiServiceTable[SN_NtUserUnregisterClass] = NtUserUnregisterClass;
@@ -1083,6 +1207,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtGdiDeleteObjectApp] = NtGdiDeleteObjectApp;
     KiServiceTable[SN_NtGdiPatBlt] = NtGdiPatBlt;
     KiServiceTable[SN_NtGdiBitBlt] = NtGdiBitBlt;
+    KiServiceTable[SN_NtGdiBlitUserBuffer] = NtGdiBlitUserBuffer;
     KiServiceTable[SN_NtGdiExtTextOutW] = NtGdiExtTextOutW;
     KiServiceTable[SN_NtGdiGetTextMetricsW] = NtGdiGetTextMetricsW;
     KiServiceTable[SN_NtGdiGetTextExtent] = NtGdiGetTextExtent;
@@ -1102,8 +1227,26 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserGetWindowDC] = NtUserGetDCEx;
 }
 
+void KiRejectUserReturn(UINT64 rip, UINT64 rsp)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    KeLog("[ke]   rejected unsafe user return: RIP=%p RSP=%p\n",
+          (void *)rip, (void *)rsp);
+    if (thread)
+        thread->ExitStatus = STATUS_ACCESS_VIOLATION;
+    KeTerminateThread();
+}
+
 UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
 {
+    PKTHREAD current = KeGetCurrentThread();
+    if (current && current->Process && current->Process->LinuxContext) {
+        const UINT64 linux_args[6] = {
+            reg_args[4], reg_args[5], reg_args[1],
+            reg_args[0], reg_args[2], reg_args[3]
+        };
+        return LinuxSystemCallDispatch(number, linux_args);
+    }
     g_service_user_rsp = user_rsp;
     g_service_number = number;
     static UINT8 seen_services[SVINDOWS_MAX_SYSCALL];
@@ -1149,5 +1292,7 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
         args[4 + i] = MmProbeForRead(slot, 8) ? *(volatile UINT64 *)slot : 0;
     }
 
-    return KiServiceTable[number](args);
+    UINT64 result = KiServiceTable[number](args);
+    KiDeliverKernelApcs();
+    return result;
 }

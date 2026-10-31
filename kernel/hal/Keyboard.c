@@ -30,12 +30,32 @@ static const char kbd_map_shift[128] = {
 #define KBD_RING 64
 static volatile char kbd_ring[KBD_RING];
 static volatile UINT32 kbd_head, kbd_tail; /* head == tail => empty */
+static volatile UINT32 game_ring[KBD_RING];
+static volatile UINT32 game_head, game_tail;
+static volatile UINT32 mirror_ring[KBD_RING];
+static volatile UINT32 mirror_head, mirror_tail, mirror_users;
 
 static BOOLEAN kbd_left_shift, kbd_right_shift;
-static BOOLEAN kbd_caps;
+static BOOLEAN kbd_caps, kbd_ctrl;
 static BOOLEAN kbd_extended; /* an 0xE0 prefix is pending */
 static HAL_INPUT_BYTE_QUEUE kbd_bytes;
 static KDPC kbd_dpc;
+
+static void kbd_input_push(UINT32 event)
+{
+    UINT32 next = (game_head + 1) % KBD_RING;
+    if (next != game_tail) {
+        game_ring[game_head] = event;
+        game_head = next;
+    }
+    if (mirror_users) {
+        next = (mirror_head + 1) % KBD_RING;
+        if (next != mirror_tail) {
+            mirror_ring[mirror_head] = event;
+            mirror_head = next;
+        }
+    }
+}
 
 static void kbd_push(char c)
 {
@@ -68,6 +88,8 @@ static void kbd_decode(UINT8 sc)
 
     if (kbd_extended) {
         kbd_extended = FALSE;
+        kbd_input_push((UINT32)code | 0x0200 | (release ? 0x0100 : 0));
+        if (code == 0x1D) { kbd_ctrl = !release; return; }
         if (release)
             return;
         switch (code) {
@@ -81,6 +103,7 @@ static void kbd_decode(UINT8 sc)
         default: return;
         }
     }
+    kbd_input_push((UINT32)code | (release ? 0x0100 : 0));
 
     /* Shift make/break. */
     if (code == 0x2A || code == 0x36) {
@@ -88,6 +111,7 @@ static void kbd_decode(UINT8 sc)
         else kbd_right_shift = !release;
         return;
     }
+    if (code == 0x1D) { kbd_ctrl = !release; return; }
     if (release)
         return;
 
@@ -108,6 +132,12 @@ static void kbd_decode(UINT8 sc)
     else if (kbd_caps && c >= 'A' && c <= 'Z')
         c = (char)(c - 'A' + 'a');
 
+    /* GUI characters share the raw transition stream, retaining make/char/
+     * break order. ANSI navigation sequences belong only to console input. */
+    char gui = c == '\n' ? '\r' : c;
+    if (kbd_ctrl && ((gui >= 'a' && gui <= 'z') || (gui >= 'A' && gui <= 'Z')))
+        gui &= 0x1F;
+    kbd_input_push(KBD_INPUT_CHARACTER | (UINT8)gui);
     kbd_push(c);
 }
 
@@ -115,7 +145,7 @@ static void kbd_deferred(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)
 {
     (void)dpc; (void)context; (void)arg1; (void)arg2;
     if (kbd_bytes.Lost) {
-        kbd_extended = kbd_left_shift = kbd_right_shift = FALSE;
+        kbd_extended = kbd_left_shift = kbd_right_shift = kbd_ctrl = FALSE;
         kbd_bytes.Lost = FALSE;
     }
     UINT8 byte;
@@ -154,4 +184,57 @@ char KbdReadChar(void)
     kbd_tail = (kbd_tail + 1) % KBD_RING;
     KiIrqRestore(flags);
     return c;
+}
+
+BOOLEAN KbdReadInputEvent(UINT32 *event)
+{
+    UINT64 flags = KiIrqSave();
+    if (game_head == game_tail) { KiIrqRestore(flags); return FALSE; }
+    *event = game_ring[game_tail];
+    game_tail = (game_tail + 1) % KBD_RING;
+    KiIrqRestore(flags); return TRUE;
+}
+
+BOOLEAN KbdInputEventAvailable(void)
+{
+    UINT64 flags = KiIrqSave();
+    BOOLEAN available = game_head != game_tail;
+    KiIrqRestore(flags);
+    return available;
+}
+
+void KbdInputMirrorAcquire(void)
+{
+    UINT64 flags = KiIrqSave();
+    if (!mirror_users) mirror_head = mirror_tail = 0;
+    mirror_users++;
+    KiIrqRestore(flags);
+}
+
+void KbdInputMirrorRelease(void)
+{
+    UINT64 flags = KiIrqSave();
+    if (mirror_users && !--mirror_users) mirror_head = mirror_tail = 0;
+    KiIrqRestore(flags);
+}
+
+BOOLEAN KbdMirroredInputEventAvailable(void)
+{
+    UINT64 flags = KiIrqSave();
+    BOOLEAN available = mirror_head != mirror_tail;
+    KiIrqRestore(flags);
+    return available;
+}
+
+BOOLEAN KbdReadMirroredInputEvent(UINT32 *event)
+{
+    UINT64 flags = KiIrqSave();
+    if (mirror_head == mirror_tail) {
+        KiIrqRestore(flags);
+        return FALSE;
+    }
+    *event = mirror_ring[mirror_tail];
+    mirror_tail = (mirror_tail + 1) % KBD_RING;
+    KiIrqRestore(flags);
+    return TRUE;
 }

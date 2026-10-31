@@ -2,9 +2,9 @@
  * hal/Mouse.c - PS/2 mouse driver (IRQ12).
  *
  * Enables the auxiliary device on the 8042 controller. IRQ12 captures bytes;
- * a DPC decodes 3-byte packets into a screen-clamped cursor position and a
+ * a DPC decodes 3-byte packets into screen-clamped pointer coordinates and a
  * button bitmask. Consumers poll MouseState (watching MouseState.Seq for
- * motion) and draw the cursor.
+ * motion) to route pointer input.
  */
 #include <svindows/Input.h>
 #include <svindows/Hal.h>
@@ -15,6 +15,30 @@ MOUSE_STATE MouseState;
 
 static INT32 mouse_max_x = 1023;
 static INT32 mouse_max_y = 767;
+
+/* Relative-motion ring for the Linux evdev adapter. Each entry is one decoded
+ * PS/2 packet: packed button transitions plus signed X and Y deltas. The
+ * absolute MOUSE_STATE above keeps serving native consumers; this ring keeps
+ * the raw deltas that a REL_X/REL_Y event device must report. */
+#define MOUSE_REL_RING 128
+typedef struct _MOUSE_REL_EVENT {
+    INT16  Dx;
+    INT16  Dy;
+    UINT8  Buttons;   /* the packet's button bitmask (MOUSE_BUTTON_*) */
+} MOUSE_REL_EVENT;
+static volatile MOUSE_REL_EVENT mouse_rel[MOUSE_REL_RING];
+static volatile UINT32 mouse_rel_head, mouse_rel_tail;
+
+static void mouse_rel_push(INT32 dx, INT32 dy, UINT8 buttons)
+{
+    UINT32 next = (mouse_rel_head + 1) % MOUSE_REL_RING;
+    if (next == mouse_rel_tail)
+        return; /* drop on overflow */
+    mouse_rel[mouse_rel_head].Dx = (INT16)dx;
+    mouse_rel[mouse_rel_head].Dy = (INT16)dy;
+    mouse_rel[mouse_rel_head].Buttons = buttons;
+    mouse_rel_head = next;
+}
 
 /* Packet reassembly. */
 static UINT8 pkt[3];
@@ -69,6 +93,9 @@ static void mouse_decode(UINT8 byte)
     MouseState.Y = y;
     MouseState.Buttons = flags & 0x07;
     MouseState.Seq++;
+
+    /* evdev consumers want the unclamped relative delta of this packet. */
+    mouse_rel_push(dx, dy, MouseState.Buttons);
 }
 
 static void mouse_deferred(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)
@@ -100,4 +127,20 @@ void HalInitializeMouse(void)
 
     HalRegisterIrqHandler(12, mouse_irq);
     HalUnmaskIrq(12);
+}
+
+BOOLEAN MouseReadRelEvent(INT32 *dx, INT32 *dy, UINT8 *buttons)
+{
+    UINT64 flags = KiIrqSave();
+    if (mouse_rel_head == mouse_rel_tail) {
+        KiIrqRestore(flags);
+        return FALSE;
+    }
+    MOUSE_REL_EVENT event = mouse_rel[mouse_rel_tail];
+    mouse_rel_tail = (mouse_rel_tail + 1) % MOUSE_REL_RING;
+    KiIrqRestore(flags);
+    if (dx) *dx = event.Dx;
+    if (dy) *dy = event.Dy;
+    if (buttons) *buttons = event.Buttons;
+    return TRUE;
 }

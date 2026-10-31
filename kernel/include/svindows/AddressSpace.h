@@ -10,5 +10,8 @@ void    MmDestroyAddressSpace(UINT64 directory_table_base);
 void    MmSwitchAddressSpace(UINT64 directory_table_base);
 BOOLEAN MmMapPageInAddressSpace(UINT64 directory_table_base, UINT64 virt,
                                 UINT64 phys, UINT64 flags);
+typedef BOOLEAN (*PMM_SHARED_PAGE)(UINT64 virt, PVOID context);
+UINT64 MmCloneUserAddressSpace(UINT64 source, PMM_SHARED_PAGE shared,
+                               PVOID context);
 
 #endif

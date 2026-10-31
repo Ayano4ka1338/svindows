@@ -1,0 +1,9 @@
+{
+  "distribution": "Alpine Linux",
+  "branch": "v3.22",
+  "architecture": "x86_64",
+  "packages": {
+    "fastfetch": {"repository": "community", "version": "2.44.0-r0"},
+    "hwdata-pci": {"repository": "main", "version": "0.395-r0"}
+  }
+}

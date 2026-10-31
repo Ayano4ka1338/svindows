@@ -138,6 +138,17 @@ static int ci_strcmp(const char *a, const char *b)
     }
 }
 
+static BOOLEAN ci_starts_with(const char *text, const char *prefix)
+{
+    while (*prefix) {
+        char a = *text++, b = *prefix++;
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (!a || a != b) return FALSE;
+    }
+    return TRUE;
+}
+
 static PIMAGE_NT_HEADERS64 nt_headers(UINT64 base)
 {
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;

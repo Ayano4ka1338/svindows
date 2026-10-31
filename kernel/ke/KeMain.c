@@ -20,6 +20,8 @@
 #include <svindows/Gfx.h>
 #include <svindows/Win32k.h>
 #include <svindows/Input.h>
+#include <svindows/Linux.h>
+#include <svindows/Net.h>
 #include <svindows/Rtl.h>
 
 #define SVINDOWS_VERSION "0.6.0"
@@ -38,8 +40,8 @@ static SIZE_T g_boot_report_length;
 #define SVINDOWS_BOOT_COMMAND_LINE SVINDOWS_BOOT_PROGRAM
 #endif
 
-/* The input thread bridges the hardware queues into the USER message queues;
- * drawing the pointer is the shell's job, not the kernel's. */
+/* The input thread bridges hardware queues to USER messages. The window
+ * manager owns pointer composition and caption dragging. */
 static void InputWorker(PVOID context)
 {
     (void)context;
@@ -47,6 +49,17 @@ static void InputWorker(PVOID context)
     UINT32 last_seq = (UINT32)-1;
 
     for (;;) {
+        /* One ordered hardware stream: make, translated character, break.
+         * Discard GUI events until a window owns focus; console input has its
+         * own character queue below. */
+        BOOLEAN window_owns_keyboard = W32kKeyboardOwner();
+        UINT32 event;
+        while (KbdReadInputEvent(&event)) {
+            if (!window_owns_keyboard) continue;
+            if (event & KBD_INPUT_CHARACTER) KiUserQueueCharacter((UINT16)event);
+            else W32kInputKey((UINT16)event);
+        }
+
         /* Headless `make run-serial` uses COM1 as the keyboard. */
         while (HalSerialDataAvailable()) {
             char c = HalSerialReadChar();
@@ -54,27 +67,25 @@ static void InputWorker(PVOID context)
             if ((UINT8)c == 127) c = '\b';
             if (c) {
                 IoConsoleInputCharacter(c);
-                KiUserQueueCharacter((UINT8)c);
+                KiUserQueueCharacter((UINT8)(c == '\n' ? '\r' : c));
             }
         }
 
-        /* Deliver each key to both console input and the USER message queue.
-         * Echo belongs to the console application so GUI input stays silent. */
+        /* The console gets its own character/ANSI stream. GUI input already
+         * arrived through the ordered hardware stream above. */
         while (KbdDataAvailable()) {
             char c = KbdReadChar();
             if (c) {
                 IoConsoleInputCharacter(c);
-                KiUserQueueCharacter((UINT8)c);
             }
         }
 
-        /* Forward pointer motion into the USER message queues. The visible
-         * cursor belongs to the shell once it draws one; the kernel no longer
-         * paints its own sprite over the desktop. */
+        /* Forward pointer motion to the window manager, which hit-tests,
+         * activates, drags and posts the mouse messages itself. */
         UINT32 seq = MouseState.Seq;
         if (seq != last_seq) {
             last_seq = seq;
-            KiUserQueueMouse(MouseState.X, MouseState.Y, MouseState.Buttons);
+            W32kInputMouse(MouseState.X, MouseState.Y, MouseState.Buttons);
         }
 
         ConUpdateCursor(KeGetTickCount());
@@ -249,6 +260,24 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     KeInitializeScheduler();
     KiBootStepOk("Scheduler");
 
+    HalInitializePic();
+    KiBootStepOk("Interrupt controller");
+    HalRegisterIrqHandler(0, KeClockTick);
+    HalInitializeTimer(100); /* 100 Hz preemption tick */
+    KiBootStepOk("100 Hz system timer");
+
+    /* Bring up the PCI Ethernet transport after the scheduler and timer.
+     * Protocols are layered above this frame interface, never in the IRQ path. */
+    /* Initialize networking silently; it is a background service, not an
+     * interactive boot-status item. Failures remain available through the
+     * network subsystem diagnostic/logging paths. */
+    (void)NetInitialize();
+
+    /* Do not enqueue the first ring-3 process until the network stack has
+     * completed its tcpip_thread/netif initialization. NetInitialize may
+     * yield while waiting for lwIP's tcpip callback; if the user process is
+     * already queued, the scheduler can run it during that wait and its first
+     * AF_INET socket() incorrectly observes ENETDOWN. */
     NTSTATUS st = PsCreateInitialProcess(SVINDOWS_BOOT_PROGRAM,
                                          SVINDOWS_BOOT_COMMAND_LINE);
     if (NT_SUCCESS(st))
@@ -256,15 +285,12 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     else
         KiBootStepFailed("Initial user process", st);
 
-    HalInitializePic();
-    KiBootStepOk("Interrupt controller");
-    HalRegisterIrqHandler(0, KeClockTick);
-    HalInitializeTimer(100); /* 100 Hz preemption tick */
-    KiBootStepOk("100 Hz system timer");
-
     /* Input: PS/2 keyboard + mouse, feeding the USER message queues. */
     HalInitializeKeyboard();
     HalInitializeMouse();
+    /* Expose the same sources as evdev character devices so Linux binaries
+     * (Xorg, libinput) can open /dev/input/eventN. */
+    LinuxInputInitialize();
     if (GfxAvailable())
         HalMouseSetBounds((INT32)GfxFramebuffer.Width, (INT32)GfxFramebuffer.Height);
     if (KeCreateThread("Input", InputWorker, NULL, 8))

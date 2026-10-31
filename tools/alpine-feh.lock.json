@@ -1,0 +1,8 @@
+{
+  "distribution": "Alpine Linux",
+  "branch": "v3.22",
+  "architecture": "x86_64",
+  "packages": {
+    "feh": "3.10.3-r0"
+  }
+}

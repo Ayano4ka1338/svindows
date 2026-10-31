@@ -91,7 +91,104 @@ static void KiWakeWaitingThread(PKTHREAD thread, NTSTATUS status)
     KiUnlinkThreadWait(thread);
     thread->WaitStatus = status;
     thread->WaitDeadline = 0;
+    thread->WaitAlertable = FALSE;
     KiReadyThread(thread);
+}
+
+NTSTATUS KeQueueKernelApc(PKTHREAD thread, const KKERNEL_APC *apc)
+{
+    if (!thread || !apc || !apc->Routine)
+        return STATUS_INVALID_PARAMETER;
+    UINT64 flags = KiIrqSave();
+    NTSTATUS status = STATUS_SUCCESS;
+    if (thread->State == ThreadStateTerminated)
+        status = STATUS_INVALID_PARAMETER;
+    else if (thread->KernelApcCount == KE_MAXIMUM_KERNEL_APCS)
+        status = STATUS_INSUFFICIENT_RESOURCES;
+    else {
+        UINT8 tail = (UINT8)((thread->KernelApcHead + thread->KernelApcCount) %
+                             KE_MAXIMUM_KERNEL_APCS);
+        thread->KernelApcs[tail] = *apc;
+        thread->KernelApcCount++;
+        if (thread->State == ThreadStateWaiting)
+            KiWakeWaitingThread(thread, STATUS_SUCCESS);
+    }
+    KiIrqRestore(flags);
+    return status;
+}
+
+void KiDeliverKernelApcs(void)
+{
+    if (KeGetCurrentIrql() > APC_LEVEL)
+        return;
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || thread->State == ThreadStateTerminated)
+        return;
+    for (UINT32 delivered = 0; delivered < KE_MAXIMUM_KERNEL_APCS; ++delivered) {
+        UINT64 flags = KiIrqSave();
+        if (!thread->KernelApcCount) {
+            KiIrqRestore(flags);
+            break;
+        }
+        KKERNEL_APC apc = thread->KernelApcs[thread->KernelApcHead];
+        thread->KernelApcHead = (UINT8)((thread->KernelApcHead + 1) %
+                                        KE_MAXIMUM_KERNEL_APCS);
+        thread->KernelApcCount--;
+        KIRQL old_irql;
+        KeRaiseIrql(APC_LEVEL, &old_irql);
+        apc.Routine(apc.Context, apc.Argument1, apc.Argument2);
+        KeLowerIrql(old_irql);
+        KiIrqRestore(flags);
+    }
+}
+
+NTSTATUS KeQueueUserApc(PKTHREAD thread, const KUSER_APC *apc)
+{
+    if (!thread || !apc || !apc->Routine || !thread->UserMode)
+        return STATUS_INVALID_PARAMETER;
+    UINT64 flags = KiIrqSave();
+    NTSTATUS status = STATUS_SUCCESS;
+    if (thread->State == ThreadStateTerminated ||
+        (thread->Process && thread->Process->Exiting))
+        status = STATUS_INVALID_PARAMETER;
+    else if (thread->UserApcCount == KE_MAXIMUM_USER_APCS)
+        status = STATUS_INSUFFICIENT_RESOURCES;
+    else {
+        UINT8 tail = (UINT8)((thread->UserApcHead + thread->UserApcCount) %
+                             KE_MAXIMUM_USER_APCS);
+        thread->UserApcs[tail] = *apc;
+        thread->UserApcCount++;
+        if (thread->State == ThreadStateWaiting && thread->WaitAlertable)
+            KiWakeWaitingThread(thread, STATUS_USER_APC);
+    }
+    KiIrqRestore(flags);
+    return status;
+}
+
+NTSTATUS KeDequeueUserApc(PKTHREAD thread, PKUSER_APC apc)
+{
+    if (!thread || !apc)
+        return STATUS_INVALID_PARAMETER;
+    UINT64 flags = KiIrqSave();
+    if (!thread->UserApcCount) {
+        KiIrqRestore(flags);
+        return STATUS_NOT_FOUND;
+    }
+    *apc = thread->UserApcs[thread->UserApcHead];
+    thread->UserApcHead = (UINT8)((thread->UserApcHead + 1) %
+                                  KE_MAXIMUM_USER_APCS);
+    thread->UserApcCount--;
+    KiIrqRestore(flags);
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN KeHasUserApc(PKTHREAD thread)
+{
+    if (!thread) return FALSE;
+    UINT64 flags = KiIrqSave();
+    BOOLEAN pending = (BOOLEAN)(thread->UserApcCount != 0);
+    KiIrqRestore(flags);
+    return pending;
 }
 
 /* Wake every thread waiting on this header so it can re-test the object. */
@@ -116,10 +213,13 @@ void KiCancelThreadWait(PKTHREAD thread, NTSTATUS status)
     thread->WaitStatus = status;
     thread->WaitDeadline = 0;
     thread->WaitBlockCount = 0;
+    thread->WaitAlertable = FALSE;
 }
 
-NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
-                                  BOOLEAN wait_all, UINT64 timeout_ticks)
+NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
+                                          PDISPATCHER_HEADER *objects,
+                                          BOOLEAN wait_all, UINT64 timeout_ticks,
+                                          BOOLEAN alertable)
 {
     if (KeGetCurrentIrql() > DISPATCH_LEVEL ||
         (timeout_ticks != 0 && KeGetCurrentIrql() > APC_LEVEL))
@@ -143,6 +243,10 @@ NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
         (timeout_ticks > ~(UINT64)0 - now ? ~(UINT64)0 : now + timeout_ticks);
 
     for (;;) {
+        if (alertable && thread && thread->UserApcCount) {
+            KiIrqRestore(flags);
+            return STATUS_USER_APC;
+        }
         if (wait_all) {
             BOOLEAN ready = TRUE;
             for (ULONG i = 0; i < count; i++)
@@ -179,6 +283,7 @@ NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
         thread->WaitBlockCount = count;
         thread->WaitStatus = STATUS_PENDING;
         thread->WaitDeadline = deadline;
+        thread->WaitAlertable = alertable;
         for (ULONG i = 0; i < count; i++) {
             PKWAIT_BLOCK block = &thread->WaitBlocks[i];
             InitializeListHead(&block->WaitListEntry);
@@ -192,6 +297,12 @@ NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
         /* Signaling and timeout paths normally unlink all blocks before making
          * us ready. This is also safe as defensive cleanup. */
         KiUnlinkThreadWait(thread);
+        thread->WaitAlertable = FALSE;
+        if (thread->WaitStatus == STATUS_USER_APC) {
+            thread->WaitBlockCount = 0;
+            KiIrqRestore(flags);
+            return STATUS_USER_APC;
+        }
         if (thread->WaitStatus == STATUS_TIMEOUT) {
             thread->WaitBlockCount = 0;
             KiIrqRestore(flags);
@@ -201,11 +312,26 @@ NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
     }
 }
 
+NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
+                                  BOOLEAN wait_all, UINT64 timeout_ticks)
+{
+    return KeWaitForMultipleObjectsAlertable(count, objects, wait_all,
+                                             timeout_ticks, FALSE);
+}
+
+NTSTATUS KeWaitForSingleObjectTimeoutAlertable(PDISPATCHER_HEADER h,
+                                               UINT64 timeout_ticks,
+                                               BOOLEAN alertable)
+{
+    PDISPATCHER_HEADER objects[1] = { h };
+    return KeWaitForMultipleObjectsAlertable(1, objects, FALSE,
+                                             timeout_ticks, alertable);
+}
+
 NTSTATUS KeWaitForSingleObjectTimeout(PDISPATCHER_HEADER h,
                                       UINT64 timeout_ticks)
 {
-    PDISPATCHER_HEADER objects[1] = { h };
-    return KeWaitForMultipleObjects(1, objects, FALSE, timeout_ticks);
+    return KeWaitForSingleObjectTimeoutAlertable(h, timeout_ticks, FALSE);
 }
 
 NTSTATUS KeWaitForSingleObject(PDISPATCHER_HEADER h)
