@@ -21,9 +21,9 @@ def main():
     parser.add_argument("--timeout", type=float, default=45)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--doom-probe", action="store_true",
-                        help="launch the bundled Doom DOS/4G image and require 32-bit DPMI entry")
-    parser.add_argument("--doom-probe-timeout", type=float, default=30,
-                        help="seconds to wait for Doom DPMI transition (default: 30)")
+                        help="launch the bundled Doom DOS/4G image and require VGA graphics startup")
+    parser.add_argument("--doom-probe-timeout", type=float, default=180,
+                        help="seconds to wait for Doom graphics startup (default: 180)")
     args = parser.parse_args()
     if args.timeout <= 0 or args.repeat <= 0 or args.doom_probe_timeout <= 0:
         parser.error("timeouts and repeat must be positive")
@@ -162,23 +162,34 @@ def main():
                             raise RuntimeError(f"command failed: {command!r}")
                         print(f"PASS {command}", flush=True)
                     if args.doom_probe:
-                        # Doom is interactive and does not have a deterministic
-                        # automatic exit. Probe the initial DPMI transition and
-                        # the first virtual hardware access; this is still not a
-                        # complete gameplay/graphics validation.
+                        # Require the real game startup, including WAD loading
+                        # and mode 13h, then observe it for delayed CPU faults.
                         doom_start = len(ANSI.sub("", raw.decode("utf-8", errors="replace")))
-                        process.stdin.write(b"C:\\DOOM\\DOOM.EXE\n")
+                        process.stdin.write(b"doom\n")
                         process.stdin.flush()
                         output = wait_for(
                             r"\[dos\] DPMI initial 32-bit selectors",
                             doom_start, timeout=args.doom_probe_timeout)
                         output = wait_for(
-                            r"\[dos-vga\] (?:IN|OUT) port=",
+                            r"\[dos-vga\] video mode=13|DOSVM:|thread .*DOOM.*terminated",
                             doom_start, timeout=args.doom_probe_timeout)
-                        if re.search(r"DOSVM: .*fault|DPMI .*failed|unsupported protected-mode instruction",
+                        # Keep collecting after the first port access: an
+                        # invalid CS default size can fault immediately after
+                        # an apparently successful DPMI entry / IN instruction.
+                        settle_deadline = time.monotonic() + 10
+                        while time.monotonic() < settle_deadline:
+                            if process.poll() is not None:
+                                raise RuntimeError("QEMU exited during Doom probe")
+                            for key, _ in selector.select(0.5):
+                                chunk = os.read(key.fileobj.fileno(), 65536)
+                                if not chunk:
+                                    raise RuntimeError("QEMU serial output closed")
+                                raw.extend(chunk)
+                        output = ANSI.sub("", raw.decode("utf-8", errors="replace"))[doom_start:]
+                        if re.search(r"DOSVM:|thread .*doom.*terminated|unsupported protected-mode instruction",
                                      output, re.IGNORECASE):
                             raise RuntimeError("Doom DPMI probe reached a protected-mode fault")
-                        print("PASS Doom DPMI entry and virtual hardware access (gameplay not validated)", flush=True)
+                        print("PASS Doom WAD loading and VGA graphics startup (gameplay not validated)", flush=True)
                 process.terminate()
                 process.wait(timeout=5)
                 process = None

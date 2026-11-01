@@ -141,7 +141,8 @@ void dos_int(U8 n) {
   /* A non-null IVT entry is a guest-installed real-mode handler. */
   U16 vector_off = rw(0, (U16)(n * 4u));
   U16 vector_seg = rw(0, (U16)(n * 4u + 2u));
-  if (vector_off || vector_seg) {
+  if ((vector_off || vector_seg) &&
+      !(vector_seg == DOS_BUILTIN_SEGMENT && vector_off == DOS_BUILTIN_OFFSET(n))) {
     r[SP] -= 2; ww(seg[SS], r[SP], flags | 2u);
     r[SP] -= 2; ww(seg[SS], r[SP], seg[CS]);
     r[SP] -= 2; ww(seg[SS], r[SP], ip);
@@ -150,6 +151,9 @@ void dos_int(U8 n) {
     ip = vector_off;
     return;
   }
+  /* Timer/keyboard IRQ bookkeeping is maintained by the virtual PIT/8042.
+   * Default BIOS chaining targets simply acknowledge/return. */
+  if (n == 0x08 || n == 0x09 || n == 0x1c) return;
   if (n == 0x2f) {
     if (r[AX] == 0x1687) {
       KeLog("[dos] INT 2Fh AX=1687 DPMI host discovery\n");
@@ -176,6 +180,31 @@ void dos_int(U8 n) {
   if (n == 0x29) {
     U8 ch = get8(0);
     output(1, &ch, 1);
+    return;
+  }
+  if (n == 0x33) {
+    if (r[AX] == 0 || r[AX] == 0x21) { r[AX] = 0; r[BX] = 0; }
+    return;
+  }
+  if (n == 0x10 && (ah == 0x01 || ah == 0x02 || ah == 0x03)) {
+    U16 page = (U16)(r[BX] >> 8) & 7u;
+    if (ah == 0x01) ww(0, 0x460, r[CX]);
+    else if (ah == 0x02) ww(0, (U16)(0x450u + page * 2u), r[DX]);
+    else {
+      r[DX] = rw(0, (U16)(0x450u + page * 2u));
+      r[CX] = rw(0, 0x460);
+    }
+    return;
+  }
+  if (n == 0x10 && (ah == 0x09 || ah == 0x0a)) {
+    U16 page = (U16)(r[BX] >> 8) & 7u;
+    U16 cursor = rw(0, (U16)(0x450u + page * 2u));
+    U32 cell = (U32)(cursor >> 8) * 80u + (cursor & 0xffu);
+    U32 base = 0xb8000u + (U32)page * 4096u;
+    for (U32 i = 0; i < r[CX] && cell + i < 2000u; i++) {
+      current()->Memory[base + (cell + i) * 2u] = (U8)r[AX];
+      if (ah == 0x09) current()->Memory[base + (cell + i) * 2u + 1u] = (U8)r[BX];
+    }
     return;
   }
   if (n == 0x10 && ah == 0x0e) {

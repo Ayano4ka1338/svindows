@@ -492,6 +492,8 @@ dos-tests: $(DOS_TESTS)
 
 dos-vm-check:
 	python3 tools/checks/DosVmChecks.py
+	python3 tools/checks/DosCpuChecks.py
+	python3 tools/checks/DosVgaChecks.py
 
 $(ISO): $(KERNEL) boot/Grub.cfg
 	@mkdir -p $(BUILD)/isodir/boot/grub
