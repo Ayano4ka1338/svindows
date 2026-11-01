@@ -49,13 +49,27 @@ to that directory, while `C:\\NAME` starts at the drive root. Unmounted drive
 letters and paths too long for the DOS path buffer are rejected. Opened files
 honor the read/write access mode supplied to `AH=3Dh`.
 BIOS text output through `INT 10h/AH=0Eh` and keyboard input through
-`INT 16h/AH=00h` are mapped to the Svindows console. Standard DOS streams use
-the child process's native handles, so pipes and redirection work.
+`INT 16h/AH=00h` are mapped to the Svindows console. BIOS video services now
+include EGA palette register set/read calls (`INT 10h/AH=10h`, subfunctions
+00h-03h and 07h-09h), VGA DAC single/block access, the EGA display-combination
+query, and pixel read/write for the supported CGA graphics modes. CGA modes 04h,
+05h, and 06h use the interleaved B8000h scanline layout; mode 06h is presented as
+640x200 monochrome graphics through the Svindows framebuffer. Standard DOS
+streams use the child process's native handles, so pipes and redirection work.
+
+For gameplay performance, build the system with `make CONFIG=release run-gui`.
+The default `CONFIG=debug` compiles the kernel (including the DOS interpreter)
+with `-Og`, while the release configuration uses `-O2`.
 
 To run a DOS program, put its `.COM` or MZ `.EXE` file on `build/disk.img`
 (or copy it to the mounted C: drive) and enter its name in `cmd.exe`. When
 `user/d/doom/` is present, the build copies the bundled DOS/4G Doom distribution
-to `C:\DOOM` and adds a root `DOOM.BAT` launcher. `C:\DOSCHECK.BAT` runs COM,
+and any additional files in that directory to `C:\DOOM`, and adds a root
+`DOOM.BAT` launcher. Windows 1.01 system files from `user/d/windows1/` are
+copied into `C:\WINDOWS1`. The root `C:\WIN.BAT` launcher changes into that
+directory before running `WIN.COM`, then restores the root directory when
+Windows exits. Start Windows with `C:\>WIN`; alternatively run `CD \WINDOWS1`
+and `WIN.COM`. `C:\DOSCHECK.BAT` runs COM,
 MZ, conventional-memory and DPMI host-discovery probes from `C:\TESTS`.
 `python3 tools/QemuSmoke.py --doom-probe` now checks both the initial 32-bit
 DPMI transition and the first virtual PC I/O access. This is a useful startup
@@ -63,14 +77,19 @@ smoke test, not proof that the entire game is playable.
 
 The DOS VM also virtualizes the PC I/O instructions `IN`/`OUT` and their
 string forms. Its virtual devices currently cover the VGA DAC and mode-13h
-linear framebuffer (`A000:0000`), basic VGA status/register ports, the 8042
+linear framebuffer (`A000:0000`), CGA mode 04h-06h scanout (`B800:0000`),
+basic VGA status/register ports, the 8042
 keyboard data/status ports, a coarse PIT counter, and PIC mask/EOI registers, including the common ICW1–ICW4 sequence used to
 remap the master/slave interrupt vector bases. Mode 13h is presented through
 the Svindows graphics framebuffer. DOS keyboard input is received through an
 independent mirrored event queue; timer and keyboard interrupts are reflected
-to the currently programmed real-mode or DPMI protected-mode IRQ vectors.
-This is enough infrastructure for DOS/4G graphics and input experiments, but
-it is not a complete PC chipset or VGA implementation.
+to the currently programmed real-mode or DPMI protected-mode IRQ vectors. The
+interpreter samples virtual hardware at 128-instruction boundaries instead of
+checking the PIT, PIC, and keyboard queue on every guest instruction;
+interrupt-shadow instructions still expire at instruction boundaries. This
+keeps timer and input latency bounded while reducing hot-loop overhead. This
+is enough infrastructure for DOS/4G graphics and input experiments, but it is
+not a complete PC chipset or VGA implementation.
 
 This remains a partial DOS and 386 protected-mode subset. Paging, privilege
 level stack switching, full exception delivery, many DPMI services, arbitrary
@@ -78,12 +97,35 @@ VGA register semantics, Sound Blaster/MPU-401 audio, EMS/XMS, TSRs, and DOS
 `EXEC` modes other than `AL=00h` are not implemented. Some protected-mode
 opcodes and extender behaviours may still be unsupported; the bundled Doom
 image is a compatibility target, not yet a guaranteed gameplay smoke test.
-The 100-million-instruction limit prevents a stalled DOS program from
-occupying a kernel thread indefinitely. DOS MZ and COM programs do not execute
-directly on the x86-64 CPU: long mode cannot run 16-bit real-mode code in an
-ordinary 64-bit process.
+The DOS VM runs until the program exits; the normal kernel timer interrupt
+preempts its thread. DOS MZ and COM programs do not execute directly on the
+x86-64 CPU: long mode cannot run 16-bit real-mode code in an ordinary 64-bit
+process.
+
+The protected-mode hot path now recognizes flat DOS/4GW descriptors, validates
+32-bit instruction immediates as a single range, and uses width-sized RAM
+loads/stores instead of assembling values byte by byte. Mode-13h chain-4 VGA
+writes are also bulk-stored, and the interpreter no longer invokes the full
+scheduler every 1M guest instructions. The protected decoder and register
+helpers also reuse the DOS VM pointer already obtained by the run loop, avoiding
+repeated current-thread lookups for each protected-mode register operation.
+Hardware polling remains batched at 128 instructions with interrupt-shadow
+handling preserved. These are
+interpreter optimizations, not native execution: near-native speed still needs
+a separate native 32-bit backend or a dynamic recompiler, neither of which is
+implemented or claimed by this patch.
 
 Child DOS images currently run within the parent's native process; they have
 private DOS memory and inherit standard streams and DOS file handles. Their
 PSP points to a DOS environment block; `EXEC` accepts a caller supplied
 environment segment or inherits the parent's block.
+
+
+The VM records the DOS image size and FNV-1a identity to identify the embedded
+DOS/4GW launch stub's same-image `EXEC`. For that one top-level bootstrap
+transition, the parent stub exits with the protected child image's exit code
+instead of remaining active and potentially re-launching the game. Other DOS
+`EXEC` parent/child behavior is unchanged. The protected instruction-fetch,
+register-access, and hardware-poll helpers are inlined in the hot interpreter
+path. These are interpreter optimizations only; they do not provide native
+execution or a measured near-native Doom frame rate.
