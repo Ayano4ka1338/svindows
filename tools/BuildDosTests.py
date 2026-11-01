@@ -35,7 +35,10 @@ def com_psp_smoke() -> bytes:
 def dos_memory_test() -> bytes:
     # Allocate 64 paragraphs with AH=48h, then free them with AH=49h.
     # Branch offsets are relative to the byte following the short Jcc.
-    code = bytearray()
+    # DOS gives COM programs all conventional memory. Release the excess
+    # while retaining the 64-KiB segment containing the initial stack.
+    shrink = b"\xBB\x00\x10\xB4\x4A\xCD\x21"
+    code = bytearray(shrink)
     code += b"\xBB\x40\x00"       # mov bx,0040h
     code += b"\xB4\x48\xCD\x21" # mov ah,48h / int 21h
     jnc_patch = len(code); code += b"\x72\x00" # jc fail
@@ -55,7 +58,7 @@ def dos_memory_test() -> bytes:
     code[jnc_patch + 1] = (fail_offset - (jnc_patch + 2)) & 0xff
     code[jc_patch + 1] = (fail_offset - (jc_patch + 2)) & 0xff
     # First message address is in the success-path MOV DX; second is failure.
-    first_dx = len(b"\xBB\x40\x00\xB4\x48\xCD\x21\x72\x00\x8E\xC0\xB4\x49\xCD\x21\x72\x00")
+    first_dx = len(shrink) + len(b"\xBB\x40\x00\xB4\x48\xCD\x21\x72\x00\x8E\xC0\xB4\x49\xCD\x21\x72\x00")
     code[first_dx + 1:first_dx + 3] = ok_offset.to_bytes(2, "little")
     code[fail_offset + 1:fail_offset + 3] = bad_offset.to_bytes(2, "little")
     return bytes(code) + ok + b"\0" + bad + b"$"

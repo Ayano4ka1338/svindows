@@ -134,7 +134,7 @@ static void dpmi_interrupt(void) {
   } else if (function == 0x0003) {
     pm_set_register(AX, 16, 8);
   } else if (function >= 0x0006 && function <= 0x0009) {
-    DOS_DESCRIPTOR *d;
+    DOS_DESCRIPTOR *d = NULL;
     if (!dpmi_descriptor((U16)r32[BX], &d, NULL)) error = 0x8022;
     else if (function == 0x0006) {
       pm_set_register(DX, 16, (U16)d->Base);
@@ -149,17 +149,26 @@ static void dpmi_interrupt(void) {
     } else {
       value = (U16)r32[CX];
       d->Access = (U8)value;
-      d->Flags = (U8)((d->Flags & 0xf0u) | ((value >> 8) & 0x0fu));
+      d->Flags = (U8)((d->Flags & 0xf0u) | ((value >> 12) & 0x0fu));
       d->Valid = !!(d->Access & 0x80u);
     }
+    /* DPMI 1.0 reloads cached descriptors after base/limit/rights updates.
+     * CX[15:12] contains G/D/B/AVL; CX[11:8] is reserved. */
+    if (!error && d)
+      for (U32 i = 0; i < 6; i++)
+        if ((seg[i] & 0xfffcu) == ((U16)r32[BX] & 0xfffcu))
+          vm->SegmentCache[i] = *d;
   } else if (function == 0x000a) {
     DOS_DESCRIPTOR *source;
     U32 slot;
     if (!dpmi_descriptor((U16)r32[BX], &source, NULL)) error = 0x8022;
     else {
       for (slot = 0; slot < 128 && vm->DpmiDescriptorUsed[slot]; slot++);
-      if (slot == DOS_MAX_BLOCKS) error = 0x8011;
+      if (slot == 128) error = 0x8011;
       else { vm->DpmiDescriptorUsed[slot] = TRUE; vm->DpmiDescriptors[slot] = *source;
+        /* INT 31h/000Ah returns a writable data alias, including when
+         * the source is executable (DOS/4G patches relocated code). */
+        vm->DpmiDescriptors[slot].Access = (source->Access & 0xf0u) | 2u;
         pm_set_register(AX, 16, (U16)((slot << 3) | 7u)); }
     }
   } else if (function == 0x000b || function == 0x000c) {
@@ -184,8 +193,13 @@ static void dpmi_interrupt(void) {
     } else {
       U16 selector = (U16)r32[CX];
       DOS_DESCRIPTOR descriptor;
-      if (!read_descriptor(selector, &descriptor) ||
-          !(descriptor.Access & 8u)) error = 0x8022;
+      /* DPMI permits clearing a protected-mode vector by setting CX:EDX
+       * to zero. Extenders use this when restoring the host's vector. */
+      if (!selector && !r32[DX]) {
+        vm->DpmiPmVectorSelector[vector] = 0;
+        vm->DpmiPmVectorOffset[vector] = 0;
+      } else if (!read_descriptor(selector, &descriptor) ||
+                 !(descriptor.Access & 8u)) error = 0x8022;
       else {
         vm->DpmiPmVectorSelector[vector] = selector;
         vm->DpmiPmVectorOffset[vector] = vm->DpmiClient32 ? r32[DX] : (U16)r32[DX];
@@ -360,13 +374,15 @@ static void dpmi_interrupt(void) {
     U32 structure = vm->DpmiClient32 ? r32[DI] : (U16)r32[DI];
     U32 linear;
     if (!protected_linear(ES, structure, 0x32u, 0, 0, &linear)) error = 0x8022;
-    else if (function == 0x0302 &&
-             pm_read(ES, structure + 0x2cu, 16) == 0 &&
-             pm_read(ES, structure + 0x2au, 16) == 0) {
-      /* DOS16M uses a null real-mode procedure as its DPMI-to-DOS gateway:
-       * the register block carries an INT 21h request. */
-      if (!dpmi_simulate_real_interrupt(0x21, structure, 1)) error = 0x8022;
-    } else error = 0x8001;
+    else {
+      U16 target_cs = (U16)pm_read(ES, structure + 0x2cu, 16);
+      U16 target_ip = (U16)pm_read(ES, structure + 0x2au, 16);
+      if (target_cs == DOS_BUILTIN_SEGMENT && target_ip >= DOS_BUILTIN_OFFSET(0) &&
+          target_ip <= DOS_BUILTIN_OFFSET(255) && !(target_ip & 3u)) {
+        U8 vector = (U8)((target_ip - DOS_BUILTIN_OFFSET(0)) / 4u);
+        if (!dpmi_simulate_real_interrupt(vector, structure, 1)) error = 0x8022;
+      } else error = 0x8001;
+    }
   } else if (function == 0x0305 || function == 0x0306) {
     pm_set_register(BX, 16, 0xf000u);
     pm_set_register(CX, 16, function == 0x0305 ? 0x0108u : 0x010au);
@@ -397,7 +413,8 @@ static U16 dpmi_make_descriptor(U32 base, U32 limit, U8 access, U8 desc_flags) {
 static void dpmi_initial_switch(void) {
   DOS_VM *vm = current();
   U16 sp = r[SP], return_ip, return_cs;
-  U16 selectors[5] = {0, 0, 0, 0, 0};
+  U16 selectors[6] = {0, 0, 0, 0, 0, 0};
+  U16 environment = rw(PSP, 0x2cu);
   int client32 = !!(r[AX] & 1u);
   KeLog("[dos] DPMI switch request AX=%04x BX=%04x CX=%04x SS:SP=%04x:%04x\n",
         r[AX], r[BX], r[CX], seg[SS], sp);
@@ -414,26 +431,28 @@ static void dpmi_initial_switch(void) {
   }
   return_ip = rw(seg[SS], sp);
   return_cs = rw(seg[SS], (U16)(sp + 2));
+  /* DPMI clients enter through a 16-bit extender stub even when AX=1.
+   * Client bitness controls the data/stack B bit and INT 31h pointer ABI,
+   * not the initial code segment's default instruction size. */
   selectors[0] = dpmi_make_descriptor((U32)return_cs << 4,
-                                      client32 ? 0xffffffffu : 0xffffu,
-                                      0xfau, client32 ? 0x0cu : 0u);
+                                      0xffffu, 0xfau, 0u);
   selectors[1] = dpmi_make_descriptor((U32)seg[DS] << 4,
-                                      client32 ? 0xffffffffu : 0xffffu,
-                                      0xf2u, client32 ? 0x0cu : 0u);
+                                      0xffffu, 0xf2u, client32 ? 4u : 0u);
   selectors[2] = dpmi_make_descriptor((U32)seg[SS] << 4,
-                                      client32 ? 0xffffffffu : 0xffffu,
-                                      0xf2u, client32 ? 0x0cu : 0u);
-  selectors[3] = dpmi_make_descriptor((U32)seg[ES] << 4,
-                                      client32 ? 0xffffffffu : 0xffffu,
-                                      0xf2u, client32 ? 0x0cu : 0u);
+                                      0xffffu, 0xf2u, client32 ? 4u : 0u);
+  selectors[3] = dpmi_make_descriptor((U32)PSP << 4,
+                                      0xffu, 0xf2u, client32 ? 4u : 0u);
   selectors[4] = dpmi_make_descriptor(0xf0000u, 0xffffu, 0xfau,
                                       client32 ? 4u : 0u);
+  if (environment)
+    selectors[5] = dpmi_make_descriptor((U32)environment << 4,
+                                        0xffffu, 0xf2u, client32 ? 4u : 0u);
   KeLog("[dos] DPMI initial %u-bit selectors CS=%04x DS=%04x SS=%04x ES=%04x host=%04x return=%04x:%04x\n",
         client32 ? 32u : 16u, selectors[0], selectors[1], selectors[2],
         selectors[3], selectors[4], return_cs, return_ip);
   if (!selectors[0] || !selectors[1] || !selectors[2] || !selectors[3] ||
-      !selectors[4]) {
-    for (unsigned i = 0; i < 5; i++) if (selectors[i]) {
+      !selectors[4] || (environment && !selectors[5])) {
+    for (unsigned i = 0; i < 6; i++) if (selectors[i]) {
       U32 slot = (selectors[i] & 0xfff8u) >> 3;
       vm->DpmiDescriptorUsed[slot] = FALSE;
       memset(&vm->DpmiDescriptors[slot], 0, sizeof(DOS_DESCRIPTOR));
@@ -445,15 +464,11 @@ static void dpmi_initial_switch(void) {
     r[AX] = 0x8011;
     return;
   }
+  if (environment) ww(PSP, 0x2cu, selectors[5]);
   ww(seg[SS], (U16)(sp + 2), selectors[0]);
-  /* The synthetic DPMI entry is called from the 16-bit DOS extender stub.
-   * The low halves are the documented real-mode register values; the high
-   * halves may contain stale scratch values from 16-bit code and must not be
-   * treated as flat 32-bit pointers by the newly-entered client.  Present a
-   * deterministic zero-extended register frame at the 16->32-bit boundary. */
+  /* Preserve general registers, including their high words. Only ESP is
+   * zero-extended by the DPMI initial-switch contract (set below). */
   if (client32) {
-    for (U32 i = 0; i < 8; i++)
-      vm->Registers32[i] = (U32)vm->Registers[i];
     KeLog("[dos] DPMI 32-bit entry registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x\n",
           vm->Registers32[AX], vm->Registers32[CX], vm->Registers32[DX],
           vm->Registers32[BX], vm->Registers32[SP], vm->Registers32[BP],
@@ -704,6 +719,11 @@ static U32 pm_read(unsigned s, U32 offset, unsigned width) {
     fail("DOSVM: protected memory read fault\r\n");
     return 0;
   }
+  if (linear >= 0xa0000u && linear + size <= 0xb0000u) {
+    U32 value = 0;
+    for (unsigned i = 0; i < size; i++) value |= (U32)DosVideoReadMemory(current(), linear + i) << (i * 8);
+    return value;
+  }
   U32 value = mem[linear];
   if (size > 1)
     value |= (U32)mem[linear + 1] << 8;
@@ -717,11 +737,20 @@ static int pm_write(unsigned s, U32 offset, unsigned width, U32 value) {
   U32 linear;
   unsigned size = width / 8;
   if (!protected_linear(s, offset, size, 1, 0, &linear)) {
+    DOS_DESCRIPTOR *d = &current()->SegmentCache[s];
+    KeLog("[dos] protected write fault CS=%04x EIP=%08x op=%02x at %08x seg=%04x off=%08x width=%u base=%08x limit=%08x access=%02x flags=%02x value=%08x\n",
+          seg[CS], current()->Eip, current()->CurrentOpcode,
+          current()->CurrentInstructionIp, seg[s], offset, width,
+          d->Base, d->Limit, d->Access, d->Flags, value);
     fail("DOSVM: protected memory write fault\r\n");
     return 0;
   }
-  for (unsigned i = 0; i < size; i++)
-    mem[linear + i] = (U8)(value >> (i * 8));
+  for (unsigned i = 0; i < size; i++) {
+    U8 byte = (U8)(value >> (i * 8));
+    if (linear + i >= 0xa0000u && linear + i < 0xb0000u)
+      DosVideoWriteMemory(current(), linear + i, byte);
+    else mem[linear + i] = byte;
+  }
   return 1;
 }
 static U16 dpmi_copy_descriptor(U16 function) {
@@ -731,7 +760,7 @@ static U16 dpmi_copy_descriptor(U16 function) {
   DOS_DESCRIPTOR *d;
   if (!dpmi_descriptor(selector, &d, NULL)) return 0x8022;
   U32 linear;
-  if (!protected_linear(ES, structure, 8, function == 0x000c, 0, &linear))
+  if (!protected_linear(ES, structure, 8, function == 0x000b, 0, &linear))
     return 0x8022;
   if (function == 0x000b) {
     U32 limit = (d->Flags & 8u) ? (d->Limit >> 12) : d->Limit;
@@ -804,16 +833,16 @@ static int dpmi_simulate_real_interrupt(U8 vector, U32 structure,
   vm->ProtectedMode = FALSE;
   vm->Cr0 &= ~1u;
   U16 saved_vector_off = 0, saved_vector_seg = 0;
-  if (force_builtin_dos && vector == 0x21) {
-    saved_vector_off = rw(0, 0x84);
-    saved_vector_seg = rw(0, 0x86);
-    ww(0, 0x84, 0);
-    ww(0, 0x86, 0);
+  if (force_builtin_dos) {
+    saved_vector_off = rw(0, (U16)(vector * 4u));
+    saved_vector_seg = rw(0, (U16)(vector * 4u + 2u));
+    ww(0, (U16)(vector * 4u), 0);
+    ww(0, (U16)(vector * 4u + 2u), 0);
   }
   dos_int(vector);
-  if (force_builtin_dos && vector == 0x21) {
-    ww(0, 0x84, saved_vector_off);
-    ww(0, 0x86, saved_vector_seg);
+  if (force_builtin_dos) {
+    ww(0, (U16)(vector * 4u), saved_vector_off);
+    ww(0, (U16)(vector * 4u + 2u), saved_vector_seg);
   }
   for (U32 i = 0; i < 8; i++)
     vm->Registers32[i] = (vm->Registers32[i] & 0xffff0000u) | vm->Registers[i];
@@ -925,6 +954,11 @@ static int pm_load_segment(unsigned index, U16 selector) {
     fail("DOSVM: protected segment selector fault\r\n");
     return 0;
   }
+  if (index == SS) {
+    /* MOV SS/POP SS/LSS block maskable interrupts through the next
+     * instruction while the caller installs the matching stack pointer. */
+    current()->InterruptShadow = 1;
+  }
   return 1;
 }
 static U32 pm_alu(unsigned operation, U32 a, U32 b, unsigned width) {
@@ -971,7 +1005,8 @@ static U32 pm_shift(unsigned kind, U32 value, U32 count, unsigned width) {
       value = ((value << 1) | (kind == 2 ? !!(current()->Eflags & CF) : carry)) & mask;
     } else if (kind == 1 || kind == 3) {
       carry = value & 1u;
-      value = (value >> 1) | ((kind == 3 && (current()->Eflags & CF)) ? sign : 0);
+      U32 incoming = kind == 1 ? carry : !!(current()->Eflags & CF);
+      value = (value >> 1) | (incoming ? sign : 0);
     } else if (kind == 4 || kind == 6) {
       carry = !!(value & sign);
       value = (value << 1) & mask;
@@ -1021,6 +1056,7 @@ static int pm_push(U32 value, unsigned width) {
 static U32 pm_pop(unsigned width) {
   U32 sp = pm_stack_pointer();
   U32 value = pm_read(SS, sp, width);
+  if (!running) return 0;
   pm_set_stack_pointer(sp + width / 8);
   return value;
 }
@@ -1031,6 +1067,15 @@ static int protected_interrupt(U8 vector, int software, unsigned width) {
   DOS_VM *vm = current();
   if (vector == 0x31 && software) {
     dpmi_interrupt();
+    return 1;
+  }
+  /* No DOS mouse driver is installed. INT 33h reset must report that
+   * fact, rather than looking up an absent protected-mode IDT entry. */
+  if (software && vector == 0x33 && !vm->DpmiPmVectorSelector[vector]) {
+    if ((U16)r32[AX] == 0 || (U16)r32[AX] == 0x21) {
+      pm_set_register(AX, 16, 0);
+      pm_set_register(BX, 16, 0);
+    }
     return 1;
   }
   if (vm->DpmiPmVectorSelector[vector]) {
@@ -1102,15 +1147,18 @@ static void dos_timer_update(DOS_VM *vm) {
   UINT32 elapsed = tick - vm->LastTimerTick;
   if (!elapsed) return;
   vm->LastTimerTick = tick;
-  UINT64 phase = (UINT64)vm->DosTimerPhase + (UINT64)elapsed * 182u;
-  /* The 8259 holds one pending edge while masked; it does not queue an
-   * unbounded backlog of timer interrupts for a suspended DOS client. */
-  vm->DosTimerPhase = phase >= 1000u ? 1000u : (UINT32)phase;
+  U32 divisor = vm->PitReload ? vm->PitReload : 65536u;
+  U32 period = divisor * 100u; /* host clock is 100 Hz */
+  UINT64 phase = (UINT64)vm->DosTimerPhase + (UINT64)elapsed * 1193182u;
+  /* The 8259 holds one pending edge while masked. Honour the client's
+   * programmed PIT divisor (Doom installs a 35-Hz timer). */
+  vm->DosTimerPhase = phase >= period ? period : (UINT32)phase;
 }
 
 static int dos_timer_irq_due(DOS_VM *vm) {
-  if (vm->DosTimerPhase < 1000u) return 0;
-  vm->DosTimerPhase -= 1000u;
+  U32 period = (vm->PitReload ? vm->PitReload : 65536u) * 100u;
+  if (vm->DosTimerPhase < period) return 0;
+  vm->DosTimerPhase -= period;
   return 1;
 }
 
@@ -1259,7 +1307,8 @@ static void step_protected(void) {
     return;
   }
   if (op >= 0xb8 && op <= 0xbf) {
-    pm_set_register(op & 7, width, protected_fetch(width / 8));
+    U32 immediate = protected_fetch(width / 8);
+    pm_set_register(op & 7, width, immediate);
     return;
   }
   if (op <= 0x3d && ((op & 7u) == 4u || (op & 7u) == 5u)) {
@@ -1285,6 +1334,21 @@ static void step_protected(void) {
     U32 result = pm_alu(op < 0x48 ? 0 : 5, pm_register(reg, width), 1, width);
     vm->Eflags = (vm->Eflags & ~CF) | old_cf;
     pm_set_register(reg, width, result);
+    return;
+  }
+  if (op == 0x69 || op == 0x6b) {
+    PM_MOD m = pm_decode(segment_override, address32);
+    U32 source = pm_read_rm(m, width);
+    INT64 immediate = op == 0x6b ? (INT8)protected_fetch(1)
+                      : width == 32 ? (INT32)protected_fetch(4)
+                                    : (INT16)protected_fetch(2);
+    INT64 product = (width == 32 ? (INT64)(INT32)source
+                                 : (INT64)(INT16)source) * immediate;
+    pm_set_register(m.reg, width, (U32)product);
+    int overflow = width == 32 ? product != (INT64)(INT32)product
+                               : product != (INT64)(INT16)product;
+    vm->Eflags = (vm->Eflags & ~(CF | OF)) | (overflow ? CF | OF : 0);
+    vm->Flags = (U16)vm->Eflags;
     return;
   }
   if (op == 0xfe) {
@@ -1484,10 +1548,9 @@ static void step_protected(void) {
   if (op >= 0xa4 && op <= 0xaf && op != 0xa8 && op != 0xa9) {
     unsigned element = (op & 1u) ? width / 8 : 1;
     U32 count = rep ? (address32 ? r32[CX] : r[CX]) : 1;
-    if (count > 0x100000u) {
-      fail("DOSVM: protected string instruction count is excessive\r\n");
-      return;
-    }
+    U32 remaining = count > 4096u ? count - 4096u : 0;
+    int comparison_stopped = 0;
+    if (count > 4096u) count = 4096u;
     U32 si = address32 ? r32[SI] : r[SI], di = address32 ? r32[DI] : r[DI];
     while (count-- && running) {
       unsigned source_segment = segment_override >= 0 ? segment_override : DS;
@@ -1521,10 +1584,15 @@ static void step_protected(void) {
         pm_set_register(CX, address32 ? 32 : 16,
                         (address32 ? r32[CX] : r[CX]) - 1);
         if ((op == 0xa6 || op == 0xa7 || op == 0xae || op == 0xaf) &&
-            ((rep == 0xf3) != !!(vm->Eflags & ZF)))
+            ((rep == 0xf3) != !!(vm->Eflags & ZF))) {
+          comparison_stopped = 1;
           break;
+        }
       }
+      if (!address32) { si = (U16)si; di = (U16)di; }
     }
+    if (running && rep && remaining && !comparison_stopped)
+      vm->Eip = vm->CurrentInstructionIp;
     return;
   }
   if (op == 0x89 || op == 0x8b || op == 0x88 || op == 0x8a ||
@@ -1576,7 +1644,10 @@ static void step_protected(void) {
       return;
     }
     if (op == 0x8c) pm_write_rm(m, 16, seg[m.reg]);
-    else pm_load_segment(m.reg, (U16)pm_read_rm(m, 16));
+    else {
+      U16 value = (U16)pm_read_rm(m, 16);
+      pm_load_segment(m.reg, value);
+    }
     return;
   }
   if (op == 0x8f) {
@@ -1672,13 +1743,47 @@ static void step_protected(void) {
     U32 target = pm_pop(width);
     U16 selector = (U16)pm_pop(width);
     U32 new_flags = pm_pop(width);
-    if (pm_load_segment(CS, selector)) {
-      vm->Eip = target;
-      vm->Eflags = width == 16 ? ((vm->Eflags & 0xffff0000u) | (new_flags & 0xffffu))
-                              : new_flags;
-      vm->Eflags |= 2u;
-      vm->Flags = (U16)vm->Eflags;
+    U8 old_cpl = seg[CS] & 3u, new_cpl = selector & 3u;
+    U32 new_sp = 0;
+    U16 new_ss = 0;
+    /* IRET to an outer privilege level has a five-field frame. DOS extenders
+     * use this when returning from their ring-0 exception/interrupt stubs. */
+    if (new_cpl > old_cpl) {
+      new_sp = pm_pop(width);
+      new_ss = (U16)pm_pop(width);
     }
+    DOS_DESCRIPTOR code = {0};
+    int code_valid = read_descriptor(selector, &code);
+    if (!running) return;
+    if (!code_valid || new_cpl < old_cpl || !(code.Access & 0x10u) || !(code.Access & 8u) ||
+        (((code.Access & 4u) ? ((code.Access >> 5) & 3u) > new_cpl
+                              : ((code.Access >> 5) & 3u) != new_cpl)) ||
+        !(code.Access & 0x80u)) {
+      KeLog("[dos] IRET reject selector=%04x target=%08x valid=%d access=%02x flags=%02x oldcpl=%u newcpl=%u\n",
+            selector, target, code_valid, code.Access, code.Flags, old_cpl, new_cpl);
+      fail("DOSVM: invalid protected IRET code selector\r\n");
+      return;
+    }
+    /* Validate both descriptors before committing a privilege return. A
+     * normal MOV CS validator checks against the old CPL and cannot do this. */
+    if (new_cpl > old_cpl) {
+      DOS_DESCRIPTOR stack = {0};
+      if (!read_descriptor(new_ss, &stack) || !(stack.Access & 0x10u) ||
+          (stack.Access & 8u) || !(stack.Access & 2u) ||
+          ((stack.Access >> 5) & 3u) != new_cpl ||
+          (new_ss & 3u) != new_cpl || !(stack.Access & 0x80u)) {
+        fail("DOSVM: invalid protected IRET stack selector\r\n");
+        return;
+      }
+      seg[CS] = selector; vm->SegmentCache[CS] = code;
+      seg[SS] = new_ss; vm->SegmentCache[SS] = stack;
+      pm_set_stack_pointer(new_sp);
+    } else if (!pm_load_segment(CS, selector)) return;
+    vm->Eip = target;
+    vm->Eflags = width == 16 ? ((vm->Eflags & 0xffff0000u) | (new_flags & 0xffffu))
+                            : new_flags;
+    vm->Eflags |= 2u;
+    vm->Flags = (U16)vm->Eflags;
     return;
   }
   if (op == 0x9a) {
@@ -1720,7 +1825,11 @@ static void step_protected(void) {
   }
   if (op == 0xfa || op == 0xfb) {
     /* DPMI clients manipulate a virtual interrupt flag at ring 3. */
-    if (op == 0xfa) vm->Eflags &= ~0x200u; else vm->Eflags |= 0x200u;
+    if (op == 0xfa) vm->Eflags &= ~0x200u;
+    else {
+      if (!(vm->Eflags & 0x200u)) vm->InterruptShadow = 1;
+      vm->Eflags |= 0x200u;
+    }
     vm->Flags = (U16)vm->Eflags;
     return;
   }
@@ -1735,6 +1844,31 @@ static void step_protected(void) {
   }
   if (op == 0x0f) {
     U8 second = (U8)protected_fetch(1);
+    if (second == 0xa0 || second == 0xa1 ||
+        second == 0xa8 || second == 0xa9) {
+      unsigned segment = (second & 8u) ? GS : FS;
+      if (second & 1u) {
+        U16 selector = (U16)pm_pop(width);
+        if (running) pm_load_segment(segment, selector);
+      } else pm_push(seg[segment], width);
+      return;
+    }
+    if (second == 0xb2 || second == 0xb4 || second == 0xb5) {
+      PM_MOD m = pm_decode(segment_override, address32);
+      if (m.is_reg) {
+        fail("DOSVM: far segment load requires memory\r\n");
+        return;
+      }
+      U32 offset = pm_read(m.segment, m.offset, width);
+      U16 selector = (U16)pm_read(m.segment, m.offset + width / 8u, 16);
+      unsigned index = second == 0xb2 ? SS : second == 0xb4 ? FS : GS;
+      if (pm_load_segment(index, selector)) {
+        pm_set_register(m.reg, width, offset);
+        /* LSS suppresses maskable interrupts through the following
+         * instruction; the virtual IRQ dispatcher observes IF separately. */
+      }
+      return;
+    }
     if (second == 0x02 || second == 0x03) {
       PM_MOD m = pm_decode(segment_override, address32);
       U16 selector = (U16)pm_read_rm(m, 16);
@@ -2232,8 +2366,9 @@ static U16 shift_value(U8 kind, U16 value, U8 count, int wide) {
 }
 
 static int condition(unsigned cc) {
-  int c = !!(flags & CF), z = !!(flags & ZF), s = !!(flags & SF),
-      o = !!(flags & OF), p = !!(flags & 4);
+  U32 tested_flags = current()->ProtectedMode ? current()->Eflags : flags;
+  int c = !!(tested_flags & CF), z = !!(tested_flags & ZF), s = !!(tested_flags & SF),
+      o = !!(tested_flags & OF), p = !!(tested_flags & 4);
   switch (cc >> 1) {
   case 0:
     return o ^ (cc & 1);
@@ -2256,7 +2391,8 @@ static int condition(unsigned cc) {
 
 void step(void) {
   DOS_VM *vm = current();
-  if (dos_dispatch_hardware()) return;
+  if (vm->InterruptShadow) vm->InterruptShadow--;
+  else if (dos_dispatch_hardware()) return;
   if ((vm->Steps & 0x3fffu) == 0) {
     UINT32 tick = (UINT32)KeGetTickCount();
     if (vm->VideoActive && (tick - vm->LastVideoTick) >= 2u) {
@@ -2271,6 +2407,26 @@ void step(void) {
   int override = -1, rep = 0, operand32 = 0, address32 = 0;
   for (unsigned i = 0; i < 8; i++)
     r32[i] = (r32[i] & 0xffff0000u) | r[i];
+  /* A saved BIOS/DOS vector can also be chained with PUSHF/CALL FAR.
+   * Execute the built-in service, then consume its real-mode IRET frame. */
+  if (seg[CS] == DOS_BUILTIN_SEGMENT && ip >= DOS_BUILTIN_OFFSET(0) &&
+      ip <= DOS_BUILTIN_OFFSET(255) && !(ip & 3u)) {
+    U8 vector = (U8)((ip - DOS_BUILTIN_OFFSET(0)) / 4u);
+    U16 off = rw(0, (U16)(vector * 4u));
+    U16 cs = rw(0, (U16)(vector * 4u + 2u));
+    ww(0, (U16)(vector * 4u), 0);
+    ww(0, (U16)(vector * 4u + 2u), 0);
+    dos_int(vector);
+    ww(0, (U16)(vector * 4u), off);
+    ww(0, (U16)(vector * 4u + 2u), cs);
+    if (running) {
+      U16 return_ip = pop(), return_cs = pop(), return_flags = pop();
+      ip = return_ip; seg[CS] = return_cs;
+      flags = (flags & 0x0cd5u) | (return_flags & ~0x0cd5u) | 2u;
+      vm->Eflags = (vm->Eflags & 0xffff0000u) | flags;
+    }
+    return;
+  }
   if (seg[CS] == 0xf000u && ip == 0x0100u) {
     dpmi_initial_switch();
     return;
@@ -2709,6 +2865,7 @@ void step(void) {
     return;
   case 0x17:
     seg[SS] = pop();
+    vm->InterruptShadow = 1;
     return;
   case 0x1e:
     push(seg[DS]);
@@ -2813,8 +2970,10 @@ void step(void) {
     }
     if (op == 0x8c)
       write_rm(m, 1, seg[m.reg]);
-    else
+    else {
       seg[m.reg] = read_rm(m, 1);
+      if (m.reg == SS) vm->InterruptShadow = 1;
+    }
     return;
   }
   case 0x8d: {

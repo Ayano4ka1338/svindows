@@ -289,6 +289,7 @@ static void execute_batch(const char *path)
     for (unsigned end = 0; end <= length; end++) {
         if (contents[end] != '\n' && contents[end] != 0) continue;
         contents[end] = 0;
+        if (end > start && contents[end - 1] == '\r') contents[end - 1] = 0;
         char *command = contents + start;
         trim_right(command);
         int quiet = *command == '@';

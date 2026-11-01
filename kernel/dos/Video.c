@@ -19,11 +19,34 @@ static UINT32 dos_vga_color(DOS_VM *vm, U8 index)
     return GfxColor(red, green, blue);
 }
 
+U8 DosVideoReadMemory(DOS_VM *vm, U32 linear)
+{
+    if (vm->VideoMode == 0x13u && !(vm->VgaSequencer[4] & 8u))
+        return vm->VgaPlanes[vm->VgaGraphics[4] & 3u][linear - VGA_MEMORY_BASE];
+    return vm->Memory[linear];
+}
+
+void DosVideoWriteMemory(DOS_VM *vm, U32 linear, U8 value)
+{
+    vm->VideoDirty = TRUE;
+    if (vm->VideoMode == 0x13u && !(vm->VgaSequencer[4] & 8u)) {
+        for (unsigned plane = 0; plane < 4; plane++)
+            if (vm->VgaSequencer[2] & (1u << plane))
+                vm->VgaPlanes[plane][linear - VGA_MEMORY_BASE] = value;
+    } else vm->Memory[linear] = value;
+}
+
 void DosVideoSetMode(DOS_VM *vm, U8 mode)
 {
     if (!vm) return;
+    vm->VideoDirty = TRUE;
     vm->VideoMode = mode & 0x7fu;
+    KeLog("[dos-vga] video mode=%02x\n", vm->VideoMode);
     if (vm->VideoMode == 0x13u) {
+        vm->VgaSequencer[2] = 0x0fu;
+        vm->VgaSequencer[4] = 0x0eu;
+        vm->VgaCrtc[0x0c] = vm->VgaCrtc[0x0d] = 0;
+        memset(vm->VgaPlanes, 0, sizeof(vm->VgaPlanes));
         if (!vm->VideoActive && GfxAvailable()) {
             HalConsoleAcquireFramebuffer();
             vm->VideoActive = TRUE;
@@ -57,7 +80,7 @@ void DosVideoSetMode(DOS_VM *vm, U8 mode)
 
 void DosVideoPresent(DOS_VM *vm)
 {
-    if (!vm || !vm->VideoActive || vm->VideoMode != 0x13u ||
+    if (!vm || !vm->VideoActive || !vm->VideoDirty || vm->VideoMode != 0x13u ||
         !GfxAvailable() || !vm->Memory)
         return;
 
@@ -79,14 +102,25 @@ void DosVideoPresent(DOS_VM *vm)
     UINT32 draw_h = height - top < out_h ? height - top : out_h;
     UINT8 *source = vm->Memory + VGA_MEMORY_BASE;
 
-    /* Center a nearest-neighbour scaled 320x200 indexed framebuffer. */
+    UINT32 colors[256];
+    for (unsigned i = 0; i < 256; i++) colors[i] = dos_vga_color(vm, (U8)i);
+    U32 start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
     for (UINT32 y = 0; y < draw_h; y++) {
         UINT32 sy = y / scale;
         UINT32 *dst = GfxFramebuffer.Base + (top + y) * stride + left;
-        const UINT8 *src = source + sy * 320u;
-        for (UINT32 x = 0; x < draw_w; x++)
-            dst[x] = dos_vga_color(vm, src[x / scale]);
+        if (y % scale) {
+            memcpy(dst, dst - stride, draw_w * sizeof(*dst));
+            continue;
+        }
+        for (UINT32 sx = 0; sx < 320u && sx * scale < draw_w; sx++) {
+            U8 pixel = (vm->VgaSequencer[4] & 8u) ? source[sy * 320u + sx]
+                : vm->VgaPlanes[sx & 3u][(start + sy * 80u + sx / 4u) & 0xffffu];
+            UINT32 color = colors[pixel];
+            for (UINT32 dx = 0; dx < scale && sx * scale + dx < draw_w; dx++)
+                dst[sx * scale + dx] = color;
+        }
     }
+    vm->VideoDirty = FALSE;
 }
 
 void DosVideoStop(DOS_VM *vm)
@@ -154,6 +188,11 @@ static U8 dos_pit_read(DOS_VM *vm)
 
 U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
 {
+    if (width > 8) {
+        U32 combined = 0;
+        for (unsigned i = 0; i < width / 8; i++) combined |= DosPortIn(vm, (U16)(port + i), 8) << (i * 8);
+        return combined;
+    }
     U32 value;
     U8 byte = 0xffu;
     switch (port) {
@@ -212,8 +251,11 @@ U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
 
 void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
 {
+    if (width > 8) {
+        for (unsigned i = 0; i < width / 8; i++) DosPortOut(vm, (U16)(port + i), (value >> (i * 8)) & 0xffu, 8);
+        return;
+    }
     U8 byte = (U8)value;
-    (void)width;
     switch (port) {
     case 0x0060: /* 8042 command/data port: acknowledge, do not control host */
     case 0x0064:
@@ -262,7 +304,7 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
     case 0x03c4: vm->VgaSequencerIndex = byte; break;
     case 0x03ce: vm->VgaGraphicsIndex = byte; break;
     case 0x03d4: vm->VgaCrtcIndex = byte; break;
-    case 0x03c6: vm->VgaDacMask = byte; break;
+    case 0x03c6: vm->VgaDacMask = byte; vm->VideoDirty = TRUE; break;
     case 0x03c7:
         vm->VgaDacReadIndex = byte;
         vm->VgaDacComponent = 0;
@@ -272,6 +314,7 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
         vm->VgaDacComponent = 0;
         break;
     case 0x03c9:
+        vm->VideoDirty = TRUE;
         vm->VgaDac[(UINT32)vm->VgaDacWriteIndex * 3u +
                    vm->VgaDacComponent] = byte & 0x3fu;
         if (++vm->VgaDacComponent == 3) {
@@ -280,12 +323,20 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
         }
         break;
     case 0x03c5:
+        if (vm->VgaSequencerIndex == 4 && vm->VideoMode == 0x13u &&
+            ((vm->VgaSequencer[4] ^ byte) & 8u)) {
+            for (U32 i = 0; i < VGA_MODE13_SIZE; i++) {
+                if (byte & 8u) vm->Memory[VGA_MEMORY_BASE + i] = vm->VgaPlanes[i & 3u][i >> 2];
+                else vm->VgaPlanes[i & 3u][i >> 2] = vm->Memory[VGA_MEMORY_BASE + i];
+            }
+        }
         vm->VgaSequencer[vm->VgaSequencerIndex % sizeof(vm->VgaSequencer)] = byte;
         break;
     case 0x03cf:
         vm->VgaGraphics[vm->VgaGraphicsIndex % sizeof(vm->VgaGraphics)] = byte;
         break;
     case 0x03d5:
+        vm->VideoDirty = TRUE;
         vm->VgaCrtc[vm->VgaCrtcIndex % sizeof(vm->VgaCrtc)] = byte;
         break;
     case 0x0043: {

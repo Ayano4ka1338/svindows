@@ -17,8 +17,9 @@ typedef UINT64 U64;
 #define MEM_SIZE 0x08000000u /* 128 MiB flat-memory space for DOS extenders */
 #define DOS_DPMI_MAX_BLOCKS 128u
 #define DOS_MAX_BLOCKS 128u
-#define DOS_VM_INSTRUCTION_LIMIT 100000000u
 #define PSP 0x1000u
+#define DOS_BUILTIN_SEGMENT 0xf000u
+#define DOS_BUILTIN_OFFSET(vector) (0x1000u + (U16)(vector) * 4u)
 #define DOS_ENV_SEGMENT 0x0f00u
 #define DOS_ENV_SIZE 0x1000u
 #define CF 1u
@@ -108,6 +109,7 @@ typedef struct _DOS_VM {
   U8 CtrlBreak;
   U8 VideoMode;
   U8 VgaDac[768];
+  U8 VgaPlanes[4][65536];
   U8 VgaDacWriteIndex, VgaDacReadIndex, VgaDacComponent;
   U8 VgaAttributeIndex, VgaSequencerIndex, VgaGraphicsIndex, VgaCrtcIndex;
   U8 VgaDacMask, VgaSpeakerControl, VgaMiscOutput;
@@ -123,6 +125,7 @@ typedef struct _DOS_VM {
   U32 LastVideoTick, LastTimerTick, DosTimerPhase;
   U32 PortTraceCount;
   BOOLEAN VideoActive;
+  BOOLEAN VideoDirty;
   BOOLEAN KeyboardMirrorActive;
   U16 DtaSegment, DtaOffset;
   char SearchDirectory[260], SearchPattern[11];
@@ -135,6 +138,7 @@ typedef struct _DOS_VM {
   U32 Steps;
   U32 CurrentInstructionIp;
   U8 CurrentOpcode;
+  U8 InterruptShadow;
 } DOS_VM;
 
 static inline DOS_VM *current(void) {
@@ -155,11 +159,20 @@ static inline DOS_VM *current(void) {
 static inline U32 addr(U16 s, U16 o) {
   return (((U32)s << 4) + o) & 0xfffffu;
 }
-static inline U8 rb(U16 s, U16 o) { return mem[addr(s, o)]; }
+U8 DosVideoReadMemory(DOS_VM *vm, U32 linear);
+void DosVideoWriteMemory(DOS_VM *vm, U32 linear, U8 value);
+static inline U8 rb(U16 s, U16 o) {
+  U32 linear = addr(s, o);
+  return linear >= 0xa0000u && linear < 0xb0000u ? DosVideoReadMemory(current(), linear) : mem[linear];
+}
 static inline U16 rw(U16 s, U16 o) {
   return rb(s, o) | ((U16)rb(s, (U16)(o + 1)) << 8);
 }
-static inline void wb(U16 s, U16 o, U8 v) { mem[addr(s, o)] = v; }
+static inline void wb(U16 s, U16 o, U8 v) {
+  U32 linear = addr(s, o);
+  if (linear >= 0xa0000u && linear < 0xb0000u) DosVideoWriteMemory(current(), linear, v);
+  else mem[linear] = v;
+}
 static inline void ww(U16 s, U16 o, U16 v) {
   wb(s, o, (U8)v);
   wb(s, (U16)(o + 1), (U8)(v >> 8));

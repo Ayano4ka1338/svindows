@@ -182,6 +182,18 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
     vm->Memory[0xf0000u + 0x0200u + vector * 2u] = 0xcfu;
   for (unsigned vector = 0; vector < 32; vector++)
     vm->Memory[0xf0000u + 0x0400u + vector * 2u] = 0xcfu;
+  /* Each BIOS/DOS entry needs its own stable address: extenders save IVT
+   * pointers and call them later with DPMI 0301/0302. */
+  static const U8 builtin_vectors[] = {0x10, 0x15, 0x16, 0x20, 0x21, 0x29, 0x2f};
+  for (unsigned i = 0; i < sizeof(builtin_vectors); i++) {
+    unsigned vector = builtin_vectors[i];
+    U16 offset = DOS_BUILTIN_OFFSET(vector);
+    vm->Memory[vector * 4u] = (U8)offset;
+    vm->Memory[vector * 4u + 1u] = (U8)(offset >> 8);
+    vm->Memory[vector * 4u + 2u] = (U8)DOS_BUILTIN_SEGMENT;
+    vm->Memory[vector * 4u + 3u] = (U8)(DOS_BUILTIN_SEGMENT >> 8);
+    vm->Memory[((U32)DOS_BUILTIN_SEGMENT << 4) + DOS_BUILTIN_OFFSET(vector)] = 0xcfu;
+  }
   /* Native command line begins with the image name, possibly quoted. */
   const char *p = command;
   while (*p == ' ' || *p == '\t')
@@ -241,12 +253,12 @@ U8 run_vm(DOS_VM *vm) {
     KbdInputMirrorAcquire();
     vm->KeyboardMirrorActive = TRUE;
   }
-  while (running && steps++ < DOS_VM_INSTRUCTION_LIMIT)
+  /* Interactive DOS programs run until they exit. An instruction count is
+   * a scheduling boundary, not a lifetime limit for games. */
+  while (running) {
+    steps++;
     step();
-  if (running) {
-    say("DOS: instruction limit exceeded\r\n");
-    exit_code = 255;
-    vm->Fault = 1;
+    if (!(steps & 0x3fffu)) KeYield();
   }
   return (U8)exit_code;
 }

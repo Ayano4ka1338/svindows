@@ -21,8 +21,10 @@ require("kernel/dos/Cpu.c", (
     "if (dos_dispatch_hardware()) return",
     "DosPortIn(vm, port, io_width)", "DosPortOut(vm, port",
     "protected string I/O count", "op >= 0x6c && op <= 0x6f",
-    "if (client32)", "vm->Registers32[i] = (U32)vm->Registers[i]",
+    "if (client32)", "0xffffu, 0xfau, 0u", "0xffffu, 0xf2u, client32 ? 4u : 0u",
     "DPMI 32-bit entry registers",
+    "if (environment) ww(PSP, 0x2cu, selectors[5]);",
+    "0xffu, 0xf2u, client32 ? 4u : 0u",
 ))
 require("kernel/dos/Video.c", (
     "void DosVideoSetMode", "vm->VideoMode == 0x13u",
