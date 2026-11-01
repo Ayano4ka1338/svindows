@@ -60,7 +60,9 @@ LDFLAGS := -n -nostdlib -static -no-pie -z noexecstack \
            -T kernel/arch/x86_64/Linker.ld
 
 # Keep object and link order deterministic across hosts and filesystems.
-C_SRC   := $(sort $(shell find kernel -name '*.c'))
+# DOS JIT is intentionally disabled in this recovery build. Exclude any
+# stale kernel/dos/Jit.c left behind when extracting a ZIP over an older tree.
+C_SRC   := $(sort $(shell find kernel -name '*.c' ! -path 'kernel/dos/Jit.c'))
 ASM_SRC := $(sort $(shell find kernel -name '*.asm'))
 OBJ     := $(patsubst %,$(BUILD)/%.o,$(C_SRC) $(ASM_SRC))
 OBJ     += $(LWIP_OBJ)
@@ -135,7 +137,12 @@ ALPINE_XORG := $(BUILD)/alpine-xorg/.ready
 ALPINE_FASTFETCH := $(BUILD)/alpine-fastfetch/.ready
 ALPINE_CURL := $(BUILD)/alpine-curl/.ready
 ALPINE_FEH := $(BUILD)/alpine-feh/.ready
-DOOM_FILES  := $(sort $(wildcard user/d/doom/*))
+# Windows 1.01 system files are grouped in C:\WINDOWS1.
+WINDOWS1_FILES := $(sort $(wildcard user/d/windows1/*))
+WINDOWS1_NAMES := $(notdir $(WINDOWS1_FILES))
+# Filter the Windows names as well, so unpacking this tree over an older source
+# directory cannot accidentally stage stale Windows copies under C:\DOOM.
+DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS1_NAMES)),$(sort $(wildcard user/d/doom/*)))
 LLDLINK    := lld-link
 CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
               -fno-stack-protector -fno-stack-check -funwind-tables \
@@ -410,7 +417,7 @@ $(ALPINE_FEH): tools/StageAlpineFeh.py tools/alpine-feh.lock.json
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(DISK): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(wildcard user/d/doom) $(DOOM_FILES) other/Logo.png $(DISK_PROGRAM_INPUTS)
+$(DISK): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) user/d/win.bat other/Logo.png $(DISK_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=128 status=none
 	mformat -i $(DISK) -F -v SVINDOWS ::
@@ -433,11 +440,17 @@ $(DISK): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BIN
 	mcopy -i $(DISK) $(UXTHEME) ::WINDOWS/SYSTEM32/UXTHEME.DLL
 	if [ -f "$(COMCTL32)" ]; then mcopy -i $(DISK) $(COMCTL32) ::WINDOWS/SYSTEM32/COMCTL32.DLL; fi
 	mcopy -i $(DISK) $(COMMAND_BINS) ::
+	# Keep the complete Windows 1.01 payload together; WIN.BAT in C:\ is a launcher.
+	mmd -i $(DISK) ::WINDOWS1
+	if [ -n "$(WINDOWS1_FILES)" ]; then mcopy -i $(DISK) $(WINDOWS1_FILES) ::WINDOWS1/; fi
+	mcopy -i $(DISK) user/d/win.bat ::WIN.BAT
 	mcopy -i $(DISK) $(STARTX) ::STARTX.ELF
 	mmd -i $(DISK) ::TESTS
 	mcopy -i $(DISK) $(BUILD)/dos-tests/COMSMOKE.COM ::TESTS/COMSMOKE.COM
 	mcopy -i $(DISK) $(BUILD)/dos-tests/MEMSMOKE.COM ::TESTS/MEMSMOKE.COM
 	mcopy -i $(DISK) $(BUILD)/dos-tests/DPMIINFO.COM ::TESTS/DPMIINFO.COM
+	mcopy -i $(DISK) $(BUILD)/dos-tests/FCBPARSE.COM ::TESTS/FCBPARSE.COM
+	mcopy -i $(DISK) $(BUILD)/dos-tests/FFGROUP.COM ::TESTS/FFGROUP.COM
 	mcopy -i $(DISK) $(BUILD)/dos-tests/MZSMOKE.EXE ::TESTS/MZSMOKE.EXE
 	mcopy -i $(DISK) $(BUILD)/dos-tests/DOSCHECK.BAT ::DOSCHECK.BAT
 	mcopy -s -i $(DISK) $(BUILD)/alpine-xorg/root/* ::
@@ -493,7 +506,14 @@ dos-tests: $(DOS_TESTS)
 dos-vm-check:
 	python3 tools/checks/DosVmChecks.py
 	python3 tools/checks/DosCpuChecks.py
+	python3 tools/checks/DosLoaderChecks.py
+	python3 tools/checks/DosHardwareChecks.py
+	python3 tools/checks/DosFcbSearchChecks.py
 	python3 tools/checks/DosVgaChecks.py
+	python3 tools/checks/DosCursorChecks.py
+	python3 tools/checks/DosDecimalChecks.py
+	python3 tools/checks/DosSystemDataChecks.py
+	python3 tools/checks/DosX87Checks.py
 
 $(ISO): $(KERNEL) boot/Grub.cfg
 	@mkdir -p $(BUILD)/isodir/boot/grub

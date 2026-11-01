@@ -1,4 +1,4 @@
-/* Virtual VGA, PC timer/keyboard I/O and mode-13h presentation for DOS VMs. */
+/* Virtual VGA/CGA, PC timer/keyboard I/O and DOS video presentation. */
 #include <svindows/Gfx.h>
 #include <svindows/Console.h>
 #include <svindows/Hal.h>
@@ -19,8 +19,88 @@ static UINT32 dos_vga_color(DOS_VM *vm, U8 index)
     return GfxColor(red, green, blue);
 }
 
+static UINT32 dos_ega_color(U8 value)
+{
+    U8 blue = (U8)(((value & 0x01u) ? 42u : 0u) +
+                   ((value & 0x08u) ? 21u : 0u));
+    U8 green = (U8)(((value & 0x02u) ? 42u : 0u) +
+                    ((value & 0x10u) ? 21u : 0u));
+    U8 red = (U8)(((value & 0x04u) ? 42u : 0u) +
+                  ((value & 0x20u) ? 21u : 0u));
+    red = (U8)((red * 255u + 31u) / 63u);
+    green = (U8)((green * 255u + 31u) / 63u);
+    blue = (U8)((blue * 255u + 31u) / 63u);
+    return GfxColor(red, green, blue);
+}
+
+void DosVideoSetPaletteRegister(DOS_VM *vm, U8 index, U8 value)
+{
+    if (!vm || (index >= 16u && index != 0x11u)) return;
+    vm->VgaAttribute[index] = value & 0x3fu;
+    vm->VideoDirty = TRUE;
+}
+
+U8 DosVideoGetPaletteRegister(DOS_VM *vm, U8 index)
+{
+    if (!vm || (index >= 16u && index != 0x11u)) return 0xffu;
+    return vm->VgaAttribute[index];
+}
+
+static U32 dos_cga_scanline_offset(U32 y)
+{
+    return ((y & 1u) ? 0x2000u : 0u) + (y >> 1) * 80u;
+}
+
+void DosVideoWritePixel(DOS_VM *vm, U16 x, U16 y, U8 color)
+{
+    if (!vm || y >= 200u) return;
+    if (vm->VideoMode == 0x06u && x < 640u) {
+        U32 at = 0xb8000u + dos_cga_scanline_offset(y) + (x >> 3);
+        U8 mask = (U8)(0x80u >> (x & 7u));
+        if (color & 1u) vm->Memory[at] |= mask;
+        else vm->Memory[at] &= (U8)~mask;
+        vm->VideoDirty = TRUE;
+    } else if ((vm->VideoMode == 0x04u || vm->VideoMode == 0x05u) &&
+               x < 320u) {
+        U32 at = 0xb8000u + dos_cga_scanline_offset(y) + (x >> 2);
+        U32 shift = 6u - ((x & 3u) * 2u);
+        U8 mask = (U8)(3u << shift);
+        vm->Memory[at] = (U8)((vm->Memory[at] & (U8)~mask) |
+                              ((color & 3u) << shift));
+        vm->VideoDirty = TRUE;
+    }
+}
+
+U8 DosVideoReadPixel(DOS_VM *vm, U16 x, U16 y)
+{
+    if (!vm || y >= 200u) return 0;
+    if (vm->VideoMode == 0x06u && x < 640u) {
+        U32 at = 0xb8000u + dos_cga_scanline_offset(y) + (x >> 3);
+        return (U8)((vm->Memory[at] >> (7u - (x & 7u))) & 1u);
+    }
+    if ((vm->VideoMode == 0x04u || vm->VideoMode == 0x05u) && x < 320u) {
+        U32 at = 0xb8000u + dos_cga_scanline_offset(y) + (x >> 2);
+        return (U8)((vm->Memory[at] >> (6u - ((x & 3u) * 2u))) & 3u);
+    }
+    return 0;
+}
+
 U8 DosVideoReadMemory(DOS_VM *vm, U32 linear)
 {
+    if (vm->VideoMode >= 0x0du && vm->VideoMode <= 0x12u) {
+        U32 offset = (linear - VGA_MEMORY_BASE) & 0xffffu;
+        for (unsigned plane = 0; plane < 4; plane++)
+            vm->VgaLatches[plane] = vm->VgaPlanes[plane][offset];
+        if (vm->VgaGraphics[5] & 8u) {
+            U8 result = 0xffu;
+            for (unsigned plane = 0; plane < 4; plane++)
+                if (vm->VgaGraphics[7] & (1u << plane))
+                    result &= (U8)(vm->VgaLatches[plane] ^
+                        ((vm->VgaGraphics[2] & (1u << plane)) ? 0 : 0xffu));
+            return result;
+        }
+        return vm->VgaLatches[vm->VgaGraphics[4] & 3u];
+    }
     if (vm->VideoMode == 0x13u && !(vm->VgaSequencer[4] & 8u))
         return vm->VgaPlanes[vm->VgaGraphics[4] & 3u][linear - VGA_MEMORY_BASE];
     return vm->Memory[linear];
@@ -29,6 +109,32 @@ U8 DosVideoReadMemory(DOS_VM *vm, U32 linear)
 void DosVideoWriteMemory(DOS_VM *vm, U32 linear, U8 value)
 {
     vm->VideoDirty = TRUE;
+    if (vm->VideoMode >= 0x0du && vm->VideoMode <= 0x12u) {
+        U32 offset = (linear - VGA_MEMORY_BASE) & 0xffffu;
+        unsigned rotate = vm->VgaGraphics[3] & 7u;
+        U8 rotated = (U8)((value >> rotate) | (value << ((8u - rotate) & 7u)));
+        unsigned mode = vm->VgaGraphics[5] & 3u;
+        for (unsigned plane = 0; plane < 4; plane++) {
+            if (!(vm->VgaSequencer[2] & (1u << plane))) continue;
+            U8 latch = vm->VgaLatches[plane], mask = vm->VgaGraphics[8];
+            U8 data = rotated;
+            if (mode == 1u) {
+                vm->VgaPlanes[plane][offset] = latch;
+                continue;
+            }
+            if (mode == 2u) data = value & (1u << plane) ? 0xffu : 0;
+            else if (mode == 3u || (vm->VgaGraphics[1] & (1u << plane)))
+                data = vm->VgaGraphics[0] & (1u << plane) ? 0xffu : 0;
+            if (mode == 3u) mask &= rotated;
+            switch ((vm->VgaGraphics[3] >> 3) & 3u) {
+            case 1: data &= latch; break;
+            case 2: data |= latch; break;
+            case 3: data ^= latch; break;
+            }
+            vm->VgaPlanes[plane][offset] = (U8)((data & mask) | (latch & ~mask));
+        }
+        return;
+    }
     if (vm->VideoMode == 0x13u && !(vm->VgaSequencer[4] & 8u)) {
         for (unsigned plane = 0; plane < 4; plane++)
             if (vm->VgaSequencer[2] & (1u << plane))
@@ -41,46 +147,238 @@ void DosVideoSetMode(DOS_VM *vm, U8 mode)
     if (!vm) return;
     vm->VideoDirty = TRUE;
     vm->VideoMode = mode & 0x7fu;
+    /* BIOS clients also inspect the data area directly. In particular the
+     * Windows keyboard hook delegates to BIOS in text modes (BDA 0040:49). */
+    vm->Memory[0x449u] = vm->VideoMode;
+    vm->Memory[0x44au] = vm->VideoMode == 4u || vm->VideoMode == 5u ? 40u : 80u;
+    vm->Memory[0x44bu] = 0;
+    vm->Memory[0x462u] = 0; /* active display page */
+    vm->Memory[0x463u] = 0xd4u; vm->Memory[0x464u] = 3;
+    vm->Memory[0x484u] = 24; /* text rows minus one */
     KeLog("[dos-vga] video mode=%02x\n", vm->VideoMode);
+
     if (vm->VideoMode == 0x13u) {
         vm->VgaSequencer[2] = 0x0fu;
         vm->VgaSequencer[4] = 0x0eu;
         vm->VgaCrtc[0x0c] = vm->VgaCrtc[0x0d] = 0;
         memset(vm->VgaPlanes, 0, sizeof(vm->VgaPlanes));
-        if (!vm->VideoActive && GfxAvailable()) {
-            HalConsoleAcquireFramebuffer();
-            vm->VideoActive = TRUE;
-        }
         vm->VgaDacMask = 0xffu;
         vm->VgaDacWriteIndex = 0;
         vm->VgaDacReadIndex = 0;
         vm->VgaDacComponent = 0;
-        /* Deterministic EGA-like fallback palette until the program loads its
-         * own VGA DAC palette through ports 3C8h/3C9h. */
-        static const U8 ega[16][3] = {
+        static const U8 ega_dac[16][3] = {
             {0,0,0},{0,0,42},{0,42,0},{0,42,42},
             {42,0,0},{42,0,42},{42,21,0},{42,42,42},
             {21,21,21},{21,21,63},{21,63,21},{21,63,63},
             {63,21,21},{63,21,63},{63,63,21},{63,63,63}
         };
         for (unsigned i = 0; i < 16; i++)
-            memcpy(&vm->VgaDac[i * 3u], ega[i], 3);
+            memcpy(&vm->VgaDac[i * 3u], ega_dac[i], 3);
         for (unsigned i = 16; i < 256; i++) {
             U8 gray = (U8)((i - 16u) * 63u / 239u);
             vm->VgaDac[i * 3u] = gray;
             vm->VgaDac[i * 3u + 1] = gray;
             vm->VgaDac[i * 3u + 2] = gray;
         }
-        if (GfxAvailable()) GfxClear(GfxColor(0, 0, 0));
-    } else if (vm->VideoActive) {
+    } else if ((vm->VideoMode >= 4u && vm->VideoMode <= 6u) ||
+               (vm->VideoMode >= 0x0du && vm->VideoMode <= 0x12u)) {
+        static const U8 ega_palette[16] = {
+            0x00,0x01,0x02,0x03,0x04,0x05,0x14,0x07,
+            0x38,0x39,0x3a,0x3b,0x3c,0x3d,0x3e,0x3f
+        };
+        memcpy(vm->VgaAttribute, ega_palette, sizeof(ega_palette));
+        if (vm->VideoMode == 0x06u)
+            vm->VgaAttribute[1] = 0x3fu; /* monochrome foreground is white */
+        vm->VgaAttribute[0x11] = 0;
+        vm->VgaAttribute[0x10] &= (U8)~0x08u;
+        vm->VgaAttributeIndex = 0;
+        vm->VgaAttributeDataPhase = FALSE;
+        if (vm->VideoMode >= 0x0du) {
+            memset(vm->VgaPlanes, 0, sizeof(vm->VgaPlanes));
+            memset(vm->VgaLatches, 0, sizeof(vm->VgaLatches));
+            memset(vm->VgaGraphics, 0, sizeof(vm->VgaGraphics));
+            vm->VgaSequencer[2] = 0x0fu;
+            vm->VgaSequencer[4] = 0x06u;
+            vm->VgaGraphics[6] = 0x05u;
+            vm->VgaGraphics[7] = 0x0fu;
+            vm->VgaGraphics[8] = 0xffu;
+            vm->VgaCrtc[0x0c] = vm->VgaCrtc[0x0d] = 0;
+        } else memset(vm->Memory + 0xb8000u, 0, 0x4000u);
+    }
+
+    BOOLEAN needs_framebuffer = (vm->VideoMode == 0x13u ||
+                                  (vm->VideoMode >= 0x0du && vm->VideoMode <= 0x12u) ||
+                                  (vm->VideoMode >= 4u && vm->VideoMode <= 6u));
+    if (needs_framebuffer && !vm->VideoActive && GfxAvailable()) {
+        HalConsoleAcquireFramebuffer();
+        vm->VideoActive = TRUE;
+    } else if (!needs_framebuffer && vm->VideoActive) {
         vm->VideoActive = FALSE;
         if (HalConsoleReleaseFramebuffer()) ConRedraw();
+    }
+    if (GfxAvailable() && needs_framebuffer) GfxClear(GfxColor(0, 0, 0));
+}
+
+void DosVideoInherit(DOS_VM *destination, const DOS_VM *source)
+{
+    DosVideoSetMode(destination, source->VideoMode);
+    memcpy(destination->Memory + 0xa0000u, source->Memory + 0xa0000u, 0x20000u);
+    memcpy(destination->VgaPlanes, source->VgaPlanes, sizeof(source->VgaPlanes));
+    memcpy(destination->VgaLatches, source->VgaLatches, sizeof(source->VgaLatches));
+    memcpy(destination->VgaDac, source->VgaDac, sizeof(source->VgaDac));
+    memcpy(destination->VgaAttribute, source->VgaAttribute, sizeof(source->VgaAttribute));
+    memcpy(destination->VgaSequencer, source->VgaSequencer, sizeof(source->VgaSequencer));
+    memcpy(destination->VgaGraphics, source->VgaGraphics, sizeof(source->VgaGraphics));
+    memcpy(destination->VgaCrtc, source->VgaCrtc, sizeof(source->VgaCrtc));
+    destination->VgaMiscOutput = source->VgaMiscOutput;
+    destination->VgaDacMask = source->VgaDacMask;
+    destination->VideoDirty = TRUE;
+}
+
+/* The standard 16x16 Microsoft-compatible DOS arrow.  The two masks follow
+ * the DOS mouse-driver convention used by DOSBox: AND selects the old pixel,
+ * then XOR modifies it.  This gives the familiar black outline and white fill
+ * without changing the guest's video memory. */
+static const U16 dos_mouse_default_and[16] = {
+    0x3fff, 0x1fff, 0x0fff, 0x07ff,
+    0x03ff, 0x01ff, 0x00ff, 0x007f,
+    0x003f, 0x001f, 0x01ff, 0x00ff,
+    0x30ff, 0xf87f, 0xf87f, 0xfcff
+};
+
+static const U16 dos_mouse_default_xor[16] = {
+    0x0000, 0x4000, 0x6000, 0x7000,
+    0x7800, 0x7c00, 0x7e00, 0x7f00,
+    0x7f80, 0x7c00, 0x6c00, 0x4600,
+    0x0600, 0x0300, 0x0300, 0x0000
+};
+
+void DosMouseSetDefaultCursor(DOS_VM *vm)
+{
+    if (!vm) return;
+    memset(vm->MouseAndMask, 0, sizeof(vm->MouseAndMask));
+    memset(vm->MouseXorMask, 0, sizeof(vm->MouseXorMask));
+    for (U32 row = 0; row < 16; row++) {
+        vm->MouseAndMask[row][0] = dos_mouse_default_and[row];
+        vm->MouseXorMask[row][0] = dos_mouse_default_xor[row];
+    }
+    vm->MouseHotX = 0;
+    vm->MouseHotY = 0;
+    vm->MouseCursorWidthWords = 1;
+    vm->MouseCursorHeight = 16;
+}
+
+static void dos_video_draw_mouse_cursor(DOS_VM *vm, U32 left, U32 top,
+                                       U32 scale, U32 source_width,
+                                       U32 source_height, U32 coordinate_width)
+{
+    if (!vm || !scale || (!vm->MouseInitialized && !vm->SerialMouseActive) ||
+        (!vm->SerialMouseActive && vm->MouseDisabled) ||
+        !GfxFramebuffer.Base)
+        return;
+
+    /* Windows 1.x uses its own serial driver rather than INT 33h.  Its guest
+     * coordinates are updated asynchronously from COM1 packets, so draw the
+     * host pointer at the host's absolute framebuffer position instead of
+     * waiting for the guest driver to catch up. */
+    if (!vm->SerialMouseActive && vm->MouseHideCount)
+        return;
+    if (!vm->SerialMouseActive && vm->MouseConditionalOff &&
+        vm->MouseX >= vm->MouseConditionalLeft &&
+        vm->MouseX <= vm->MouseConditionalRight &&
+        vm->MouseY >= vm->MouseConditionalTop &&
+        vm->MouseY <= vm->MouseConditionalBottom)
+        return;
+
+    U32 width_words = vm->MouseCursorWidthWords;
+    U32 cursor_height = vm->MouseCursorHeight;
+    BOOLEAN use_default = !width_words || !cursor_height;
+    if (use_default) {
+        width_words = 1;
+        cursor_height = 16;
+    }
+    if (width_words > 8u) width_words = 8u;
+    if (cursor_height > 64u) cursor_height = 64u;
+
+    INT32 cursor_x, cursor_y;
+    INT32 clip_left, clip_top, clip_right, clip_bottom;
+    if (vm->SerialMouseActive) {
+        INT32 host_x = MouseState.X;
+        INT32 host_y = MouseState.Y;
+        if (host_x < 0) host_x = 0;
+        if (host_y < 0) host_y = 0;
+        if (host_x >= (INT32)GfxFramebuffer.Width)
+            host_x = (INT32)GfxFramebuffer.Width - 1;
+        if (host_y >= (INT32)GfxFramebuffer.Height)
+            host_y = (INT32)GfxFramebuffer.Height - 1;
+        cursor_x = host_x - vm->MouseHotX;
+        cursor_y = host_y - vm->MouseHotY;
+        clip_left = 0;
+        clip_top = 0;
+        clip_right = (INT32)GfxFramebuffer.Width;
+        clip_bottom = (INT32)GfxFramebuffer.Height;
+        /* The serial path is a native desktop pointer: do not scale a 16px
+         * Windows arrow with a low-resolution guest framebuffer. */
+        scale = 1;
+    } else {
+        U32 guest_x = (U32)vm->MouseX * source_width /
+                      (coordinate_width ? coordinate_width : source_width);
+        U32 guest_y = vm->MouseY;
+        if (guest_x >= source_width) guest_x = source_width - 1u;
+        if (guest_y >= source_height) guest_y = source_height - 1u;
+
+        cursor_x = (INT32)left + (INT32)(guest_x * scale) -
+                   (INT32)vm->MouseHotX * (INT32)scale;
+        cursor_y = (INT32)top + (INT32)(guest_y * scale) -
+                   (INT32)vm->MouseHotY * (INT32)scale;
+        clip_left = (INT32)left;
+        clip_top = (INT32)top;
+        clip_right = clip_left + (INT32)(source_width * scale);
+        clip_bottom = clip_top + (INT32)(source_height * scale);
+    }
+    UINT32 stride = GfxFramebuffer.Pitch / sizeof(UINT32);
+    UINT32 black = GfxColor(0, 0, 0);
+    UINT32 white = GfxColor(255, 255, 255);
+
+    for (U32 row = 0; row < cursor_height; row++) {
+        for (U32 col = 0; col < width_words * 16u; col++) {
+            U32 word = col >> 4;
+            U16 bit = (U16)(0x8000u >> (col & 15u));
+            U16 and_bits = use_default ?
+                (word == 0u && row < 16u ? dos_mouse_default_and[row] : 0xffffu) :
+                vm->MouseAndMask[row][word];
+            U16 xor_bits = use_default ?
+                (word == 0u && row < 16u ? dos_mouse_default_xor[row] : 0u) :
+                vm->MouseXorMask[row][word];
+            BOOLEAN and_pixel = (and_bits & bit) != 0;
+            BOOLEAN xor_pixel = (xor_bits & bit) != 0;
+            if (and_pixel && !xor_pixel)
+                continue; /* transparent: preserve the framebuffer pixel */
+
+            INT32 x = cursor_x + (INT32)(col * scale);
+            INT32 y = cursor_y + (INT32)(row * scale);
+            for (U32 dy = 0; dy < scale; dy++) {
+                INT32 py = y + (INT32)dy;
+                if (py < clip_top || py >= clip_bottom ||
+                    py < 0 || py >= (INT32)GfxFramebuffer.Height)
+                    continue;
+                UINT32 *dst = GfxFramebuffer.Base + (UINT32)py * stride;
+                for (U32 dx = 0; dx < scale; dx++) {
+                    INT32 px = x + (INT32)dx;
+                    if (px < clip_left || px >= clip_right || px < 0 ||
+                        px >= (INT32)GfxFramebuffer.Width)
+                        continue;
+                    if (and_pixel) dst[px] ^= white;
+                    else dst[px] = xor_pixel ? white : black;
+                }
+            }
+        }
     }
 }
 
 void DosVideoPresent(DOS_VM *vm)
 {
-    if (!vm || !vm->VideoActive || !vm->VideoDirty || vm->VideoMode != 0x13u ||
+    if (!vm || !vm->VideoActive || !vm->VideoDirty ||
         !GfxAvailable() || !vm->Memory)
         return;
 
@@ -89,6 +387,82 @@ void DosVideoPresent(DOS_VM *vm)
     UINT32 stride = GfxFramebuffer.Pitch / sizeof(UINT32);
     if (!width || !height || !stride || !GfxFramebuffer.Base) return;
 
+    if (vm->VideoMode == 0x06u || vm->VideoMode == 0x04u ||
+        vm->VideoMode == 0x05u) {
+        UINT32 source_width = vm->VideoMode == 0x06u ? 640u : 320u;
+        UINT32 scale_x = width / source_width;
+        UINT32 scale_y = height / 200u;
+        UINT32 scale = scale_x < scale_y ? scale_x : scale_y;
+        if (!scale) scale = 1;
+        if (scale > 4) scale = 4;
+        UINT32 out_w = source_width * scale;
+        UINT32 out_h = 200u * scale;
+        UINT32 left = width > out_w ? (width - out_w) / 2u : 0;
+        UINT32 top = height > out_h ? (height - out_h) / 2u : 0;
+        UINT32 draw_w = width - left < out_w ? width - left : out_w;
+        UINT32 draw_h = height - top < out_h ? height - top : out_h;
+        UINT32 palette[4];
+        for (unsigned i = 0; i < 4; i++)
+            palette[i] = dos_ega_color(vm->VgaAttribute[i]);
+        const U8 *cga = vm->Memory + 0xb8000u;
+        for (UINT32 y = 0; y < draw_h; y++) {
+            UINT32 sy = y / scale;
+            UINT32 *dst = GfxFramebuffer.Base + (top + y) * stride + left;
+            if (y % scale) {
+                memcpy(dst, dst - stride, draw_w * sizeof(*dst));
+                continue;
+            }
+            U32 row = dos_cga_scanline_offset(sy);
+            if (vm->VideoMode == 0x06u) {
+                for (UINT32 sx = 0; sx < 640u && sx < draw_w / scale; sx++) {
+                    U8 bits = cga[row + (sx >> 3)];
+                    UINT32 color = palette[(bits >> (7u - (sx & 7u))) & 1u];
+                    for (UINT32 dx = 0; dx < scale && sx * scale + dx < draw_w; dx++)
+                        dst[sx * scale + dx] = color;
+                }
+            } else {
+                for (UINT32 sx = 0; sx < 320u && sx < draw_w / scale; sx++) {
+                    U8 bits = cga[row + (sx >> 2)];
+                    UINT32 pixel = (bits >> (6u - ((sx & 3u) * 2u))) & 3u;
+                    UINT32 color = palette[pixel];
+                    for (UINT32 dx = 0; dx < scale && sx * scale + dx < draw_w; dx++)
+                        dst[sx * scale + dx] = color;
+                }
+            }
+        }
+        dos_video_draw_mouse_cursor(vm, left, top, scale, source_width,
+                                    200u, 640u);
+        vm->VideoDirty = FALSE;
+        return;
+    }
+
+    if (vm->VideoMode >= 0x0du && vm->VideoMode <= 0x12u) {
+        U32 sw = vm->VideoMode == 0x0du ? 320u : 640u;
+        U32 sh = vm->VideoMode <= 0x0eu ? 200u : vm->VideoMode <= 0x10u ? 350u : 480u;
+        U32 scale = width / sw < height / sh ? width / sw : height / sh;
+        if (!scale) scale = 1;
+        U32 left = width > sw * scale ? (width - sw * scale) / 2u : 0;
+        U32 top = height > sh * scale ? (height - sh * scale) / 2u : 0;
+        U32 start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
+        U32 colors[16];
+        for (unsigned i = 0; i < 16; i++) colors[i] = dos_ega_color(vm->VgaAttribute[i]);
+        for (U32 y = 0; y < sh && top + y * scale < height; y++) {
+            for (U32 x = 0; x < sw && left + x * scale < width; x++) {
+                U32 offset = (start + y * (sw / 8u) + x / 8u) & 0xffffu;
+                U8 pixel = 0;
+                for (unsigned plane = 0; plane < 4; plane++)
+                    pixel |= ((vm->VgaPlanes[plane][offset] >> (7u - (x & 7u))) & 1u) << plane;
+                for (U32 dy = 0; dy < scale && top + y * scale + dy < height; dy++)
+                    for (U32 dx = 0; dx < scale && left + x * scale + dx < width; dx++)
+                        GfxFramebuffer.Base[(top + y * scale + dy) * stride + left + x * scale + dx] = colors[pixel];
+            }
+        }
+        dos_video_draw_mouse_cursor(vm, left, top, scale, sw, sh,
+                                    vm->VideoMode == 0x0du ? 320u : 640u);
+        vm->VideoDirty = FALSE;
+        return;
+    }
+    if (vm->VideoMode != 0x13u) return;
     UINT32 scale_x = width / 320u;
     UINT32 scale_y = height / 200u;
     UINT32 scale = scale_x < scale_y ? scale_x : scale_y;
@@ -120,6 +494,7 @@ void DosVideoPresent(DOS_VM *vm)
                 dst[sx * scale + dx] = color;
         }
     }
+    dos_video_draw_mouse_cursor(vm, left, top, scale, 320u, 200u, 640u);
     vm->VideoDirty = FALSE;
 }
 
@@ -154,7 +529,8 @@ static U8 dos_keyboard_read(DOS_VM *vm)
         vm->KeyboardDataReady = FALSE;
         return vm->KeyboardData;
     }
-    return 0;
+    /* The 8042 data latch retains its last byte when its output buffer is empty. */
+    return vm->KeyboardData;
 }
 
 static U16 dos_pit_counter(DOS_VM *vm)
@@ -186,6 +562,66 @@ static U8 dos_pit_read(DOS_VM *vm)
     return value;
 }
 
+static BOOLEAN dos_uart_rx_ready(DOS_VM *vm, unsigned uart)
+{
+    return vm->UartRxHead[uart] != vm->UartRxTail[uart];
+}
+
+static void dos_uart_rx_push(DOS_VM *vm, unsigned uart, U8 byte)
+{
+    U8 next = (U8)((vm->UartRxHead[uart] + 1u) % sizeof(vm->UartRx[uart]));
+    if (next == vm->UartRxTail[uart]) return;
+    vm->UartRx[uart][vm->UartRxHead[uart]] = byte;
+    vm->UartRxHead[uart] = next;
+}
+
+/* Windows 1.x uses its own Microsoft Bus/Serial Mouse driver and does not
+ * consume movement through the DOS INT 33h API. COM1 therefore exposes the
+ * original three-byte, 7-bit Microsoft serial mouse protocol. */
+void DosSerialMousePoll(DOS_VM *vm)
+{
+    if (!vm || !vm->SerialMouseActive) return;
+    unsigned uart = vm->SerialMouseUart;
+    U32 sequence = MouseState.Seq;
+    if (sequence == vm->SerialMouseHostSeq) return;
+
+    INT32 dx = MouseState.X - vm->SerialMouseHostX;
+    INT32 dy = MouseState.Y - vm->SerialMouseHostY;
+    U8 buttons = MouseState.Buttons;
+    vm->SerialMouseHostSeq = sequence;
+    vm->SerialMouseHostX = MouseState.X;
+    vm->SerialMouseHostY = MouseState.Y;
+    /* Cursor composition happens after the guest frame is redrawn.  A host
+     * pointer move must therefore request a fresh presentation even when the
+     * guest has not touched video memory. */
+    vm->VideoDirty = TRUE;
+
+    while (dx || dy || buttons != vm->SerialMouseButtons) {
+        INT32 packet_x = dx < -128 ? -128 : dx > 127 ? 127 : dx;
+        INT32 packet_y = dy < -128 ? -128 : dy > 127 ? 127 : dy;
+        U8 x = (U8)(INT8)packet_x;
+        U8 y = (U8)(INT8)packet_y;
+        U8 first = 0x40u | ((buttons & MOUSE_BUTTON_LEFT) ? 0x20u : 0u) |
+                     ((buttons & MOUSE_BUTTON_RIGHT) ? 0x10u : 0u) |
+                     ((y >> 4) & 0x0cu) | ((x >> 6) & 0x03u);
+        dos_uart_rx_push(vm, uart, first);
+        dos_uart_rx_push(vm, uart, x & 0x3fu);
+        dos_uart_rx_push(vm, uart, y & 0x3fu);
+        dx -= packet_x;
+        dy -= packet_y;
+        vm->SerialMouseButtons = buttons;
+    }
+}
+
+BOOLEAN DosSerialMouseIrqPending(DOS_VM *vm, unsigned uart_index)
+{
+    if (!vm || !vm->SerialMouseActive || vm->SerialMouseUart != uart_index)
+        return FALSE;
+    U8 *uart = vm->UartRegisters[uart_index];
+    return dos_uart_rx_ready(vm, uart_index) && (uart[1] & 0x01u) &&
+           (uart[4] & 0x08u);
+}
+
 U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
 {
     if (width > 8) {
@@ -195,6 +631,25 @@ U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
     }
     U32 value;
     U8 byte = 0xffu;
+    if ((port >= 0x02f8u && port <= 0x02ffu) ||
+        (port >= 0x03f8u && port <= 0x03ffu)) {
+        unsigned uart_index = port >= 0x03f8u;
+        U8 *uart = vm->UartRegisters[uart_index];
+        unsigned reg = port & 7u;
+        DosSerialMousePoll(vm);
+        if (reg == 5u) return 0x60u | (dos_uart_rx_ready(vm, uart_index) ? 1u : 0u);
+        if (reg == 2u)
+            return dos_uart_rx_ready(vm, uart_index) && (uart[1] & 1u) ? 0x04u : 0x01u;
+        if (reg == 6u) return uart_index == 1 ? 0xb0u : 0;
+        if (reg == 0u && !(uart[3] & 0x80u)) {
+            if (!dos_uart_rx_ready(vm, uart_index)) return 0;
+            U8 result = vm->UartRx[uart_index][vm->UartRxTail[uart_index]];
+            vm->UartRxTail[uart_index] = (U8)((vm->UartRxTail[uart_index] + 1u) %
+                                               sizeof(vm->UartRx[uart_index]));
+            return result;
+        }
+        return uart[reg];
+    }
     switch (port) {
     case 0x0060: byte = dos_keyboard_read(vm); break;
     case 0x0064: byte = (vm->KeyboardDataReady || KbdMirroredInputEventAvailable()) ? 0x01u : 0x00u; break;
@@ -256,6 +711,39 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
         return;
     }
     U8 byte = (U8)value;
+    if ((port >= 0x02f8u && port <= 0x02ffu) ||
+        (port >= 0x03f8u && port <= 0x03ffu)) {
+        unsigned uart_index = port >= 0x03f8u;
+        U8 *uart = vm->UartRegisters[uart_index];
+        unsigned reg = port & 7u;
+        if (reg == 2u) {
+            uart[reg] = byte;
+            if (byte & 0x02u) vm->UartRxHead[uart_index] = vm->UartRxTail[uart_index] = 0;
+            return;
+        }
+        if (reg == 4u) {
+            U8 previous = uart[4];
+            uart[4] = byte;
+            if ((byte & 0x03u) == 0x03u &&
+                (previous & 0x03u) != 0x03u) {
+                if (!vm->SerialMouseActive) {
+                    vm->SerialMouseActive = TRUE;
+                    vm->SerialMouseUart = (U8)uart_index;
+                    vm->SerialMouseHostSeq = MouseState.Seq;
+                    vm->SerialMouseHostX = MouseState.X;
+                    vm->SerialMouseHostY = MouseState.Y;
+                    vm->SerialMouseButtons = MouseState.Buttons;
+                    vm->VideoDirty = TRUE;
+                }
+                if (vm->SerialMouseUart == uart_index)
+                    dos_uart_rx_push(vm, uart_index, 'M');
+            }
+            return;
+        }
+        if (reg == 0u && !(uart[3] & 0x80u)) return; /* transmit byte */
+        if (reg == 0u || reg == 1u || reg == 3u || reg == 7u) uart[reg] = byte;
+        return;
+    }
     switch (port) {
     case 0x0060: /* 8042 command/data port: acknowledge, do not control host */
     case 0x0064:
@@ -314,7 +802,7 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
         vm->VgaDacComponent = 0;
         break;
     case 0x03c9:
-        vm->VideoDirty = TRUE;
+      vm->VideoDirty = TRUE;
         vm->VgaDac[(UINT32)vm->VgaDacWriteIndex * 3u +
                    vm->VgaDacComponent] = byte & 0x3fu;
         if (++vm->VgaDacComponent == 3) {

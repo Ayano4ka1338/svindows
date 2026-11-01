@@ -16,6 +16,23 @@ typedef UINT64 U64;
 #define DOS_REAL_MEMORY_SIZE 0x100000u
 #define MEM_SIZE 0x08000000u /* 128 MiB flat-memory space for DOS extenders */
 #define DOS_DPMI_MAX_BLOCKS 128u
+#define DOS_HW_POLL_INTERVAL 128u
+#define DOS_CPU_BATCH_SIZE 256u
+/* DOS 3.1-3.3 compatibility data used by INT 21h/34h, 52h and 5D06h. */
+#define DOS_SYSTEM_DATA_SEGMENT 0x0600u
+#define DOS_LISTS_OFFSET 0x0022u /* DOS 3.x AH=52h returns ES:BX with BX=0022h. */
+#define DOS_SDA_OFFSET 0x0218u /* DOS 3.x: ListOfLists+202h minus 0Ch. */
+#define DOS_SDA_SIZE 0x073cu
+#define DOS_DPB_OFFSET 0x0a40u
+#define DOS_SFT_OFFSET 0x0b00u
+#define DOS_SFT_ENTRY_SIZE 0x35u
+#define DOS_SFT_ENTRY_COUNT 20u
+#define DOS_CDS_OFFSET 0x1200u
+#define DOS_CDS_ENTRY_SIZE 0x45u
+#define DOS_DEVICE_CLOCK_OFFSET 0x1600u
+#define DOS_DEVICE_CON_OFFSET 0x1612u
+#define DOS_DEVICE_AUX_OFFSET 0x1624u
+#define DOS_DEVICE_PRN_OFFSET 0x1636u
 #define DOS_MAX_BLOCKS 128u
 #define PSP 0x1000u
 #define DOS_BUILTIN_SEGMENT 0xf000u
@@ -81,6 +98,8 @@ typedef struct _DOS_VM {
   U32 Registers32[8];
   U32 Eip, Eflags, Cr0;
   U16 FpuControl, FpuStatus;
+  BOOLEAN FpuInitialized; /* host x87 state has been initialized for this DOS thread */
+  BOOLEAN FpuTraceLogged; /* one-time guest SS:SP diagnostic for first x87 instruction */
   DOS_TABLE_REGISTER Gdtr, Idtr;
   U16 Ldtr, Tr;
   U16 DpmiHostSelector;
@@ -105,17 +124,51 @@ typedef struct _DOS_VM {
   DOS_FILE *Files[20];
   DOS_BLOCK Blocks[DOS_MAX_BLOCKS];
   U16 InitialParagraphs;
+  U16 CurrentPsp; /* DOS current process, switchable by INT 21h/50h. */
   U16 CountryCode;
+  U32 ImageSize, ImageHash;
+  U16 DosVersion; /* INT 21h/AH=30 compatibility version (AL major, AH minor). */
+  BOOLEAN Dos4gImage;
   U8 CtrlBreak;
   U8 VideoMode;
   U8 VgaDac[768];
   U8 VgaPlanes[4][65536];
+  U8 VgaLatches[4];
   U8 VgaDacWriteIndex, VgaDacReadIndex, VgaDacComponent;
   U8 VgaAttributeIndex, VgaSequencerIndex, VgaGraphicsIndex, VgaCrtcIndex;
   U8 VgaDacMask, VgaSpeakerControl, VgaMiscOutput;
   U8 VgaAttribute[0x15], VgaSequencer[5], VgaGraphics[9], VgaCrtc[0x19];
   U8 VgaAttributeDataPhase;
   U8 KeyboardData, KeyboardDataReady;
+  U16 MouseX, MouseY, MouseMinX, MouseMaxX, MouseMinY, MouseMaxY;
+  U16 MouseLastX, MouseLastY;
+  U16 MouseHostX, MouseHostY;
+  U16 MouseMotionX, MouseMotionY;
+  U16 MouseCallbackOffset, MouseCallbackSegment, MouseCallbackMask;
+  struct { U16 Mask, Offset, Segment; } MouseAltCallbacks[3];
+  U8 MouseAltPendingEvents[3];
+  U16 MouseConditionalLeft, MouseConditionalTop;
+  U16 MouseConditionalRight, MouseConditionalBottom;
+  INT16 MouseHotX, MouseHotY;
+  U16 MouseAndMask[64][8], MouseXorMask[64][8];
+  U8 MouseCursorWidthWords, MouseCursorHeight;
+  U16 MouseSensitivityX, MouseSensitivityY, MouseDoubleSpeedThreshold;
+  U16 MouseRatioX, MouseRatioY;
+  U16 MouseTextScreenMask, MouseTextCursorMask;
+  U16 MouseSavePage;
+  U16 MousePressX[3], MousePressY[3], MouseReleaseX[3], MouseReleaseY[3];
+  U16 MousePressCount[3], MouseReleaseCount[3];
+  U8 MouseButtons, MouseLastButtons, MouseHideCount, MousePendingEvents;
+  U8 MousePage;
+  U8 MouseTextCursorType, MouseTextCursorStart, MouseTextCursorEnd;
+  BOOLEAN MouseConditionalOff, MouseDisabled;
+  BOOLEAN MouseCallbackActive;
+  U16 MouseCallbackReturnIp, MouseCallbackReturnCs, MouseCallbackSavedFlags;
+  U16 MouseCallbackSavedRegisters[8], MouseCallbackSavedSegments[6];
+  U32 MouseHostSeq;
+  U16 MouseVideoWidth, MouseVideoHeight;
+  BOOLEAN MouseInitialized;
+  BOOLEAN MouseWindowsVersionProbe;
   U8 PicMasterMask, PicSlaveMask;
   U8 PicMasterVectorBase, PicSlaveVectorBase;
   U8 PicMasterInitStep, PicSlaveInitStep;
@@ -124,6 +177,13 @@ typedef struct _DOS_VM {
   U8 PitLatched;
   U32 LastVideoTick, LastTimerTick, DosTimerPhase;
   U32 PortTraceCount;
+  U8 UartRegisters[2][8];
+  U8 UartRx[2][64], UartRxHead[2], UartRxTail[2];
+  U32 SerialMouseHostSeq;
+  INT32 SerialMouseHostX, SerialMouseHostY;
+  U8 SerialMouseButtons;
+  U8 SerialMouseUart;
+  BOOLEAN SerialMouseActive;
   BOOLEAN VideoActive;
   BOOLEAN VideoDirty;
   BOOLEAN KeyboardMirrorActive;
@@ -139,6 +199,7 @@ typedef struct _DOS_VM {
   U32 CurrentInstructionIp;
   U8 CurrentOpcode;
   U8 InterruptShadow;
+  U8 HardwarePollCountdown;
 } DOS_VM;
 
 static inline DOS_VM *current(void) {
@@ -170,8 +231,15 @@ static inline U16 rw(U16 s, U16 o) {
 }
 static inline void wb(U16 s, U16 o, U8 v) {
   U32 linear = addr(s, o);
-  if (linear >= 0xa0000u && linear < 0xb0000u) DosVideoWriteMemory(current(), linear, v);
-  else mem[linear] = v;
+  DOS_VM *vm = current();
+  if (linear >= 0xa0000u && linear < 0xb0000u)
+    DosVideoWriteMemory(vm, linear, v);
+  else {
+    mem[linear] = v;
+    if (vm->VideoMode >= 4u && vm->VideoMode <= 6u &&
+        linear >= 0xb8000u && linear < 0xbc000u)
+      vm->VideoDirty = TRUE;
+  }
 }
 static inline void ww(U16 s, U16 o, U16 v) {
   wb(s, o, (U8)v);
@@ -198,16 +266,36 @@ void output(U16 slot, const void *p, U32 n);
 void say(const char *s);
 void dos_name_mask(const char *source, char mask[11]);
 BOOLEAN dos_find_next(void);
+BOOLEAN dos_find_fcb(U16 source_segment, U16 source_offset, BOOLEAN first);
 void fail(const char *s);
 void dos_int(U8 n);
+void DosMousePoll(DOS_VM *vm);
+void DosMouseSetDefaultCursor(DOS_VM *vm);
+void DosMouseInitialize(DOS_VM *vm);
+void DosSerialMousePoll(DOS_VM *vm);
+BOOLEAN DosSerialMouseIrqPending(DOS_VM *vm, unsigned uart);
+BOOLEAN DosMouseDispatchCallback(DOS_VM *vm);
+BOOLEAN DosMouseCallbackReturn(DOS_VM *vm);
+void DosInitializeSystemData(DOS_VM *vm, const char *current_directory);
+void DosSyncSystemData(DOS_VM *vm, const char *current_directory);
+void DosUpdateSftEntry(DOS_VM *vm, U16 handle);
 U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width);
 void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width);
 void DosVideoSetMode(DOS_VM *vm, U8 mode);
+void DosVideoInherit(DOS_VM *destination, const DOS_VM *source);
+void DosVideoSetPaletteRegister(DOS_VM *vm, U8 index, U8 value);
+U8 DosVideoGetPaletteRegister(DOS_VM *vm, U8 index);
+void DosVideoWritePixel(DOS_VM *vm, U16 x, U16 y, U8 color);
+U8 DosVideoReadPixel(DOS_VM *vm, U16 x, U16 y);
 void DosVideoPresent(DOS_VM *vm);
 void DosVideoStop(DOS_VM *vm);
 BOOLEAN KbdInputEventAvailable(void);
 BOOLEAN KbdMirroredInputEventAvailable(void);
 void step(void);
+void step_vm(DOS_VM *vm);
+U32 DosCpuRunBatch(DOS_VM *vm, U32 max_steps);
+U32 DosImageHash(const U8 *image, U32 size);
+BOOLEAN DosImageIsDos4g(const U8 *image, U32 size);
 U8 run_vm(DOS_VM *vm);
 
 #endif

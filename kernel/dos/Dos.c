@@ -1,6 +1,45 @@
 /* DOS image loading and VM lifetime. */
 #include "Internal.h"
 
+
+static BOOLEAN dos_command_is_win100_bin(const char *command) {
+  if (!command) return FALSE;
+  const char *start = command;
+  if (*start == '"') start++;
+  const char *end = start;
+  while (*end && *end != '"' && *end != ' ' && *end != '\t') end++;
+  const char *base = start;
+  for (const char *p = start; p < end; p++)
+    if (*p == '\\' || *p == '/') base = p + 1;
+  static const char expected[] = "WIN100.BIN";
+  if ((SIZE_T)(end - base) != sizeof(expected) - 1) return FALSE;
+  for (SIZE_T i = 0; i < sizeof(expected) - 1; i++) {
+    char ch = base[i];
+    if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+    if (ch != expected[i]) return FALSE;
+  }
+  return TRUE;
+}
+
+U32 DosImageHash(const U8 *image, U32 size) {
+  /* FNV-1a is used only as a cheap identity check for the DOS/4GW self-exec
+   * bootstrap, not as a security primitive. */
+  U32 hash = 2166136261u;
+  for (U32 i = 0; i < size; i++) {
+    hash ^= image[i];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+BOOLEAN DosImageIsDos4g(const U8 *image, U32 size) {
+  static const U8 marker[] = {'D','O','S','/','4','G','W'};
+  if (!image || size < sizeof(marker)) return FALSE;
+  for (U32 i = 0; i <= size - sizeof(marker); i++)
+    if (!memcmp(image + i, marker, sizeof(marker))) return TRUE;
+  return FALSE;
+}
+
 U16 free_paragraphs_from(U16 start) {
   U16 end = 0xa000;
   for (unsigned i = 0; i < DOS_MAX_BLOCKS; i++)
@@ -60,15 +99,19 @@ static int load(const U8 *image, U32 size, const char *tail) {
     if (image_len + (U32)word(hdr + 0xa) * 16u > 0x8f000u)
       return 0;
     U32 base_paras = 0x10u + (image_len + 15u) / 16u;
-    /* Keep the conventional memory beyond minalloc available to INT 21h/48h.
-     * Programs that need a larger PSP block can grow it with AH=4Ah. */
-    U32 extra = word(hdr + 0x0a);
-    U32 total = base_paras + extra;
+    /* EXEC grants up to maxalloc, bounded by conventional memory. With both
+     * allocation fields zero, DOS grants the whole block and loads the image
+     * at its upper end (LINK /HIGH). WIN100.BIN uses that layout to build its
+     * own heap below the resident image. */
+    BOOLEAN load_high = !word(hdr + 0x0a) && !word(hdr + 0x0c);
+    U32 total = load_high ? 0x9000u : base_paras + word(hdr + 0x0c);
     if (total > 0x9000u)
       total = 0x9000u;
     if (total < base_paras + word(hdr + 0xa))
       return 0;
     current()->InitialParagraphs = (U16)total;
+    if (load_high)
+      load_seg = (U16)(PSP + total - (base_paras - 0x10u));
     seg[CS] = load_seg + word(hdr + 0x16);
     ip = word(hdr + 0x14);
     seg[SS] = load_seg + word(hdr + 0xe);
@@ -132,10 +175,13 @@ BOOLEAN DosIsImage(const char *filename, const UINT8 *image, SIZE_T size) {
       if (pe <= size && size - pe >= 4 && image[pe] == 'P' &&
           image[pe + 1] == 'E' && image[pe + 2] == 0 && image[pe + 3] == 0)
         return FALSE;
-      if (pe <= size && size - pe >= 2 &&
-          ((image[pe] == 'N' && image[pe + 1] == 'E') ||
-           (image[pe] == 'L' &&
-            (image[pe + 1] == 'E' || image[pe + 1] == 'X'))))
+      /* MZ/NE images (Windows 1.x/2.x) carry a real DOS-mode stub at
+       * CS:IP.  DOS must execute that stub so it can enter Windows mode;
+       * rejecting NE here makes WIN.COM report "Cannot find Windows startup
+       * files" before the Windows kernel gets control.  Continue rejecting
+       * PE and LE/LX images, which are not ordinary DOS MZ executables. */
+      if (pe <= size && size - pe >= 2 && image[pe] == 'L' &&
+          (image[pe + 1] == 'E' || image[pe + 1] == 'X'))
         return FALSE;
     }
     return TRUE;
@@ -160,6 +206,14 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
     return STATUS_NO_MEMORY;
   memset(vm, 0, sizeof(*vm));
   vm->CountryCode = 1; /* DOS default country: United States */
+  vm->CurrentPsp = PSP;
+  vm->ImageSize = (U32)size;
+  vm->ImageHash = DosImageHash(image, (U32)size);
+  /* Windows 1.x requires SETVER WIN100.BIN 3.34 under DOS 5+.  Scope
+   * the compatibility version to that image; all other programs still see
+   * DOS 5.00, and AX=3306h continues to expose the true version. */
+  vm->DosVersion = dos_command_is_win100_bin(command) ? 0x2203u : 0x0005u;
+  vm->Dos4gImage = DosImageIsDos4g(image, (U32)size);
   vm->FpuControl = 0x037f; /* reset x87 control word */
   vm->VideoMode = 3; /* 80x25 color text mode */
   vm->PicMasterMask = 0xfcu; /* BIOS leaves PIT and keyboard IRQs enabled */
@@ -176,15 +230,37 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
     return STATUS_NO_MEMORY;
   }
   memset(vm->Memory, 0, MEM_SIZE);
+  vm->Memory[0x41au] = vm->Memory[0x41cu] = 0x1eu;
+  vm->Memory[0x480u] = 0x1eu;
+  vm->Memory[0x482u] = 0x3eu;
+  vm->Memory[0x449u] = 3;
+  vm->Memory[0x44au] = 80;
   /* A zero-length DPMI state buffer makes the save/restore entry a RETF. */
   vm->Memory[0xf0000u + 0x0108u] = 0xcbu;
   for (unsigned vector = 0; vector < 256; vector++)
     vm->Memory[0xf0000u + 0x0200u + vector * 2u] = 0xcfu;
   for (unsigned vector = 0; vector < 32; vector++)
     vm->Memory[0xf0000u + 0x0400u + vector * 2u] = 0xcfu;
+  /* Default IRQ0 advances the BIOS tick counter and chains INT 1Ch. Keep
+   * this as guest code so saved vectors and guest hooks use normal IRET
+   * frames, including when Windows chains the original timer handler. */
+  static const U8 bios_timer[] = {
+    0x50, 0x1e,                   /* push ax; push ds */
+    0x31, 0xc0, 0x8e, 0xd8,       /* xor ax,ax; mov ds,ax */
+    0xff, 0x06, 0x6c, 0x04,       /* inc word [046Ch] */
+    0x75, 0x04,                   /* jnz tick_done */
+    0xff, 0x06, 0x6e, 0x04,       /* inc word [046Eh] */
+    0xcd, 0x1c,                   /* tick_done: int 1Ch */
+    0x1f, 0x58, 0xcf              /* pop ds; pop ax; iret */
+  };
+  memcpy(vm->Memory + 0xf1800u, bios_timer, sizeof(bios_timer));
+  vm->Memory[0x08u * 4u + 1u] = 0x18u;
+  vm->Memory[0x08u * 4u + 3u] = 0xf0u;
   /* Each BIOS/DOS entry needs its own stable address: extenders save IVT
    * pointers and call them later with DPMI 0301/0302. */
-  static const U8 builtin_vectors[] = {0x10, 0x15, 0x16, 0x20, 0x21, 0x29, 0x2f};
+  static const U8 builtin_vectors[] = {
+    0x09, 0x10, 0x15, 0x16, 0x20, 0x21, 0x29, 0x2f, 0x33
+  };
   for (unsigned i = 0; i < sizeof(builtin_vectors); i++) {
     unsigned vector = builtin_vectors[i];
     U16 offset = DOS_BUILTIN_OFFSET(vector);
@@ -209,6 +285,9 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
       p++;
   PVOID previous = KeGetCurrentThread()->DosContext;
   KeGetCurrentThread()->DosContext = vm;
+  /* Install and initialize the resident DOS mouse interface before the
+   * program starts. Windows 1.x checks the INT 33h vector while loading. */
+  DosMouseInitialize(vm);
   int ok = load(image, (U32)size, p);
   if (ok) {
     static const U8 prefix[] = {'P','A','T','H','=','C',':','\\',0,0,1,0};
@@ -224,6 +303,10 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
     }
     vm->Memory[base + sizeof(prefix) + i] = 0;
     ww(PSP, 0x2c, DOS_ENV_SEGMENT);
+    const char *cwd = KeGetCurrentThread()->Process
+                          ? KeGetCurrentThread()->Process->CurrentDirectory
+                          : "C:\\";
+    DosInitializeSystemData(vm, cwd);
   }
   KeGetCurrentThread()->DosContext = previous;
   if (!ok) {
@@ -249,18 +332,24 @@ void DosDestroyVm(PVOID context) {
 }
 
 U8 run_vm(DOS_VM *vm) {
-  if (vm && !vm->KeyboardMirrorActive) {
+  if (!vm) return 0;
+  if (!vm->KeyboardMirrorActive) {
     KbdInputMirrorAcquire();
     vm->KeyboardMirrorActive = TRUE;
   }
-  /* Interactive DOS programs run until they exit. An instruction count is
-   * a scheduling boundary, not a lifetime limit for games. */
-  while (running) {
-    steps++;
-    step();
-    if (!(steps & 0x3fffu)) KeYield();
+  /* Keep the DOS context in a local pointer throughout the hot instruction
+   * loop instead of looking it up again for every guest instruction. */
+  while (vm->Running) {
+    /* Execute a short batch inside Cpu.c. This removes the cross-module
+     * run-loop call from every guest instruction without changing instruction
+     * boundaries, virtual IRQ polling, or the kernel timer's preemption. */
+    if (!DosCpuRunBatch(vm, DOS_CPU_BATCH_SIZE)) break;
+    /* The timer IRQ enforces the normal kernel-thread quantum.  A periodic
+     * cooperative yield is only a long-run safety valve for unusual systems
+     * where the timer is masked. The batch size divides this interval. */
+    if (!(vm->Steps & 0xfffffu)) KeYield();
   }
-  return (U8)exit_code;
+  return (U8)vm->ExitCode;
 }
 
 void DosRun(PVOID context) {

@@ -87,6 +87,7 @@ BOOLEAN transfer(U16 slot, void *buffer, U32 length, U32 *done,
         f->Data = next;
       }
       f->Size = f->Position;
+      DosUpdateSftEntry(current(), slot);
       return TRUE;
     }
     SIZE_T end = f->Position + length;
@@ -116,6 +117,7 @@ BOOLEAN transfer(U16 slot, void *buffer, U32 length, U32 *done,
       memcpy(buffer, f->Data + f->Position, *done);
     f->Position += *done;
   }
+  DosUpdateSftEntry(current(), slot);
   return TRUE;
 }
 void output(U16 slot, const void *p, U32 n) {
@@ -212,6 +214,57 @@ BOOLEAN dos_find_next(void) {
       i++;
     }
     wb(s, (U16)(o + 0x1e + i), 0);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/* FCB searches return a drive byte followed by a raw 32-byte directory entry,
+ * with a seven-byte prefix for extended FCBs (DOS 3.3 reference, AH=11h).
+ * Store the enumeration cursor in the unopened FCB's DOS-reserved area so
+ * callers can switch DTAs or interleave separate searches. */
+BOOLEAN dos_find_fcb(U16 source_segment, U16 source_offset, BOOLEAN first) {
+  DOS_VM *vm = current();
+  BOOLEAN extended = rb(source_segment, source_offset) == 0xffu;
+  U8 attributes = extended ? rb(source_segment, (U16)(source_offset + 6u)) : 0;
+  U16 fcb = (U16)(source_offset + (extended ? 7u : 0u));
+  U8 drive = rb(source_segment, fcb);
+  if (drive && drive != 3u) return FALSE;
+  char pattern[11];
+  for (unsigned i = 0; i < 11; i++)
+    pattern[i] = (char)dos_upper(rb(source_segment, (U16)(fcb + 1u + i)));
+  U32 index = first ? 0 : (U32)rw(source_segment, (U16)(fcb + 0x10u)) |
+      ((U32)rw(source_segment, (U16)(fcb + 0x12u)) << 16);
+  const char *directory = KeGetCurrentThread()->Process->CurrentDirectory;
+  FAT_FIND_DATA entry;
+  while (NT_SUCCESS(FatEnumerateDirectory(directory, index++, &entry))) {
+    U8 attr = (U8)entry.Attributes;
+    if (attributes & 8u) {
+      if (!(attr & 8u)) continue;
+    } else {
+      if (attr & 8u) continue;
+      if ((attr & 0x16u) & ~attributes) continue;
+    }
+    if (!dos_match(pattern, entry.ShortName)) continue;
+    ww(source_segment, (U16)(fcb + 0x10u), (U16)index);
+    ww(source_segment, (U16)(fcb + 0x12u), (U16)(index >> 16));
+    U16 s = vm->DtaSegment, o = vm->DtaOffset;
+    for (unsigned i = 0; i < (extended ? 40u : 33u); i++)
+      wb(s, (U16)(o + i), 0);
+    if (extended) {
+      wb(s, o, 0xffu);
+      wb(s, (U16)(o + 6u), attributes);
+      o = (U16)(o + 7u);
+    }
+    wb(s, o, 3u);
+    char name[11];
+    dos_name_mask(entry.ShortName, name);
+    for (unsigned i = 0; i < 11; i++) wb(s, (U16)(o + 1u + i), (U8)name[i]);
+    wb(s, (U16)(o + 12u), attr);
+    ww(s, (U16)(o + 23u), entry.WriteTime);
+    ww(s, (U16)(o + 25u), entry.WriteDate);
+    ww(s, (U16)(o + 29u), (U16)entry.Size);
+    ww(s, (U16)(o + 31u), (U16)(entry.Size >> 16));
     return TRUE;
   }
   return FALSE;

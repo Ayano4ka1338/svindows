@@ -112,6 +112,198 @@ def dpmi_info_test() -> bytes:
     return bytes(code) + ok + b"\0" + bad + b"$"
 
 
+def fcb_parse_test() -> bytes:
+    # INT 21h/AH=29h parses a DOS 8.3 filespec into an unopened FCB.
+    # AL=01h also verifies that leading separators are skipped and SI is
+    # returned at the first byte after the filespec.
+    code = bytearray(b"\x0e\x1f\x0e\x07")  # DS=ES=CS
+    code += b"\xbe\x00\x00"  # mov si, filespec (patched below)
+    si_patch = 5
+    code += b"\xbf\x00\x00"  # mov di, FCB (patched below)
+    di_patch = 8
+    code += b"\xb8\x01\x29\xcd\x21"  # AX=2901h / INT 21h
+
+    failure_branches: list[int] = []
+
+    def jne_fail() -> None:
+        failure_branches.append(len(code) + 1)
+        code.extend(b"\x75\x00")
+
+    code += b"\x3c\x00"  # cmp al,00h: no wildcards
+    jne_fail()
+    code += b"\x26\x80\x3d\x03"  # ES:[DI] = drive C (3)
+    jne_fail()
+    expected = {1: ord('W'), 2: ord('I'), 3: ord('N'),
+                4: ord(' '), 5: ord(' '), 6: ord(' '), 7: ord(' '),
+                8: ord(' '), 9: ord('C'), 10: ord('O'), 11: ord('M')}
+    for offset, value in expected.items():
+        code += bytes((0x26, 0x80, 0x7d, offset, value))
+        jne_fail()
+    # SI must point at the space immediately after C:WIN.COM.
+    code += b"\x81\xfe\x00\x00"  # cmp si, filespec+10 (patched below)
+    si_result_patch = len(code) - 2
+    jne_fail()
+
+    success = len(code)
+    code += b"\xba\x00\x00\xb4\x09\xcd\x21"  # print PASS
+    success_dx_patch = success + 1
+    code += b"\xb8\x00\x4c\xcd\x21"  # exit 0
+    failure = len(code)
+    code += b"\xba\x00\x00\xb4\x09\xcd\x21"  # print FAIL
+    failure_dx_patch = failure + 1
+    code += b"\xb8\x01\x4c\xcd\x21"  # exit 1
+
+    spec = b" C:WIN.COM tail\x00"
+    ok = b"DOS-FCB PASS: INT 21h AH=29h\r\n$"
+    bad = b"DOS-FCB FAIL: INT 21h AH=29h\r\n$"
+    spec_offset = 0x100 + len(code)
+    fcb_offset = spec_offset + len(spec)
+    ok_offset = fcb_offset + 37
+    bad_offset = ok_offset + len(ok)
+
+    code[si_patch:si_patch + 2] = spec_offset.to_bytes(2, "little")
+    code[di_patch:di_patch + 2] = fcb_offset.to_bytes(2, "little")
+    code[si_result_patch:si_result_patch + 2] = (spec_offset + 10).to_bytes(2, "little")
+    code[success_dx_patch:success_dx_patch + 2] = ok_offset.to_bytes(2, "little")
+    code[failure_dx_patch:failure_dx_patch + 2] = bad_offset.to_bytes(2, "little")
+    for patch in failure_branches:
+        code[patch] = (failure - (patch + 1)) & 0xff
+    return bytes(code) + spec + (b"\x00" * 37) + ok + bad
+
+
+
+def ff_group_test() -> bytes:
+    """Exercise 386 operand-size forms of the real-mode FF/8F/C7 groups."""
+    code = bytearray()
+    data_refs: list[tuple[int, str]] = []
+    jne_refs: list[int] = []
+    near_refs: list[tuple[int, str]] = []
+
+    def emit_abs(prefix: bytes, opcode: bytes, modrm: int, key: str,
+                 suffix: bytes = b"") -> None:
+        code.extend(prefix + opcode + bytes((modrm,)))
+        data_refs.append((len(code), key))
+        code.extend(b"\x00\x00")
+        code.extend(suffix)
+
+    def mov_dword_imm(key: str, value: int | None = None,
+                      label: str | None = None) -> None:
+        code.extend(b"\x66\xc7\x06")
+        data_refs.append((len(code), key))
+        code.extend(b"\x00\x00")
+        if label is not None:
+            near_refs.append((len(code), label))
+            code.extend(b"\x00\x00\x00\x00")
+        else:
+            code.extend(int(value or 0).to_bytes(4, "little"))
+
+    def cmp_eax(value: int) -> None:
+        code.extend(b"\x66\x3d" + value.to_bytes(4, "little"))
+        jne_refs.append(len(code) + 1)
+        code.extend(b"\x75\x00")
+
+    # FF /6 PUSH dword [value], followed by 8F /0 POP dword [result].
+    mov_dword_imm("value", 0x12345678)
+    emit_abs(b"\x66", b"\xff", 0x36, "value")
+    code.extend(b"\x66\x31\xc0")  # xor eax,eax
+    emit_abs(b"\x66", b"\x8f", 0x06, "result")
+    code.extend(b"\x66\xa1")
+    data_refs.append((len(code), "result")); code.extend(b"\x00\x00")
+    cmp_eax(0x12345678)
+
+    # FF /0 INC and /1 DEC must operate on the full dword and preserve CF.
+    mov_dword_imm("value", 1)
+    code.extend(b"\xf9")  # stc: INC must preserve CF
+    emit_abs(b"\x66", b"\xff", 0x06, "value")
+    jne_refs.append(len(code) + 1)
+    code.extend(b"\x73\x00")  # jnc fail
+    code.extend(b"\x66\xa1")
+    data_refs.append((len(code), "value")); code.extend(b"\x00\x00")
+    cmp_eax(2)
+    code.extend(b"\xf9")  # stc: DEC must preserve CF
+    emit_abs(b"\x66", b"\xff", 0x0e, "value")
+    jne_refs.append(len(code) + 1)
+    code.extend(b"\x73\x00")  # jnc fail
+    code.extend(b"\x66\xa1")
+    data_refs.append((len(code), "value")); code.extend(b"\x00\x00")
+    cmp_eax(1)
+
+    # FF /2 indirect CALL with a 32-bit return address, paired with 66 C3.
+    mov_dword_imm("near_ptr", label="near_callee")
+    emit_abs(b"\x66", b"\xff", 0x16, "near_ptr")
+
+    # FF /3 far CALL m16:32; the callee returns with operand-size 32 RETF.
+    mov_dword_imm("far_ptr", label="far_callee")
+    code.extend(b"\x8c\xc8\xa3")  # mov ax,cs / mov [far_ptr+4],ax
+    data_refs.append((len(code), "far_segment")); code.extend(b"\x00\x00")
+    emit_abs(b"\x66", b"\xff", 0x1e, "far_ptr")
+
+    # FF /4 near JMP must skip the fail sentinel and land at near_jump_ok.
+    mov_dword_imm("near_ptr", label="near_jump_ok")
+    emit_abs(b"\x66", b"\xff", 0x26, "near_ptr")
+    near_fail_patch = len(code) + 1
+    code.extend(b"\xe9\x00\x00")
+    near_jump_ok = len(code)
+
+    # FF /5 far JMP m16:32 must skip a second fail sentinel.
+    mov_dword_imm("far_ptr", label="success")
+    code.extend(b"\x8c\xc8\xa3")
+    data_refs.append((len(code), "far_segment")); code.extend(b"\x00\x00")
+    emit_abs(b"\x66", b"\xff", 0x2e, "far_ptr")
+    far_fail_patch = len(code) + 1
+    code.extend(b"\xe9\x00\x00")
+
+    # These are the targets of the two indirect calls. 32-bit RET/RETF must
+    # consume two/four-byte stack slots, not silently pop only 16 bits.
+    near_callee = len(code)
+    code.extend(b"\x66\xc3")
+    far_callee = len(code)
+    code.extend(b"\x66\xcb")
+
+    success = len(code)
+    code.extend(b"\xba\x00\x00\xb4\x09\xcd\x21")
+    success_dx = success + 1
+    code.extend(b"\xb8\x00\x4c\xcd\x21")
+    failure = len(code)
+    code.extend(b"\xba\x00\x00\xb4\x09\xcd\x21")
+    failure_dx = failure + 1
+    code.extend(b"\xb8\x01\x4c\xcd\x21")
+
+    data_start = len(code)
+    data_offsets = {
+        "value": data_start,
+        "result": data_start + 4,
+        "near_ptr": data_start + 8,
+        "far_ptr": data_start + 12,
+        "far_segment": data_start + 16,
+    }
+    code.extend(b"\x00" * 18)
+    message_ok = b"DOS-FF PASS: FF groups and 32-bit stack\r\n$"
+    message_fail = b"DOS-FF FAIL: FF groups or stack width\r\n$"
+    ok_offset = len(code)
+    code.extend(message_ok)
+    fail_offset = len(code)
+    code.extend(message_fail)
+
+    labels = {
+        "near_callee": near_callee,
+        "far_callee": far_callee,
+        "near_jump_ok": near_jump_ok,
+        "success": success,
+    }
+    for at, key in data_refs:
+        absolute = 0x100 + data_offsets[key]
+        code[at:at + 2] = absolute.to_bytes(2, "little")
+    for at, label in near_refs:
+        code[at:at + 4] = (0x100 + labels[label]).to_bytes(4, "little")
+    for patch in jne_refs:
+        code[patch] = (failure - (patch + 1)) & 0xff
+    code[near_fail_patch:near_fail_patch + 2] = (failure - (near_fail_patch + 2)).to_bytes(2, "little", signed=True)
+    code[far_fail_patch:far_fail_patch + 2] = (failure - (far_fail_patch + 2)).to_bytes(2, "little", signed=True)
+    code[success_dx:success_dx + 2] = (0x100 + ok_offset).to_bytes(2, "little")
+    code[failure_dx:failure_dx + 2] = (0x100 + fail_offset).to_bytes(2, "little")
+    return bytes(code)
+
 def mz_smoke() -> bytes:
     # A tiny MZ EXE. CS:IP points at the body; DS is initialized from CS.
     body = bytearray(b"\x0E\x1F\xBA\x00\x00\xB4\x09\xCD\x21\xB8\x00\x4C\xCD\x21")
@@ -146,11 +338,13 @@ def build(output: Path) -> None:
         "COMSMOKE.COM": com_psp_smoke(),
         "MEMSMOKE.COM": dos_memory_test(),
         "DPMIINFO.COM": dpmi_info_test(),
+        "FCBPARSE.COM": fcb_parse_test(),
+        "FFGROUP.COM": ff_group_test(),
         "MZSMOKE.EXE": mz_smoke(),
     }
     for name, data in files.items():
         (output / name).write_bytes(data)
-    (output / ".ready").write_text("DOS compatibility probes v1\n", encoding="ascii")
+    (output / ".ready").write_text("DOS compatibility probes v3 - FCB and FF group\n", encoding="ascii")
 
     # DOS command prompt batch script is intended to be invoked from C:\\.
     (output / "DOSCHECK.BAT").write_text(
@@ -159,13 +353,15 @@ def build(output: Path) -> None:
         "C:\\TESTS\\COMSMOKE.COM\r\n"
         "C:\\TESTS\\MEMSMOKE.COM\r\n"
         "C:\\TESTS\\DPMIINFO.COM\r\n"
+        "C:\\TESTS\\FCBPARSE.COM\r\n"
+        "C:\\TESTS\\FFGROUP.COM\r\n"
         "C:\\TESTS\\MZSMOKE.EXE\r\n",
         encoding="ascii",
     )
 
 
 def verify(output: Path) -> None:
-    expected = {"COMSMOKE.COM", "MEMSMOKE.COM", "DPMIINFO.COM", "MZSMOKE.EXE"}
+    expected = {"COMSMOKE.COM", "MEMSMOKE.COM", "DPMIINFO.COM", "FCBPARSE.COM", "FFGROUP.COM", "MZSMOKE.EXE"}
     missing = expected - {p.name for p in output.iterdir()}
     if missing:
         raise RuntimeError("missing test binaries: " + ", ".join(sorted(missing)))
@@ -173,6 +369,15 @@ def verify(output: Path) -> None:
         data = (output / name).read_bytes()
         if name.endswith(".COM") and not (1 <= len(data) <= 0xff00):
             raise RuntimeError(f"invalid COM test size: {name}")
+        if name == "FCBPARSE.COM" and b" C:WIN.COM tail\x00" not in data:
+            raise RuntimeError("FCB parse probe is missing its filespec")
+        if name == "FFGROUP.COM":
+            for signature in (b"\x66\xff\x36", b"\x66\x8f\x06",
+                              b"\x66\xff\x16", b"\x66\xff\x1e",
+                              b"\x66\xff\x26", b"\x66\xff\x2e",
+                              b"\x66\xc3", b"\x66\xcb"):
+                if signature not in data:
+                    raise RuntimeError(f"FF group probe missing instruction {signature.hex()}")
         if name == "MZSMOKE.EXE":
             if len(data) != 512 or data[:2] != b"MZ" or int.from_bytes(data[4:6], "little") != 1:
                 raise RuntimeError("invalid generated MZ test header")
