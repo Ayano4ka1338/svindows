@@ -3992,7 +3992,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
                         lane_bits == 16u ? (INT16)left > (INT16)right :
                                            (INT32)left > (INT32)right;
           int compare_equal = extension >= 0x74u;
-          result |= (compare_equal ? equal : greater ? 1u : 0u)
+          result |= (compare_equal ? (unsigned int)equal : greater ? 1u : 0u)
                     ? mask << shift : 0;
         }
         vm->MmxRegisters[m.reg] = result;
