@@ -1,8 +1,12 @@
 /* Linux Unix98 pseudo terminals. The two byte streams stay in the Linux ABI. */
 #include "Internal.h"
 #include <svindows/Ex.h>
+#include <svindows/Console.h>
 #include <svindows/Io.h>
+#include <svindows/Ob.h>
+#include <svindows/Ps.h>
 #include <svindows/Rtl.h>
+#include <nt/Ntstatus.h>
 
 #define PTY_LIMIT 16u
 #define PTY_CAPACITY 8192u
@@ -13,8 +17,10 @@
 #define LINUX_OPOST 0x1u
 #define LINUX_ONLCR 0x4u
 #define LINUX_ICANON 0x2u
+#define LINUX_ISIG 0x1u
 #define LINUX_ECHO 0x8u
 #define LINUX_ECHOE 0x10u
+#define LINUX_NOFLSH 0x80u
 
 #define LINUX_TCGETS 0x5401u
 #define LINUX_TCSETS 0x5402u
@@ -57,6 +63,7 @@ typedef struct _PTY_WINSIZE {
 typedef struct _LINUX_PTY {
     UINT32 Number, References, MasterCount, SlaveCount;
     UINT32 ForegroundGroup, SessionId;
+    POBJECT WindowsForegroundProcess;
     BOOLEAN Locked, PacketMode, EofPending;
     PTY_TERMIOS Termios;
     PTY_WINSIZE Size;
@@ -69,6 +76,17 @@ _Static_assert(sizeof(PTY_TERMIOS) == 36, "Linux termios ABI");
 _Static_assert(sizeof(PTY_WINSIZE) == 8, "Linux winsize ABI");
 
 static LINUX_PTY *g_ptys[PTY_LIMIT];
+
+BOOLEAN LinuxPtyOwnsForegroundProcess(struct _LINUX_PTY *opaque,
+                                      LINUX_PROCESS_CONTEXT *process,
+                                      UINT32 process_group)
+{
+    LINUX_PTY *pty = (LINUX_PTY *)opaque;
+    return pty && process && process_group &&
+           process->ControllingPty == opaque &&
+           process->SessionId == pty->SessionId &&
+           process->ProcessGroupId == process_group;
+}
 
 static BOOLEAN pty_path_equals(const char *a, const char *b)
 {
@@ -228,14 +246,18 @@ void LinuxPtyControlInherit(struct _LINUX_PTY *object)
 static void pty_release(LINUX_PTY *pty, INT32 endpoint)
 {
     BOOLEAN free_pty = FALSE;
+    POBJECT foreground = NULL;
     UINT64 irq = KiIrqSave();
     if (endpoint == 1 && pty->MasterCount) pty->MasterCount--;
     if (endpoint == 0 && pty->SlaveCount) pty->SlaveCount--;
     if (--pty->References == 0) {
         g_ptys[pty->Number] = NULL;
+        foreground = pty->WindowsForegroundProcess;
+        pty->WindowsForegroundProcess = NULL;
         free_pty = TRUE;
     }
     KiIrqRestore(irq);
+    if (foreground) ObDereferenceObject(foreground);
     if (free_pty) ExFreePool(pty);
 }
 
@@ -289,18 +311,47 @@ static void pty_echo(LINUX_PTY *pty, UINT8 ch)
 
 static BOOLEAN pty_input(LINUX_PTY *pty, UINT8 ch)
 {
-    /* VINTR is a control event, not part of the canonical input line. The
-     * command processor consumes it as Ctrl+C and resets its active editor. */
-    if ((pty->Termios.Local & 0x0001u) &&
+    /* PE programs reached through xterm use the Windows console API. Keep
+     * their foreground child attached to this PTY, so its VINTR cannot be
+     * mistaken for Ctrl+C in the hidden/native console. */
+    if (pty->Termios.Characters[0] && ch == pty->Termios.Characters[0]) {
+        UINT64 irq = KiIrqSave();
+        POBJECT foreground = pty->WindowsForegroundProcess;
+        if (foreground) pty->WindowsForegroundProcess = NULL;
+        KiIrqRestore(irq);
+        if (foreground && (pty->Termios.Local & LINUX_ECHO)) {
+            pty_put(&pty->ToMaster, '^');
+            pty_put(&pty->ToMaster, 'C');
+            pty_put(&pty->ToMaster, '\r');
+            pty_put(&pty->ToMaster, '\n');
+        }
+        if (foreground) {
+            PKPROCESS target = PsGetProcessFromObject(foreground);
+            if (target) (void)KeTerminateProcess(target, STATUS_CONTROL_C_EXIT);
+            ObDereferenceObject(foreground);
+            return TRUE;
+        }
+    }
+
+    /* VINTR is handled by the terminal line discipline: discard the current
+     * canonical line, echo the conventional marker, and interrupt the
+     * foreground process group instead of making ^C readable stdin data. */
+    if ((pty->Termios.Local & LINUX_ISIG) &&
+        pty->Termios.Characters[0] &&
         ch == pty->Termios.Characters[0]) {
         pty->LineLength = 0;
-        if (!pty_put(&pty->ToSlave, ch)) return FALSE;
+        if (!(pty->Termios.Local & LINUX_NOFLSH)) {
+            memset(&pty->ToSlave, 0, sizeof(pty->ToSlave));
+            memset(&pty->ToMaster, 0, sizeof(pty->ToMaster));
+        }
         if (pty->Termios.Local & LINUX_ECHO) {
             pty_put(&pty->ToMaster, '^');
             pty_put(&pty->ToMaster, 'C');
             pty_put(&pty->ToMaster, '\r');
             pty_put(&pty->ToMaster, '\n');
         }
+        LinuxSignalProcessGroup(pty, pty->ForegroundGroup,
+                               STATUS_CONTROL_C_EXIT);
         return TRUE;
     }
     if (ch == '\r' && (pty->Termios.Input & LINUX_ICRNL)) ch = '\n';
@@ -506,10 +557,24 @@ UINT64 LinuxPtyIoctl(PKPROCESS process, UINT64 fd, UINT64 command,
         return 0;
     case LINUX_TIOCSPGRP:
         if (!MmProbeForRead(argument, sizeof(INT32))) return LinuxError(LINUX_EFAULT);
-        pty->ForegroundGroup = *(const INT32 *)(ULONG_PTR)argument;
+        {
+            INT32 group = *(const INT32 *)(ULONG_PTR)argument;
+            LINUX_PROCESS_CONTEXT *context = process->LinuxContext;
+            if (group <= 0 || context->ControllingPty != pty ||
+                context->SessionId != pty->SessionId)
+                return LinuxError(LINUX_EPERM);
+            pty->ForegroundGroup = (UINT32)group;
+        }
         return 0;
     case LINUX_TIOCSCTTY:
         if (entry->PtyMaster) return LinuxError(LINUX_ENOTTY);
+        /* A controlling terminal belongs to a session, and only its leader
+         * may acquire one. A random X client sharing a numeric pgid must not
+         * be able to replace the terminal's foreground job. */
+        if (process->LinuxContext->SessionId != process->ProcessId)
+            return LinuxError(LINUX_EPERM);
+        if (pty->SessionId && pty->SessionId != process->LinuxContext->SessionId)
+            return LinuxError(LINUX_EPERM);
         if (process->LinuxContext->ControllingPty != pty) {
             LinuxPtyControlInherit(pty);
             if (process->LinuxContext->ControllingPty)
@@ -629,8 +694,42 @@ static void pty_bridge_prepare_windows(void *raw)
      * the slave delivers raw keystrokes. ICRNL stays enabled: xterm sends CR
      * for Enter while cmd.exe expects LF. */
     bridge->Pty->Termios.Local &=
-        ~(LINUX_ICANON | LINUX_ECHO | LINUX_ECHOE);
+        ~(LINUX_ICANON | LINUX_ISIG | LINUX_ECHO | LINUX_ECHOE);
     KiIrqRestore(irq);
+}
+
+static NTSTATUS pty_bridge_console_control(void *raw, UINT32 operation,
+                                           UINT64 argument1,
+                                           UINT64 argument2,
+                                           UINT64 argument3,
+                                           UINT64 *result)
+{
+    (void)argument2;
+    (void)argument3;
+    (void)result;
+    LINUX_PTY_BRIDGE *bridge = raw;
+    if (!bridge || bridge->Master || operation !=
+        ConsoleControlSetForegroundProcess)
+        return STATUS_INVALID_PARAMETER;
+
+    POBJECT replacement = NULL;
+    if (argument1) {
+        NTSTATUS status = ObReferenceObjectByHandle(
+            (HANDLE)(UINT_PTR)argument1, 0, NULL, &replacement);
+        if (!NT_SUCCESS(status)) return status;
+        if (!PsGetProcessFromObject(replacement)) {
+            ObDereferenceObject(replacement);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    LINUX_PTY *pty = (LINUX_PTY *)bridge->Pty;
+    UINT64 irq = KiIrqSave();
+    POBJECT previous = pty->WindowsForegroundProcess;
+    pty->WindowsForegroundProcess = replacement;
+    KiIrqRestore(irq);
+    if (previous) ObDereferenceObject(previous);
+    return STATUS_SUCCESS;
 }
 
 static void pty_bridge_close(void *raw)
@@ -646,6 +745,7 @@ static const IO_CHAR_DEVICE_OPS g_pty_bridge_ops = {
     .InputAvailable = pty_bridge_input_available,
     .Write = pty_bridge_write,
     .PrepareWindows = pty_bridge_prepare_windows,
+    .ConsoleControl = pty_bridge_console_control,
     .Close = pty_bridge_close,
 };
 

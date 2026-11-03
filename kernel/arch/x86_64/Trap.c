@@ -341,6 +341,12 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
     /* CR2 is volatile across page faults. Snapshot it before any diagnostic
        helper or exception dispatch can touch pageable/user memory. */
     UINT64 fault_address = frame && frame->vector == 14 ? read_cr2() : 0;
+    /* Private SMP wake/IPI vector. The parked AP will recheck its release
+     * state after iret; no scheduler work is done on this early path. */
+    if (frame->vector == HAL_SMP_WAKE_VECTOR) {
+        HalLocalApicEoi();
+        return;
+    }
     /* Hardware IRQs (remapped to vectors 32..47) go to the HAL, which EOIs the
      * PIC and runs the registered handler (e.g. the scheduler tick). */
     if (frame->vector >= IRQ_BASE_VECTOR && frame->vector < IRQ_BASE_VECTOR + 16) {

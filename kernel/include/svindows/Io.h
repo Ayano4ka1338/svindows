@@ -151,6 +151,9 @@ typedef struct _IO_CHAR_DEVICE_OPS {
     BOOLEAN (*InputAvailable)(void *context);
     SIZE_T (*Write)(void *context, const void *buffer, SIZE_T length);
     void (*PrepareWindows)(void *context); /* Windows-console semantics */
+    NTSTATUS (*ConsoleControl)(void *context, UINT32 operation,
+                               UINT64 argument1, UINT64 argument2,
+                               UINT64 argument3, UINT64 *result);
     void (*Close)(void *context);
 } IO_CHAR_DEVICE_OPS;
 

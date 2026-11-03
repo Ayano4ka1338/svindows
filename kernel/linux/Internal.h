@@ -320,6 +320,11 @@ UINT32 LinuxVtPoll(PKPROCESS process, UINT64 fd);
 BOOLEAN LinuxPtyPath(const char *path, UINT32 *number, BOOLEAN *master);
 BOOLEAN LinuxPtyControllingPath(const char *path);
 BOOLEAN LinuxPtyExists(UINT32 number);
+void LinuxSignalProcessGroup(struct _LINUX_PTY *pty, UINT32 process_group,
+                             NTSTATUS exit_status);
+BOOLEAN LinuxPtyOwnsForegroundProcess(struct _LINUX_PTY *pty,
+                                      LINUX_PROCESS_CONTEXT *process,
+                                      UINT32 process_group);
 NTSTATUS LinuxPtyCreateBridgeFile(struct _LINUX_PTY *pty, BOOLEAN master,
                                   HANDLE *out);
 UINT64 LinuxPtyOpen(PKPROCESS process, UINT64 slot, UINT32 number,
@@ -352,6 +357,7 @@ UINT64 LinuxFramebufferPhysicalAddress(void);
 typedef struct _LINUX_EVENT_DEVICE {
     BOOLEAN Present;
     BOOLEAN Open;                 /* exclusive-ish single opener */
+    volatile UINT32 OpenReferences;
     char Name[LINUX_EVENT_NAME_LENGTH];
     UINT16 Bus, Vendor, Product, Version;
     UINT64 Capabilities[8];       /* EV_* bitmasks, bit n => EV_* bit n   */
@@ -374,5 +380,6 @@ const LINUX_EVENT_DEVICE *LinuxEventDevice(UINT32 index);
 void LinuxEventSetOpen(UINT32 index, BOOLEAN open);
 void LinuxInputInitialize(void);
 void LinuxInputPump(void);
+BOOLEAN LinuxInputKeyboardActive(void);
 
 #endif

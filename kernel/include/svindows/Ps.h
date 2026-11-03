@@ -158,6 +158,7 @@ NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
 BOOLEAN PsIsProcessObjectType(struct _OBJECT_TYPE *type);
 UINT64 NtOpenProcess(UINT64 *args);
 PKPROCESS PsGetProcessFromObject(PVOID object);
+void *PsReferenceNextProcess(ULONG after_process_id, ULONG *process_id);
 
 /* Create a notification (manual-reset) Event object and a handle to it in the
  * current process, for kernel-owned events ring 3 must be able to wait on --

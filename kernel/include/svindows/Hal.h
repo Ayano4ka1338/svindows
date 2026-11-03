@@ -126,6 +126,7 @@ void HalConsoleWrite(const char *s);
 
 /* Hardware IRQs are remapped to CPU vectors IRQ_BASE_VECTOR .. +15. */
 #define IRQ_BASE_VECTOR 32
+#define HAL_SMP_WAKE_VECTOR 0xF1
 
 typedef void (*HAL_IRQ_HANDLER)(void);
 
@@ -139,6 +140,22 @@ void HalRegisterIrqHandler(UINT8 irq, HAL_IRQ_HANDLER handler);
  * (before running the handler, so a handler that context-switches away still
  * unblocks the PIC) and invokes any registered handler. */
 void HalDispatchIrq(UINT8 irq);
+
+/* ACPI MADT processor topology, used by the x86-64 SMP bring-up path. */
+#define HAL_MAXIMUM_PROCESSORS 64u
+typedef struct _HAL_PROCESSOR_INFO {
+    UINT32 ApicId;
+    UINT32 AcpiProcessorId;
+    BOOLEAN BootstrapProcessor;
+} HAL_PROCESSOR_INFO;
+BOOLEAN HalDiscoverProcessors(UINT64 multiboot_info_phys);
+UINT32 HalGetProcessorCount(void);
+const HAL_PROCESSOR_INFO *HalGetProcessorInfo(UINT32 index);
+BOOLEAN HalInitializeLocalApic(void);
+void HalLocalApicEoi(void);
+BOOLEAN HalSendIpi(UINT32 apic_id, UINT8 vector);
+BOOLEAN HalSendInitIpi(UINT32 apic_id, BOOLEAN assert_init);
+BOOLEAN HalSendStartupIpi(UINT32 apic_id, UINT8 startup_page);
 
 /* ------------------------------------------------------------------ */
 /* Programmable Interval Timer (8254 PIT), channel 0 -> IRQ0          */

@@ -60,7 +60,7 @@ static void KepFireTimer(PKTIMER timer, UINT64 now)
         KepInsertTimer(timer);
     }
     timer->Header.SignalState = 1;
-    KiSignalObject(&timer->Header);
+    KiSignalObjectWithSchedulerLock(&timer->Header);
     if (timer->Dpc) {
         UINT64 time = now * KE_TIME_UNITS_PER_TICK;
         KeInsertQueueDpc(timer->Dpc, (PVOID)(ULONG_PTR)(ULONG)time,
@@ -72,7 +72,7 @@ BOOLEAN KeSetTimerEx(PKTIMER timer, INT64 due, ULONG period_ms, PKDPC dpc)
 {
     if (KeGetCurrentIrql() > DISPATCH_LEVEL)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "timer set above DISPATCH_LEVEL");
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     BOOLEAN previous = timer->Inserted;
     KepDetachTimer(timer);
     timer->Header.SignalState = 0;
@@ -82,7 +82,7 @@ BOOLEAN KeSetTimerEx(PKTIMER timer, INT64 due, ULONG period_ms, PKDPC dpc)
     timer->DueTick = KepAddTicks(now, KeDueTimeToTicks(due));
     if (timer->DueTick <= now) KepFireTimer(timer, now);
     else KepInsertTimer(timer);
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
     return previous;
 }
 
@@ -90,11 +90,11 @@ BOOLEAN KeCancelTimer(PKTIMER timer)
 {
     if (KeGetCurrentIrql() > DISPATCH_LEVEL)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "timer cancel above DISPATCH_LEVEL");
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     BOOLEAN previous = timer->Inserted;
     KepDetachTimer(timer);
     /* Cancellation neither clears an existing signal nor retracts a DPC. */
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
     return previous;
 }
 
@@ -102,21 +102,29 @@ void KiExpireTimers(UINT64 now)
 {
     if (KeGetCurrentIrql() != DISPATCH_LEVEL)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "timer expiry outside DPC context");
+    UINT64 flags = KiAcquireSchedulerLock();
     while (!IsListEmpty(&g_timers)) {
         PKTIMER timer = CONTAINING_RECORD(g_timers.Flink, KTIMER, Entry);
         if (timer->DueTick > now) break;
         KepFireTimer(timer, now);
     }
+    KiReleaseSchedulerLock(flags);
 }
 
 void KiCancelThreadTimers(PKTHREAD thread)
 {
     if (!thread) return;
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
+    KiCancelThreadTimersWithSchedulerLock(thread);
+    KiReleaseSchedulerLock(flags);
+}
+
+void KiCancelThreadTimersWithSchedulerLock(PKTHREAD thread)
+{
+    if (!thread) return;
     for (PLIST_ENTRY entry = g_timers.Flink; entry != &g_timers; ) {
         PKTIMER timer = CONTAINING_RECORD(entry, KTIMER, Entry);
         entry = entry->Flink;
         if (timer->StackOwner == thread) KepDetachTimer(timer);
     }
-    KiIrqRestore(flags);
 }

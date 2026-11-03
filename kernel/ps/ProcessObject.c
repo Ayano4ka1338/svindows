@@ -412,6 +412,31 @@ PKPROCESS PsGetProcessFromObject(PVOID raw)
     return &((PROCESS_OBJECT *)raw)->Process;
 }
 
+/* Return a referenced process with the smallest ID greater than the cursor.
+ * Callers can enumerate safely without retaining the process-list lock while
+ * they inspect or act on a process. */
+void *PsReferenceNextProcess(ULONG after_process_id, ULONG *process_id)
+{
+    if (process_id) *process_id = 0;
+    POBJECT found = NULL;
+    ULONG best_id = ~(ULONG)0;
+    KIRQL old_irql;
+    KeAcquireSpinLock(&g_process_list_lock, &old_irql);
+    for (PLIST_ENTRY entry = g_process_list.Flink;
+         entry != &g_process_list; entry = entry->Flink) {
+        PROCESS_OBJECT *object = CONTAINING_RECORD(entry, PROCESS_OBJECT,
+                                                    GlobalEntry);
+        ULONG id = object->Process.ProcessId;
+        if (id <= after_process_id || id >= best_id) continue;
+        found = (POBJECT)object;
+        best_id = id;
+    }
+    if (found) ObReferenceObject(found);
+    KeReleaseSpinLock(&g_process_list_lock, old_irql);
+    if (found && process_id) *process_id = best_id;
+    return found;
+}
+
 /* NtOpenProcess(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PCLIENT_ID). */
 UINT64 NtOpenProcess(UINT64 *a)
 {

@@ -3,6 +3,28 @@
 #include <svindows/Ob.h>
 #include <svindows/Ps.h>
 
+void LinuxSignalProcessGroup(struct _LINUX_PTY *pty, UINT32 process_group,
+                             NTSTATUS exit_status)
+{
+    if (!pty || !process_group) return;
+    ULONG cursor = 0;
+    for (;;) {
+        ULONG process_id = 0;
+        POBJECT object = PsReferenceNextProcess(cursor, &process_id);
+        if (!object) break;
+        cursor = process_id;
+        PKPROCESS process = PsGetProcessFromObject(object);
+        /* Process group numbers are only unique within a session. More
+         * importantly, a terminal interrupt must never escape the PTY that
+         * received it (Xorg/TWM and unrelated shells can share a pgid). */
+        if (process && process->LinuxContext &&
+            LinuxPtyOwnsForegroundProcess(pty, process->LinuxContext,
+                                         process_group))
+            (void)KeTerminateProcess(process, exit_status);
+        ObDereferenceObject(object);
+    }
+}
+
 static PKPROCESS linux_session_target(PKPROCESS process, UINT64 pid,
                                       POBJECT *reference)
 {

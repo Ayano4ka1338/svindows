@@ -10,15 +10,18 @@
 ; ============================================================================
 bits 64
 section .text
+default rel
 
 ; void KiSwitchContext(UINT64 *save_rsp, UINT64 load_rsp);
 ;   rdi = address to store the outgoing thread's RSP
 ;   rsi = the incoming thread's saved RSP
+;   rdx = outgoing KTHREAD, published only after the stack switch completes
 ;
 ; Saves callee-saved registers on the current (outgoing) stack, records RSP,
 ; loads the incoming stack, restores its callee-saved registers, and returns
 ; into wherever that thread last left off.
 global KiSwitchContext
+extern KiFinishContextSwitch
 KiSwitchContext:
     push    rbx
     push    rbp
@@ -29,6 +32,10 @@ KiSwitchContext:
 
     mov     [rdi], rsp        ; save outgoing RSP
     mov     rsp, rsi          ; load incoming RSP
+    sub     rsp, 8            ; align for the System V C ABI
+    mov     rdi, rdx
+    call    KiFinishContextSwitch
+    add     rsp, 8
 
     pop     r15
     pop     r14
