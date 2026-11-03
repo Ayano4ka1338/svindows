@@ -3,7 +3,7 @@
 <table>
   <tr>
     <td width="35%" align="center" valign="middle">
-      <img src="other/Logo.png" alt="Svindows Logo" width="220">
+      <img src="other/Logo123.png" alt="Svindows Logo" width="220">
     </td>
     <td width="65%" valign="middle">
       <h1>Svindows</h1>
