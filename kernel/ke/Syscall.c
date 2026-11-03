@@ -36,17 +36,8 @@
 #define MSR_KERNEL_GS_BASE 0xC0000102
 #define MSR_FS_BASE       0xC0000100
 
-/*
- * KPCR - per-CPU block reached via GS after swapgs. The assembly entry relies
- * on the exact offsets of the first two fields (0 and 8).
- */
-typedef struct _KPCR {
-    UINT64   UserRspScratch; /* +0: user RSP saved during syscall entry */
-    UINT64   KernelRsp;      /* +8: kernel stack loaded on syscall entry */
-    PKTHREAD CurrentThread;  /* +16 */
-} KPCR;
-
-static KPCR g_kpcr;
+/* Each CPU receives a private syscall/exception block. */
+static KPRCB g_kpcr[KE_MAXIMUM_PROCESSORS] ALIGNED(64);
 
 extern void KiSystemCallEntry(void); /* arch/x86_64/SyscallEntry.asm */
 
@@ -64,16 +55,29 @@ static ALWAYS_INLINE UINT64 rdmsr(UINT32 msr)
     return ((UINT64)hi << 32) | lo;
 }
 
+PKPRCB KeGetCurrentProcessorBlock(void)
+{
+    PKPRCB processor;
+    __asm__ volatile("movq %%gs:24, %0" : "=r"(processor) : : "memory");
+    return processor;
+}
+
+PKPRCB KeGetProcessorBlock(ULONG processor_number)
+{
+    return processor_number < KE_MAXIMUM_PROCESSORS ?
+        &g_kpcr[processor_number] : NULL;
+}
+
 /* The syscall entry stub reaches the current KTHREAD through KPCR+16 (GS
- * after swapgs), so the scheduler must publish it there on every switch. */
+ * after swapgs), so the scheduler publishes it in this CPU's block. */
 void KeSetCurrentThread(PKTHREAD thread)
 {
-    g_kpcr.CurrentThread = thread;
+    KeGetCurrentProcessorBlock()->CurrentThread = thread;
 }
 
 void KeSetKernelStack(UINT64 kernel_rsp)
 {
-    g_kpcr.KernelRsp = kernel_rsp;
+    KeGetCurrentProcessorBlock()->KernelRsp = kernel_rsp;
     KeSetTssRsp0(kernel_rsp);
 }
 
@@ -83,11 +87,12 @@ void KeSetUserGsBase(UINT64 teb)
      * kernel exit. For a user thread that is its TEB; for a kernel thread we
      * park the per-CPU block there. Kept correct on every context switch, so a
      * thread that terminates mid-syscall can't leave it stale. */
-    PKTHREAD thread = g_kpcr.CurrentThread;
+    PKPRCB processor = KeGetCurrentProcessorBlock();
+    PKTHREAD thread = processor->CurrentThread;
     BOOLEAN linux_user = thread && thread->UserMode && thread->Process &&
                          thread->Process->LinuxContext;
     wrmsr(MSR_KERNEL_GS_BASE,
-          (teb || linux_user) ? teb : (UINT64)&g_kpcr);
+          (teb || linux_user) ? teb : (UINT64)processor);
 }
 
 void KeSetUserFsBase(UINT64 base)
@@ -95,14 +100,22 @@ void KeSetUserFsBase(UINT64 base)
     wrmsr(MSR_FS_BASE, base);
 }
 
-void KiInitializeSystemCalls(void)
+void KiInitializeSystemCallsForProcessor(ULONG processor_number)
 {
+    if (processor_number >= KE_MAXIMUM_PROCESSORS)
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "invalid syscall processor index");
+    KPRCB *processor = &g_kpcr[processor_number];
+    processor->Self = processor;
+    processor->ProcessorNumber = processor_number;
+    processor->Irql = PASSIVE_LEVEL;
+
     /* Invariant: in ring 0 the active GS base is the per-CPU block (KPCR). The
      * "other" base holds the value swapgs will restore on the next kernel exit;
      * it starts as the KPCR too and is repointed at each thread's TEB by the
      * scheduler (KeSetUserGsBase). */
-    wrmsr(MSR_GS_BASE, (UINT64)&g_kpcr);
-    wrmsr(MSR_KERNEL_GS_BASE, (UINT64)&g_kpcr);
+    wrmsr(MSR_GS_BASE, (UINT64)processor);
+    wrmsr(MSR_KERNEL_GS_BASE, (UINT64)processor);
     KeSetUserFsBase(0);
 
     /* Enable the SYSCALL/SYSRET instructions. */
@@ -119,6 +132,17 @@ void KiInitializeSystemCalls(void)
     /* Clear IF, DF, TF on entry: syscalls run non-preemptible for now. */
     wrmsr(MSR_SFMASK, 0x700);
 
+}
+
+void KiInitializeSystemCalls(void)
+{
+    KPRCB *processor = &g_kpcr[0];
+    memset(processor, 0, sizeof(*processor));
+    processor->ProcessorNumber = 0;
+    UINT32 eax = 1, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    processor->ApicId = ebx >> 24;
+    KiInitializeSystemCallsForProcessor(0);
     KiInitializeServiceTable();
 
     KeLog("[ke]   syscall path armed (LSTAR=%p)\n", (void *)&KiSystemCallEntry);

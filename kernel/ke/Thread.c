@@ -23,11 +23,13 @@
 #include <svindows/Mm.h>
 #include <svindows/Dos.h>
 #include <svindows/Linux.h>
+#include <svindows/Hal.h>
 
 #define DEFAULT_QUANTUM 2   /* timer ticks per scheduling slice */
 #define THREAD_STACK_SIZE 0x4000 /* 16 KiB kernel stack per thread */
 
-extern void KiSwitchContext(UINT64 *save_rsp, UINT64 load_rsp);
+extern void KiSwitchContext(UINT64 *save_rsp, UINT64 load_rsp,
+                            PKTHREAD outgoing);
 extern void KiThreadStartup(void);                              /* asm trampoline    */
 extern void KiEnterUserMode(UINT64 entry, UINT64 stack, UINT64 arg); /* asm ring-3 */
 extern void KiEnterLinuxUserMode(UINT64 entry, UINT64 stack); /* ELF ring-3 */
@@ -35,27 +37,48 @@ extern void KiEnterLinuxCloneUserMode(UINT64 entry, UINT64 stack,
                                       UINT64 flags, const void *registers);
 
 static KPROCESS       g_system_process;
-static KTHREAD        g_idle_thread;
-PKTHREAD              KeCurrentThreadPointer;
+static KTHREAD        g_idle_threads[KE_MAXIMUM_PROCESSORS];
 static LIST_ENTRY     g_ready_queue;
 static LIST_ENTRY     g_all_threads;
 static ULONG          g_next_thread_id;
 static volatile UINT64 g_tick_count;
-static BOOLEAN g_reschedule_pending;
-static KSPIN_LOCK g_thread_list_lock;
+static KSPIN_LOCK g_scheduler_lock;
 static KDPC g_clock_dpc;
 static void KepClockDpc(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2);
 static void KiSchedule(void);
+static void KiScheduleWithLock(UINT64 interrupt_state);
 
-static void KepSignalThreadTermination(PKTHREAD thread)
+UINT64 KiAcquireSchedulerLock(void)
 {
-    if (!thread->TerminationObject)
-        return;
+    return KiAcquireRawSpinLock(&g_scheduler_lock);
+}
+
+void KiReleaseSchedulerLock(UINT64 interrupt_state)
+{
+    KiReleaseRawSpinLock(&g_scheduler_lock, interrupt_state);
+}
+
+static BOOLEAN KepThreadCurrentOnAnyProcessor(PKTHREAD thread)
+{
+    UINT32 count = HalGetProcessorCount();
+    if (!count || count > KE_MAXIMUM_PROCESSORS) count = 1;
+    for (UINT32 i = 0; i < count; ++i) {
+        PKPRCB processor = KeGetProcessorBlock(i);
+        if (processor && processor->CurrentThread == thread)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static POBJECT KepPublishThreadTerminationWithSchedulerLock(PKTHREAD thread)
+{
+    thread->State = ThreadStateTerminated;
+    if (!thread->TerminationObject) return NULL;
     PDISPATCHER_HEADER termination = thread->TerminationObject;
     termination->SignalState = 1;
-    KiSignalObject(termination);
+    KiSignalObjectWithSchedulerLock(termination);
     thread->TerminationObject = NULL;
-    ObDereferenceObject((POBJECT)termination);
+    return (POBJECT)termination;
 }
 
 /* Process handles are waitable too. Wake their waiters only after the exit
@@ -64,8 +87,10 @@ static void KepSignalProcessTermination(PKPROCESS process)
 {
     if (!process || !process->Object) return;
     PDISPATCHER_HEADER header = (PDISPATCHER_HEADER)process->Object;
+    UINT64 flags = KiAcquireSchedulerLock();
     header->SignalState = 1;
-    KiSignalObject(header);
+    KiSignalObjectWithSchedulerLock(header);
+    KiReleaseSchedulerLock(flags);
 }
 
 static void KepReapTerminatedThreads(void)
@@ -74,7 +99,7 @@ static void KepReapTerminatedThreads(void)
     for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
         PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
         entry = entry->Flink;
-        if (thread == KeCurrentThreadPointer ||
+        if (KepThreadCurrentOnAnyProcessor(thread) ||
             thread->State != ThreadStateTerminated)
             continue;
         W32kCleanupThreadUser(thread);
@@ -83,7 +108,7 @@ static void KepReapTerminatedThreads(void)
             thread->DosContext = NULL;
         }
         LinuxDestroyThread(thread);
-        KiCancelThreadTimers(thread);
+        KiCancelThreadTimersWithSchedulerLock(thread);
         UINT64 root = thread->Process->DirectoryTableBase;
         MmReleaseUserPagesInAddressSpace(root, thread->OwnedTlsBase,
                                          thread->OwnedTlsPages);
@@ -103,30 +128,39 @@ static void KepReapTerminatedThreads(void)
     }
 }
 
-PKTHREAD KeGetCurrentThread(void) { return KeCurrentThreadPointer; }
+PKTHREAD KeGetCurrentThread(void) { return KeGetCurrentProcessorBlock()->CurrentThread; }
 
 /* Called by native thread services while the syscall has interrupts masked. */
 PKTHREAD KeLookupThreadById(ULONG thread_id)
 {
     if (!thread_id) return NULL;
+    UINT64 interrupt_state = KiAcquireRawSpinLock(&g_scheduler_lock);
+    PKTHREAD result = NULL;
     for (PLIST_ENTRY entry = g_all_threads.Flink;
          entry != &g_all_threads; entry = entry->Flink) {
         PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
         if (thread->ThreadId == thread_id && thread->UserMode &&
-            thread->State != ThreadStateTerminated)
-            return thread;
+            thread->State != ThreadStateTerminated) {
+            result = thread;
+            break;
+        }
     }
-    return NULL;
+    KiReleaseRawSpinLock(&g_scheduler_lock, interrupt_state);
+    return result;
 }
 
 NTSTATUS KeSuspendThread(PKTHREAD thread, ULONG *previous_count)
 {
-    if (!thread || thread->State == ThreadStateTerminated)
+    if (!thread) return STATUS_INVALID_HANDLE;
+    UINT64 flags = KiAcquireRawSpinLock(&g_scheduler_lock);
+    if (thread->State == ThreadStateTerminated ||
+        thread->State == ThreadStateTerminating) {
+        KiReleaseRawSpinLock(&g_scheduler_lock, flags);
         return STATUS_INVALID_HANDLE;
-    UINT64 flags = KiIrqSave();
+    }
     ULONG count = thread->SuspendCount;
     if (count == 127) {
-        KiIrqRestore(flags);
+        KiReleaseRawSpinLock(&g_scheduler_lock, flags);
         return STATUS_INVALID_PARAMETER;
     }
     thread->SuspendCount = count + 1;
@@ -135,20 +169,26 @@ NTSTATUS KeSuspendThread(PKTHREAD thread, ULONG *previous_count)
         thread->State = ThreadStateSuspended;
     }
     if (previous_count) *previous_count = count;
-    if (thread == KeCurrentThreadPointer && !count &&
-        thread->State == ThreadStateRunning) {
+    BOOLEAN schedule_current =
+        thread == KeGetCurrentProcessorBlock()->CurrentThread && !count &&
+        thread->State == ThreadStateRunning;
+    if (schedule_current) {
         thread->State = ThreadStateSuspended;
-        KiSchedule();
     }
-    KiIrqRestore(flags);
+    KiReleaseRawSpinLock(&g_scheduler_lock, flags);
+    if (schedule_current) KiSchedule();
     return STATUS_SUCCESS;
 }
 
 NTSTATUS KeResumeThread(PKTHREAD thread, ULONG *previous_count)
 {
-    if (!thread || thread->State == ThreadStateTerminated)
+    if (!thread) return STATUS_INVALID_HANDLE;
+    UINT64 flags = KiAcquireRawSpinLock(&g_scheduler_lock);
+    if (thread->State == ThreadStateTerminated ||
+        thread->State == ThreadStateTerminating) {
+        KiReleaseRawSpinLock(&g_scheduler_lock, flags);
         return STATUS_INVALID_HANDLE;
-    UINT64 flags = KiIrqSave();
+    }
     ULONG count = thread->SuspendCount;
     if (previous_count) *previous_count = count;
     if (count && !--thread->SuspendCount &&
@@ -156,14 +196,18 @@ NTSTATUS KeResumeThread(PKTHREAD thread, ULONG *previous_count)
         thread->State = ThreadStateReady;
         InsertTailList(&g_ready_queue, &thread->ReadyEntry);
     }
-    KiIrqRestore(flags);
+    KiReleaseRawSpinLock(&g_scheduler_lock, flags);
     return STATUS_SUCCESS;
 }
-UINT64   KeGetTickCount(void)     { return g_tick_count; }
+UINT64 KeGetTickCount(void)
+{
+    return __atomic_load_n(&g_tick_count, __ATOMIC_RELAXED);
+}
 
 void KeInitializeScheduler(void)
 {
     KeInitializeDpc(&g_clock_dpc, KepClockDpc, NULL);
+    KeInitializeSpinLock(&g_scheduler_lock);
     InitializeListHead(&g_ready_queue);
     InitializeListHead(&g_all_threads);
 
@@ -187,21 +231,29 @@ void KeInitializeScheduler(void)
     g_system_process.Name = "System";
     InitializeListHead(&g_system_process.ThreadListHead);
 
-    /* The currently executing boot context becomes the idle thread. */
-    memset(&g_idle_thread, 0, sizeof(g_idle_thread));
-    g_idle_thread.State = ThreadStateRunning;
-    g_idle_thread.Name = "Idle";
-    g_idle_thread.Process = &g_system_process;
-    InitializeListHead(&g_idle_thread.OwnedMutantListHead);
-    InsertTailList(&g_system_process.ThreadListHead, &g_idle_thread.ProcessEntry);
-    InsertTailList(&g_all_threads, &g_idle_thread.SchedulerEntry);
-
-    KeCurrentThreadPointer = &g_idle_thread;
-    KeSetCurrentThread(&g_idle_thread);
+    /* Every processor needs a private idle context before it can be admitted
+     * to the scheduler. Offline AP idle contexts stay out of the ready queue. */
+    UINT32 processor_count = HalGetProcessorCount();
+    if (!processor_count || processor_count > KE_MAXIMUM_PROCESSORS)
+        processor_count = 1;
+    for (UINT32 i = 0; i < processor_count; ++i) {
+        KTHREAD *idle = &g_idle_threads[i];
+        PKPRCB processor = KeGetProcessorBlock(i);
+        memset(idle, 0, sizeof(*idle));
+        idle->State = i == 0 ? ThreadStateRunning : ThreadStateReady;
+        idle->Name = "Idle";
+        idle->Process = &g_system_process;
+        InitializeListHead(&idle->OwnedMutantListHead);
+        InsertTailList(&g_system_process.ThreadListHead, &idle->ProcessEntry);
+        InsertTailList(&g_all_threads, &idle->SchedulerEntry);
+        processor->IdleThread = idle;
+        if (i == 0) {
+            processor->CurrentThread = idle;
+            KeSetCurrentThread(idle);
+        }
+        KiSaveFpuState(idle->FpuState);
+    }
     g_next_thread_id = 1;
-
-    /* Give the idle thread a valid FPU/SSE image for the first context switch. */
-    KiSaveFpuState(g_idle_thread.FpuState);
 
     KeLog("[ke]   scheduler ready: System process, idle thread\n");
 }
@@ -237,7 +289,9 @@ static PKTHREAD KepAllocThread(PKPROCESS process, const char *name,
     t->State = ThreadStateReady;
     t->Priority = priority;
     t->Quantum = DEFAULT_QUANTUM;
+    UINT64 id_flags = KiAcquireRawSpinLock(&g_scheduler_lock);
     t->ThreadId = g_next_thread_id++;
+    KiReleaseRawSpinLock(&g_scheduler_lock, id_flags);
     t->Name = name;
     t->Process = process ? process : &g_system_process;
     InitializeListHead(&t->OwnedMutantListHead);
@@ -252,14 +306,29 @@ static PKTHREAD KepAllocThread(PKPROCESS process, const char *name,
     return t;
 }
 
-static void KepEnqueueThread(PKTHREAD t)
+static BOOLEAN KepEnqueueThread(PKTHREAD t)
 {
-    KIRQL old_irql;
-    KeAcquireSpinLock(&g_thread_list_lock, &old_irql);
+    UINT64 interrupt_state = KiAcquireRawSpinLock(&g_scheduler_lock);
+    if (t->Process->Exiting) {
+        KiReleaseRawSpinLock(&g_scheduler_lock, interrupt_state);
+        return FALSE;
+    }
     InsertTailList(&g_ready_queue, &t->ReadyEntry);
     InsertTailList(&t->Process->ThreadListHead, &t->ProcessEntry);
     InsertTailList(&g_all_threads, &t->SchedulerEntry);
-    KeReleaseSpinLock(&g_thread_list_lock, old_irql);
+    KiReleaseRawSpinLock(&g_scheduler_lock, interrupt_state);
+    return TRUE;
+}
+
+static void KepFreeUnqueuedThread(PKTHREAD thread)
+{
+    if (thread->TerminationObject)
+        ObDereferenceObject((POBJECT)thread->TerminationObject);
+    if (thread->OwningProcessObject)
+        ObDereferenceObject(thread->OwningProcessObject);
+    if (thread->KernelStackBase)
+        ExFreePool((void *)thread->KernelStackBase);
+    ExFreePool(thread);
 }
 
 PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
@@ -271,7 +340,10 @@ PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
 
     t->StartRoutine = routine;
     t->StartContext = context;
-    KepEnqueueThread(t);
+    if (!KepEnqueueThread(t)) {
+        KepFreeUnqueuedThread(t);
+        return NULL;
+    }
 
     KeLog("[ke]   created thread '%s' (id %u), stack %p\n",
           name, t->ThreadId, (void *)t->KernelStackBase);
@@ -291,7 +363,10 @@ PKTHREAD KeCreateKernelThreadForProcess(PKPROCESS process, const char *name,
     t->TerminationObject = termination;
     t->ProcessMainThread = TRUE;
     ObReferenceObject((POBJECT)termination);
-    KepEnqueueThread(t);
+    if (!KepEnqueueThread(t)) {
+        KepFreeUnqueuedThread(t);
+        return NULL;
+    }
     return t;
 }
 
@@ -326,7 +401,10 @@ PKTHREAD KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
     if (user_gs_base)
         ((PTEB)user_gs_base)->ClientId.UniqueThread =
             (HANDLE)(ULONG_PTR)t->ThreadId;
-    KepEnqueueThread(t);
+    if (!KepEnqueueThread(t)) {
+        KepFreeUnqueuedThread(t);
+        return NULL;
+    }
 
     KeLog("[ke]   created user thread '%s' (id %u): entry %p, ustack %p, teb %p\n",
           name, t->ThreadId, (void *)user_entry, (void *)user_stack,
@@ -338,17 +416,22 @@ PKTHREAD KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
  * KiSchedule - pick the next runnable thread and switch to it.
  * Must be called with interrupts disabled.
  */
-static void KiSchedule(void)
+static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
 {
     if (KeGetCurrentIrql() > APC_LEVEL)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "scheduler above APC_LEVEL");
-    g_reschedule_pending = FALSE;
     KepReapTerminatedThreads();
-    PKTHREAD prev = KeCurrentThreadPointer;
+    PKPRCB processor = KeGetCurrentProcessorBlock();
+    processor->ReschedulePending = FALSE;
+    PKTHREAD prev = processor->CurrentThread;
     PKTHREAD next;
 
+    PKTHREAD idle = processor->IdleThread;
+    if (!idle)
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "processor has no idle thread");
     if (IsListEmpty(&g_ready_queue)) {
-        next = &g_idle_thread;
+        next = idle;
     } else {
         PLIST_ENTRY e = g_ready_queue.Flink;
         PLIST_ENTRY best = e;
@@ -366,21 +449,20 @@ static void KiSchedule(void)
     }
 
     /* Return the outgoing thread to the ready queue if it can still run. The
-     * idle thread is the fallback and is never queued. */
-    if (prev != &g_idle_thread && prev->State == ThreadStateRunning) {
-        prev->State = prev->SuspendCount ? ThreadStateSuspended : ThreadStateReady;
-        if (!prev->SuspendCount)
-            InsertTailList(&g_ready_queue, &prev->ReadyEntry);
+     * low-level switch tail publishes it only after its stack is inactive. */
+    if (prev != idle && prev->State == ThreadStateRunning) {
+        prev->State = ThreadStateSwitching;
     }
 
     if (prev == next) {
         prev->State = ThreadStateRunning;
+        KiReleaseRawSpinLock(&g_scheduler_lock, scheduler_interrupt_state);
         return;
     }
 
     next->State = ThreadStateRunning;
     next->Quantum = DEFAULT_QUANTUM;
-    KeCurrentThreadPointer = next;
+    KeGetCurrentProcessorBlock()->CurrentThread = next;
     KeSetCurrentThread(next);
 
     /* Kernel mappings are shared, so it is safe to change CR3 while running
@@ -403,9 +485,42 @@ static void KiSchedule(void)
 
     prev->SavedIrql = KiSwitchThreadIrql(next->SavedIrql);
 
-    KiSwitchContext(&prev->KernelStackPointer, next->KernelStackPointer);
+    /* The lock changes hands with the current-thread pointer. The assembly
+     * tail releases it on the incoming stack after saving the outgoing RSP. */
+    __atomic_store_n(&g_scheduler_lock.OwnerThread,
+                     (UINT64)(UINT_PTR)next, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_scheduler_lock.OwnerProcessor,
+                     processor->ProcessorNumber, __ATOMIC_RELAXED);
+    KiSwitchContext(&prev->KernelStackPointer, next->KernelStackPointer, prev);
     /* Control returns here only when `prev` is scheduled again. */
     KiDeliverKernelApcs();
+}
+
+static void KiSchedule(void)
+{
+    UINT64 interrupt_state = KiAcquireSchedulerLock();
+    KiScheduleWithLock(interrupt_state);
+}
+
+void KiBlockCurrentThreadWithSchedulerLock(UINT64 interrupt_state)
+{
+    KiScheduleWithLock(interrupt_state);
+}
+
+/* Called by KiSwitchContext on the incoming stack, after the outgoing RSP has
+ * been saved. At this point a switching-out thread may safely re-enter the
+ * shared ready queue, and the scheduler lock can be released. */
+void KiFinishContextSwitch(PKTHREAD outgoing)
+{
+    if (outgoing && outgoing->State == ThreadStateSwitching) {
+        if (outgoing->SuspendCount) {
+            outgoing->State = ThreadStateSuspended;
+        } else {
+            outgoing->State = ThreadStateReady;
+            InsertTailList(&g_ready_queue, &outgoing->ReadyEntry);
+        }
+    }
+    KiReleaseRawSpinLock(&g_scheduler_lock, 0);
 }
 
 void KeYield(void)
@@ -418,6 +533,13 @@ void KeYield(void)
 /* Move a waiting thread back to the ready queue (called by the dispatcher with
  * interrupts disabled). */
 void KiReadyThread(PKTHREAD thread)
+{
+    UINT64 interrupt_state = KiAcquireSchedulerLock();
+    KiReadyThreadWithSchedulerLock(thread);
+    KiReleaseSchedulerLock(interrupt_state);
+}
+
+void KiReadyThreadWithSchedulerLock(PKTHREAD thread)
 {
     if (thread->State == ThreadStateWaiting) {
         thread->State = thread->SuspendCount ? ThreadStateSuspended :
@@ -436,7 +558,7 @@ void KiBlockCurrentThread(void)
 /* Entered from KiThreadStartup (assembly) the first time a new thread runs. */
 void KiThreadBootstrap(void)
 {
-    PKTHREAD t = KeCurrentThreadPointer;
+    PKTHREAD t = KeGetCurrentProcessorBlock()->CurrentThread;
     KiDeliverKernelApcs();
 
     if (t->UserMode) {
@@ -462,8 +584,10 @@ NORETURN void KeTerminateThread(void)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "thread termination above APC_LEVEL");
     (void)KiIrqSave(); /* disable preemption for good on this thread */
 
-    PKTHREAD t = KeCurrentThreadPointer;
-    t->State = ThreadStateTerminated;
+    PKTHREAD t = KeGetCurrentProcessorBlock()->CurrentThread;
+    UINT64 scheduler_flags = KiAcquireSchedulerLock();
+    t->State = ThreadStateTerminating;
+    KiReleaseSchedulerLock(scheduler_flags);
     LinuxThreadExited(t);
     KeLog("[ke]   thread '%s' (id %u) terminated\n", t->Name, t->ThreadId);
 
@@ -475,125 +599,200 @@ NORETURN void KeTerminateThread(void)
      * address. */
     if (t->ProcessMainThread && t->Process) {
         PKPROCESS process = t->Process;
+        scheduler_flags = KiAcquireSchedulerLock();
         process->Exiting = TRUE;
         process->ExitStatus = t->ExitStatus;
+        KiReleaseSchedulerLock(scheduler_flags);
         PsJobProcessExited(process);
         PLIST_ENTRY head = &process->ThreadListHead;
         for (PLIST_ENTRY entry = head->Flink; entry != head;
              entry = entry->Flink) {
             PKTHREAD other = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
-            if (other == t || other->State == ThreadStateTerminated)
+            if (other == t) continue;
+            scheduler_flags = KiAcquireSchedulerLock();
+            if (other->State == ThreadStateTerminated ||
+                other->State == ThreadStateTerminating) {
+                KiReleaseSchedulerLock(scheduler_flags);
                 continue;
-            LinuxThreadExited(other);
+            }
             if (other->State == ThreadStateReady)
                 RemoveEntryList(&other->ReadyEntry);
             else if (other->State == ThreadStateWaiting)
-                KiCancelThreadWait(other, t->ExitStatus);
+                KiCancelThreadWaitWithSchedulerLock(other, t->ExitStatus);
             other->ExitStatus = t->ExitStatus;
-            other->State = ThreadStateTerminated;
+            other->State = ThreadStateTerminating;
+            KiReleaseSchedulerLock(scheduler_flags);
+            LinuxThreadExited(other);
             KeAbandonThreadMutants(other);
-            KepSignalThreadTermination(other);
+            scheduler_flags = KiAcquireSchedulerLock();
+            POBJECT termination = KepPublishThreadTerminationWithSchedulerLock(other);
+            KiReleaseSchedulerLock(scheduler_flags);
+            if (termination) ObDereferenceObject(termination);
             KeLog("[ke]   process exit terminated thread '%s' (id %u)\n",
                   other->Name, other->ThreadId);
         }
         KepSignalProcessTermination(process);
     }
-    KepSignalThreadTermination(t);
+    scheduler_flags = KiAcquireSchedulerLock();
+    POBJECT termination = KepPublishThreadTerminationWithSchedulerLock(t);
+    KiReleaseSchedulerLock(scheduler_flags);
+    if (termination) ObDereferenceObject(termination);
     KiSchedule();
 
     for (;;)
         __asm__ volatile("hlt");
 }
 
-/* Terminate a non-running thread without ever letting it re-enter user mode.
- * Its object remains signaled and the normal scheduler reap path owns the
- * stack/TEB cleanup. */
-NTSTATUS KeTerminateThreadByPointer(PKTHREAD target, NTSTATUS exit_status)
+/* Finish a thread whose queue membership and Terminating state were already
+ * claimed under the scheduler lock. */
+static void KepFinishClaimedTermination(PKTHREAD target, NTSTATUS exit_status)
 {
-    if (!target || target->State == ThreadStateTerminated)
-        return STATUS_INVALID_HANDLE;
-    if (target == KeCurrentThreadPointer) {
-        target->ExitStatus = exit_status;
-        KeTerminateThread();
-    }
-    UINT64 flags = KiIrqSave();
+    UINT64 flags;
     LinuxThreadExited(target);
-    if (target->State == ThreadStateReady)
-        RemoveEntryList(&target->ReadyEntry);
-    else if (target->State == ThreadStateWaiting)
-        KiCancelThreadWait(target, exit_status);
-    target->ExitStatus = exit_status;
-    target->State = ThreadStateTerminated;
     KeAbandonThreadMutants(target);
     if (target->ProcessMainThread && target->Process) {
         PKPROCESS process = target->Process;
+        flags = KiAcquireSchedulerLock();
         process->Exiting = TRUE;
         process->ExitStatus = exit_status;
+        KiReleaseSchedulerLock(flags);
         PsJobProcessExited(process);
         for (PLIST_ENTRY entry = process->ThreadListHead.Flink;
              entry != &process->ThreadListHead; entry = entry->Flink) {
             PKTHREAD other = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
-            if (other == target || other == KeCurrentThreadPointer ||
-                other->State == ThreadStateTerminated) continue;
-            LinuxThreadExited(other);
+            if (other == target || other == KeGetCurrentProcessorBlock()->CurrentThread)
+                continue;
+            flags = KiAcquireSchedulerLock();
+            if (other->State == ThreadStateTerminated ||
+                other->State == ThreadStateTerminating) {
+                KiReleaseSchedulerLock(flags);
+                continue;
+            }
             if (other->State == ThreadStateReady)
                 RemoveEntryList(&other->ReadyEntry);
             else if (other->State == ThreadStateWaiting)
-                KiCancelThreadWait(other, exit_status);
+                KiCancelThreadWaitWithSchedulerLock(other, exit_status);
             other->ExitStatus = exit_status;
-            other->State = ThreadStateTerminated;
+            other->State = ThreadStateTerminating;
+            KiReleaseSchedulerLock(flags);
+            LinuxThreadExited(other);
             KeAbandonThreadMutants(other);
-            KepSignalThreadTermination(other);
+            flags = KiAcquireSchedulerLock();
+            POBJECT termination = KepPublishThreadTerminationWithSchedulerLock(other);
+            KiReleaseSchedulerLock(flags);
+            if (termination) ObDereferenceObject(termination);
         }
         KepSignalProcessTermination(process);
     }
-    KepSignalThreadTermination(target);
     BOOLEAN exit_caller = target->ProcessMainThread &&
-                          KeCurrentThreadPointer->Process == target->Process;
-    KiIrqRestore(flags);
+                          KeGetCurrentProcessorBlock()->CurrentThread->Process == target->Process;
+    flags = KiAcquireSchedulerLock();
+    POBJECT termination = KepPublishThreadTerminationWithSchedulerLock(target);
+    KiReleaseSchedulerLock(flags);
+    if (termination) ObDereferenceObject(termination);
     if (exit_caller) {
-        KeCurrentThreadPointer->ExitStatus = exit_status;
+        KeGetCurrentProcessorBlock()->CurrentThread->ExitStatus = exit_status;
         KeTerminateThread();
     }
+}
+
+static BOOLEAN KepClaimThreadTerminationWithSchedulerLock(PKTHREAD target,
+                                                           NTSTATUS exit_status)
+{
+    if (target->State == ThreadStateTerminated ||
+        target->State == ThreadStateTerminating)
+        return FALSE;
+    if (target->State == ThreadStateReady)
+        RemoveEntryList(&target->ReadyEntry);
+    else if (target->State == ThreadStateWaiting)
+        KiCancelThreadWaitWithSchedulerLock(target, exit_status);
+    target->ExitStatus = exit_status;
+    target->State = ThreadStateTerminating;
+    return TRUE;
+}
+
+/* Terminate a non-running thread without letting it re-enter user mode. */
+NTSTATUS KeTerminateThreadByPointer(PKTHREAD target, NTSTATUS exit_status)
+{
+    if (!target) return STATUS_INVALID_HANDLE;
+    if (target == KeGetCurrentProcessorBlock()->CurrentThread) {
+        target->ExitStatus = exit_status;
+        KeTerminateThread();
+    }
+    UINT64 flags = KiAcquireSchedulerLock();
+    BOOLEAN claimed = KepClaimThreadTerminationWithSchedulerLock(target,
+                                                                 exit_status);
+    KiReleaseSchedulerLock(flags);
+    if (!claimed) return STATUS_INVALID_HANDLE;
+    KepFinishClaimedTermination(target, exit_status);
+    return STATUS_SUCCESS;
+}
+
+/* Used by terminal-generated default signals. Claim the main thread while it
+ * is still protected by the shared thread list, then run normal process exit. */
+NTSTATUS KeTerminateProcess(PKPROCESS process, NTSTATUS exit_status)
+{
+    if (!process) return STATUS_INVALID_PARAMETER;
+    PKTHREAD target = NULL;
+    UINT64 flags = KiAcquireSchedulerLock();
+    for (PLIST_ENTRY entry = process->ThreadListHead.Flink;
+         entry != &process->ThreadListHead; entry = entry->Flink) {
+        PKTHREAD candidate = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
+        if (!candidate->ProcessMainThread) continue;
+        if (KepClaimThreadTerminationWithSchedulerLock(candidate, exit_status)) {
+            target = candidate;
+            break;
+        }
+    }
+    KiReleaseSchedulerLock(flags);
+    if (!target) return STATUS_INVALID_HANDLE;
+    if (target == KeGetCurrentProcessorBlock()->CurrentThread) {
+        KeTerminateThread();
+    }
+    KepFinishClaimedTermination(target, exit_status);
     return STATUS_SUCCESS;
 }
 
 static void KepClockDpc(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)
 {
     (void)dpc; (void)context; (void)arg1; (void)arg2;
-    KeUpdateSharedData(g_tick_count);
-    KiExpireTimers(g_tick_count);
+    UINT64 now = KeGetTickCount();
+    KeUpdateSharedData(now);
+    KiExpireTimers(now);
 
     /* Dispatcher timeouts are absolute tick deadlines stored on blocked
      * threads. The process list is stable while interrupts are disabled. */
+    UINT64 scheduler_flags = KiAcquireSchedulerLock();
     PLIST_ENTRY head = &g_all_threads;
     for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
         PKTHREAD waiting = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
         entry = entry->Flink;
         if (waiting->State == ThreadStateWaiting && waiting->WaitDeadline &&
-            g_tick_count >= waiting->WaitDeadline)
-            KiTimeoutThreadWait(waiting);
+            now >= waiting->WaitDeadline)
+            KiTimeoutThreadWaitWithSchedulerLock(waiting);
     }
-
+    KiReleaseSchedulerLock(scheduler_flags);
 }
 
 void KeClockTick(void)
 {
-    g_tick_count++;
+    __atomic_add_fetch(&g_tick_count, 1, __ATOMIC_RELAXED);
     KeInsertQueueDpc(&g_clock_dpc, NULL, NULL);
-    PKTHREAD t = KeCurrentThreadPointer;
+    PKPRCB processor = KeGetCurrentProcessorBlock();
+    PKTHREAD t = processor->CurrentThread;
     if (t->Quantum > 0)
         t->Quantum--;
 
     if (t->Quantum <= 0)
-        g_reschedule_pending = TRUE;
+        processor->ReschedulePending = TRUE;
 }
 
 /* Called after the IRQ's execution level is restored, with IF still clear.
  * A switch can suspend this trap frame without leaking ISR IRQL to a thread. */
 void KiScheduleAfterInterrupt(void)
 {
-    if (g_reschedule_pending && KeGetCurrentIrql() <= APC_LEVEL)
+    if (KeGetCurrentProcessorBlock()->ReschedulePending &&
+        KeGetCurrentIrql() <= APC_LEVEL)
         KiSchedule();
     KiDeliverKernelApcs();
 }

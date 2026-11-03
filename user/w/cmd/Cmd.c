@@ -861,14 +861,13 @@ static BOOL launch_external(const char *image, char *command_line,
         return 0;
     if (process_out) *process_out = process;
     else {
-        /* Native console input turns Ctrl+C into a process-control event.
-         * The kernel terminates this foreground child and leaves ETX for the
-         * line editor only when no foreground process is registered. */
-        if (g_native_input_console)
-            SetConsoleForegroundProcess(g_in, process.hProcess);
+        /* Native consoles and xterm PTY bridges both track the active child.
+         * The PTY path is per-terminal so Ctrl+C cannot hit TWM/startx through
+         * the global native-console foreground slot. */
+        (void)SetConsoleForegroundProcess(g_in, process.hProcess);
         WaitForSingleObject(process.hProcess, (DWORD)-1);
+        (void)SetConsoleForegroundProcess(g_in, 0);
         if (g_native_input_console) {
-            SetConsoleForegroundProcess(g_in, 0);
             /* A DOS/Windows guest can leave the console input side in a
              * different state after taking over the display. Restore the
              * shell's original mode before the next line-editor read. */

@@ -50,9 +50,10 @@ static void InputWorker(PVOID context)
 
     for (;;) {
         /* One ordered hardware stream: make, translated character, break.
-         * Discard GUI events until a window owns focus; console input has its
-         * own character queue below. */
+         * Win32 receives it when a window owns focus; Linux evdev gets its
+         * independent mirror and suppresses the native-console fallback. */
         BOOLEAN window_owns_keyboard = W32kKeyboardOwner();
+        BOOLEAN linux_owns_keyboard = LinuxInputKeyboardActive();
         UINT32 event;
         while (KbdReadInputEvent(&event)) {
             if (!window_owns_keyboard) continue;
@@ -75,11 +76,10 @@ static void InputWorker(PVOID context)
          * arrived through the ordered hardware stream above. */
         while (KbdDataAvailable()) {
             char c = KbdReadChar();
-            /* GUI windows already received this key through the ordered
-             * KBD_INPUT stream above. Do not also inject it into the hidden
-             * native console (in particular, Ctrl+C must target the focused
-             * terminal rather than a background cmd.exe). */
-            if (c && !window_owns_keyboard)
+            /* Win32 windows receive this key through the ordered event stream;
+             * Xorg owns it through evdev. Do not also inject it into the
+             * hidden native console, where Ctrl+C could kill startx/TWM. */
+            if (c && !window_owns_keyboard && !linux_owns_keyboard)
                 IoConsoleInputCharacter(c);
         }
 
@@ -218,6 +218,21 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     MmInitialize((UINT64)mbi_phys);
     KiBootStepOk("Physical / virtual memory");
 
+    /* Discover firmware CPU topology before allocating any per-CPU state.
+     * APs remain parked until their interrupt and scheduler state is ready. */
+    (void)HalDiscoverProcessors((UINT64)mbi_phys);
+    KeLog("[smp]  discovered %u logical processor(s)\n",
+          HalGetProcessorCount());
+    /* Keep the established PIC/PIT path on a uniprocessor. Enabling the LAPIC
+     * without any AP to start is unnecessary and can leave firmware virtual-
+     * wire interrupt state active on machines that booted with the PIC path. */
+    if (HalGetProcessorCount() > 1) {
+        if (!HalInitializeLocalApic())
+            KeLog("[smp]  local APIC unavailable; SMP interrupt delivery disabled\n");
+    } else {
+        KeLog("[smp]  one processor; using PIC/PIT interrupt delivery\n");
+    }
+
     /* Map the shared user-data page (tick count / system time for ring 3). */
     KeInitializeSharedData();
     KiBootStepOk("Shared user data page");
@@ -284,6 +299,19 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     HalRegisterIrqHandler(0, KeClockTick);
     HalInitializeTimer(100); /* 100 Hz preemption tick */
     KiBootStepOk("100 Hz system timer");
+
+    /* APs initialize their private architectural state, then park on a wake
+     * IPI until shared scheduler and dispatcher state is SMP-safe. */
+    KiStartApplicationProcessors();
+    UINT32 online_processors = 1; /* BSP */
+    for (UINT32 i = 1; i < HalGetProcessorCount(); ++i) {
+        PKPRCB processor = KeGetProcessorBlock(i);
+        if (processor && processor->StartupState == 2)
+            online_processors++;
+    }
+    KeLog("[smp]  SMP запущен: %u из %u CPU онлайн; AP пока припаркованы\n",
+          online_processors, HalGetProcessorCount());
+    KiBootStepOk("SMP startup");
 
     /* Bring up the PCI Ethernet transport after the scheduler and timer.
      * Protocols are layered above this frame interface, never in the IRQ path. */

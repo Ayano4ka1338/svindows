@@ -43,17 +43,17 @@ typedef struct PACKED _DTR {
 } DTR;
 
 /* The GDT: 5 code/data descriptors + a 16-byte (two-slot) TSS descriptor. */
-static UINT64 g_gdt[7];
-static TSS64  g_tss ALIGNED(16);
+static UINT64 g_gdt[KE_MAXIMUM_PROCESSORS][7] ALIGNED(16);
+static TSS64  g_tss[KE_MAXIMUM_PROCESSORS] ALIGNED(16);
 
-/* Interrupt stacks. Kept simple and static until Mm can allocate them. */
-static UINT8 g_ist1_stack[0x4000] ALIGNED(16); /* 16 KiB for critical faults */
-static UINT8 g_rsp0_stack[0x4000] ALIGNED(16); /* 16 KiB for ring-0 entry     */
+/* Per-CPU interrupt stacks; until AP teardown exists these are boot-lifetime. */
+static UINT8 g_ist1_stack[KE_MAXIMUM_PROCESSORS][0x4000] ALIGNED(16);
+static UINT8 g_rsp0_stack[KE_MAXIMUM_PROCESSORS][0x4000] ALIGNED(16);
 
 extern void KiLoadGdtr(const void *gdtr);
 extern void KiLoadTr(UINT16 selector);
 
-static void gdt_set_tss(int slot, UINT64 base, UINT32 limit)
+static void gdt_set_tss(UINT64 *gdt, int slot, UINT64 base, UINT32 limit)
 {
     UINT64 low = 0;
     low |= (limit & 0xFFFFULL);
@@ -61,32 +61,52 @@ static void gdt_set_tss(int slot, UINT64 base, UINT32 limit)
     low |= 0x89ULL << 40;                    /* present, type = available 64-bit TSS */
     low |= ((UINT64)((limit >> 16) & 0xF)) << 48;
     low |= ((base >> 24) & 0xFFULL) << 56;
-    g_gdt[slot] = low;
-    g_gdt[slot + 1] = (base >> 32) & 0xFFFFFFFFULL; /* upper 32 bits of base */
+    gdt[slot] = low;
+    gdt[slot + 1] = (base >> 32) & 0xFFFFFFFFULL; /* upper 32 bits of base */
+}
+
+void KeInitializeGdtForProcessor(ULONG processor_number)
+{
+    if (processor_number >= KE_MAXIMUM_PROCESSORS)
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "invalid GDT processor index");
+    UINT64 *gdt = g_gdt[processor_number];
+    TSS64 *tss = &g_tss[processor_number];
+    gdt[0] = 0;                       /* null */
+    gdt[1] = 0x00AF9A000000FFFFULL;   /* kernel code: P, S, exec/read, L=1 */
+    gdt[2] = 0x00AF92000000FFFFULL;   /* kernel data: P, S, read/write     */
+    gdt[3] = 0x00AFF2000000FFFFULL;   /* user data:   DPL 3, read/write    */
+    gdt[4] = 0x00AFFA000000FFFFULL;   /* user code:   DPL 3, exec/read, L=1 */
+
+    /* Point the TSS's stacks at the top of their (downward-growing) buffers. */
+    for (int i = 0; i < 7; i++)
+        tss->ist[i] = 0;
+    tss->rsp0 = (UINT64)(g_rsp0_stack[processor_number] +
+                         sizeof(g_rsp0_stack[processor_number]));
+    tss->rsp1 = 0;
+    tss->rsp2 = 0;
+    tss->ist[0] = (UINT64)(g_ist1_stack[processor_number] +
+                           sizeof(g_ist1_stack[processor_number]));
+    tss->iomap_base = sizeof(TSS64);   /* no I/O permission bitmap */
+
+    gdt_set_tss(gdt, 5, (UINT64)tss,
+                sizeof(TSS64) - 1);
+
+    DTR gdtr = { .limit = sizeof(g_gdt[processor_number]) - 1,
+                 .base = (UINT64)gdt };
+    KiLoadGdtr(&gdtr);
+    KiLoadTr(SEL_TSS);
 }
 
 void KeInitializeGdt(void)
 {
-    g_gdt[0] = 0;                       /* null */
-    g_gdt[1] = 0x00AF9A000000FFFFULL;   /* kernel code: P, S, exec/read, L=1 */
-    g_gdt[2] = 0x00AF92000000FFFFULL;   /* kernel data: P, S, read/write     */
-    g_gdt[3] = 0x00AFF2000000FFFFULL;   /* user data:   DPL 3, read/write    */
-    g_gdt[4] = 0x00AFFA000000FFFFULL;   /* user code:   DPL 3, exec/read, L=1 */
+    KeInitializeGdtForProcessor(0);
+}
 
-    /* Point the TSS's stacks at the top of their (downward-growing) buffers. */
-    for (int i = 0; i < 7; i++)
-        g_tss.ist[i] = 0;
-    g_tss.rsp0 = (UINT64)(g_rsp0_stack + sizeof(g_rsp0_stack));
-    g_tss.rsp1 = 0;
-    g_tss.rsp2 = 0;
-    g_tss.ist[0] = (UINT64)(g_ist1_stack + sizeof(g_ist1_stack)); /* IST1 */
-    g_tss.iomap_base = sizeof(TSS64);   /* no I/O permission bitmap */
-
-    gdt_set_tss(5, (UINT64)&g_tss, sizeof(TSS64) - 1);
-
-    DTR gdtr = { .limit = sizeof(g_gdt) - 1, .base = (UINT64)&g_gdt };
-    KiLoadGdtr(&gdtr);
-    KiLoadTr(SEL_TSS);
+UINT64 KeGetProcessorBootstrapStackTop(ULONG processor_number)
+{
+    if (processor_number >= KE_MAXIMUM_PROCESSORS) return 0;
+    return (UINT64)(g_rsp0_stack[processor_number] +
+                    sizeof(g_rsp0_stack[processor_number]));
 }
 
 /* Update the stack the CPU switches to on a ring 3 -> ring 0 transition (e.g. a
@@ -94,5 +114,7 @@ void KeInitializeGdt(void)
  * the current thread's kernel stack. */
 void KeSetTssRsp0(UINT64 rsp0)
 {
-    g_tss.rsp0 = rsp0;
+    ULONG processor_number = KeGetCurrentProcessorBlock()->ProcessorNumber;
+    if (processor_number < KE_MAXIMUM_PROCESSORS)
+        g_tss[processor_number].rsp0 = rsp0;
 }

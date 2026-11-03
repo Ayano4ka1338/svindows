@@ -46,6 +46,13 @@ SECTIONS
         *(.rodata .rodata.*)
     }
 
+    /* Keep the SIPI blob inside the ordinary kernel load range. The BSP
+     * copies it to its reserved low-memory page before sending startup IPIs. */
+    .ap_trampoline ALIGN(4K) : AT(ADDR(.ap_trampoline) - KERNEL_VBASE)
+    {
+        KEEP(*(.ap_trampoline))
+    }
+
     .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VBASE)
     {
         *(.data .data.*)

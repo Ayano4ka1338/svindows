@@ -19,6 +19,11 @@
 
 static UINT64 g_kernel_pml4_phys;
 
+UINT64 MmGetKernelAddressSpace(void)
+{
+    return g_kernel_pml4_phys;
+}
+
 #define ENTRIES_PER_TABLE 512
 #define PML4_INDEX(va) (((va) >> 39) & 0x1FF)
 #define PDPT_INDEX(va) (((va) >> 30) & 0x1FF)

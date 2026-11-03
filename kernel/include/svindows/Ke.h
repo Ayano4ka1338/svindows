@@ -99,7 +99,12 @@ typedef UINT8 KIRQL;
 #define APC_LEVEL      1
 #define DISPATCH_LEVEL 2
 #define HIGH_LEVEL     31
-typedef struct _KSPIN_LOCK { UINT32 Held; } KSPIN_LOCK, *PKSPIN_LOCK;
+struct _KTHREAD;
+typedef struct _KSPIN_LOCK {
+    volatile UINT32 Held;
+    volatile UINT64 OwnerThread;
+    volatile UINT32 OwnerProcessor;
+} KSPIN_LOCK, *PKSPIN_LOCK;
 
 KIRQL KeGetCurrentIrql(void);
 void KeRaiseIrql(KIRQL new_irql, KIRQL *old_irql);
@@ -109,6 +114,8 @@ void KeAcquireSpinLock(PKSPIN_LOCK lock, KIRQL *old_irql);
 void KeReleaseSpinLock(PKSPIN_LOCK lock, KIRQL old_irql);
 void KeAcquireSpinLockAtDpcLevel(PKSPIN_LOCK lock);
 void KeReleaseSpinLockFromDpcLevel(PKSPIN_LOCK lock);
+UINT64 KiAcquireRawSpinLock(PKSPIN_LOCK lock);
+void KiReleaseRawSpinLock(PKSPIN_LOCK lock, UINT64 interrupt_state);
 /* Scheduler-only: IRQs disabled, both contexts below DISPATCH_LEVEL. */
 KIRQL KiSwitchThreadIrql(KIRQL incoming_irql);
 
@@ -134,7 +141,10 @@ BOOLEAN KiIsExecutingDpc(void);
 /* ------------------------------------------------------------------ */
 
 void KeInitializeGdt(void);
+void KeInitializeGdtForProcessor(ULONG processor_number);
+UINT64 KeGetProcessorBootstrapStackTop(ULONG processor_number);
 void KeInitializeIdt(void);
+void KeLoadIdt(void);
 
 /*
  * KTRAP_FRAME - the register state pushed by our interrupt/exception stubs.
@@ -170,6 +180,8 @@ typedef enum _KTHREAD_STATE {
     ThreadStateInitialized = 0,
     ThreadStateReady,
     ThreadStateRunning,
+    ThreadStateSwitching,
+    ThreadStateTerminating,
     ThreadStateWaiting,
     ThreadStateTerminated,
     ThreadStateSuspended,
@@ -234,6 +246,7 @@ BOOLEAN KeCancelTimer(PKTIMER timer);
 UINT64 KeDueTimeToTicks(INT64 due_time);
 void KiExpireTimers(UINT64 now);
 void KiCancelThreadTimers(struct _KTHREAD *thread);
+void KiCancelThreadTimersWithSchedulerLock(struct _KTHREAD *thread);
 
 typedef struct _KSEMAPHORE {
     DISPATCHER_HEADER Header;
@@ -379,6 +392,29 @@ typedef struct _KTHREAD {
     struct _LINUX_THREAD_CONTEXT *LinuxThread;
 } KTHREAD, *PKTHREAD;
 
+/* Per-processor state reached through GS after swapgs. Keep the first three
+ * qwords stable: syscall entry assembly reads the scratch RSP, kernel RSP and
+ * current thread at offsets 0, 8 and 16. */
+typedef struct _KPRCB {
+    UINT64 UserRspScratch;
+    UINT64 KernelRsp;
+    PKTHREAD CurrentThread;
+    struct _KPRCB *Self;       /* +24: stable base for C access via GS */
+    UINT32 ProcessorNumber;
+    UINT32 ApicId;
+    KIRQL Irql;
+    BOOLEAN DpcRunning;
+    UINT8 Reserved[2];
+    UINT64 DispatchFlags;
+    ULONG HeldLocks;
+    volatile ULONG ReschedulePending;
+    volatile ULONG StartupState;   /* 0=offline, 1=booting, 2=online */
+    volatile ULONG StartupRelease; /* AP may enter the shared scheduler */
+    PKTHREAD IdleThread;
+} KPRCB, *PKPRCB;
+
+#define KE_MAXIMUM_PROCESSORS 64u
+
 _Static_assert(__builtin_offsetof(KTHREAD, UserRip) == 0xAC0,
                "KTHREAD.UserRip offset changed");
 _Static_assert(__builtin_offsetof(KTHREAD, UserRsp) == 0xAC8,
@@ -455,12 +491,13 @@ PKTHREAD  KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
                                        UINT64 user_gs_base, UINT64 user_arg,
                                        LONG priority);
 PKTHREAD  KeGetCurrentThread(void);
-/* Scheduler-owned current-thread pointer. Hot in-kernel emulators may use
- * this inline accessor to avoid an out-of-line call for each guest operand. */
-extern PKTHREAD KeCurrentThreadPointer;
+PKPRCB    KeGetCurrentProcessorBlock(void);
+PKPRCB    KeGetProcessorBlock(ULONG processor_number);
+/* Current-thread access is CPU-local; the fast inline accessor keeps the
+ * instruction-emulator hot path free of an extra call. */
 static ALWAYS_INLINE PKTHREAD KeGetCurrentThreadFast(void)
 {
-    return KeCurrentThreadPointer;
+    return KeGetCurrentProcessorBlock()->CurrentThread;
 }
 void      KeSetUserFsBase(UINT64 base);
 void      KeSetUserGsBase(UINT64 base);
@@ -468,6 +505,7 @@ PKTHREAD  KeLookupThreadById(ULONG thread_id);
 NTSTATUS  KeSuspendThread(PKTHREAD thread, ULONG *previous_count);
 NTSTATUS  KeResumeThread(PKTHREAD thread, ULONG *previous_count);
 NTSTATUS  KeTerminateThreadByPointer(PKTHREAD thread, NTSTATUS exit_status);
+NTSTATUS  KeTerminateProcess(PKPROCESS process, NTSTATUS exit_status);
 void      KeYield(void);
 NORETURN void KeTerminateThread(void);
 
@@ -493,6 +531,12 @@ UINT64    KeQuerySystemTimeFileTime(void);
 /* Scheduler hooks used by the dispatcher (interrupts must be disabled). */
 void      KiReadyThread(PKTHREAD thread);   /* move a waiting thread to Ready */
 void      KiBlockCurrentThread(void);       /* current is Waiting -> reschedule */
+UINT64    KiAcquireSchedulerLock(void);
+void      KiReleaseSchedulerLock(UINT64 interrupt_state);
+void      KiReadyThreadWithSchedulerLock(PKTHREAD thread);
+void      KiBlockCurrentThreadWithSchedulerLock(UINT64 interrupt_state);
+void      KiSignalObjectWithSchedulerLock(PDISPATCHER_HEADER header);
+void      KiCancelThreadWaitWithSchedulerLock(PKTHREAD thread, NTSTATUS status);
 
 /* ------------------------------------------------------------------ */
 /* Synchronization primitives                                          */
@@ -535,6 +579,7 @@ void KiDeliverKernelApcs(void);
 /* Cancel a pending dispatcher wait and make the thread runnable. Called by the
  * clock when a wait deadline expires (interrupts already disabled). */
 void KiTimeoutThreadWait(PKTHREAD thread);
+void KiTimeoutThreadWaitWithSchedulerLock(PKTHREAD thread);
 void KiCancelThreadWait(PKTHREAD thread, NTSTATUS status);
 
 /* Signal a header and wake its waiters (interrupts must be disabled). */
@@ -547,6 +592,8 @@ void KiSignalObject(PDISPATCHER_HEADER header);
 /* Program the syscall MSRs and per-CPU block. Call once during boot after the
  * GDT is installed. */
 void KiInitializeSystemCalls(void);
+void KiInitializeSystemCallsForProcessor(ULONG processor_number);
+void KiStartApplicationProcessors(void);
 
 /* Point the CPU's ring-0 entry stack (TSS.RSP0 and the syscall entry's kernel
  * stack) at `kernel_rsp`. The scheduler calls this on every context switch. */

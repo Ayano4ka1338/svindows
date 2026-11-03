@@ -40,6 +40,7 @@ static POOL_NODE *g_tail;
 static UINT64     g_heap_end;   /* first uncommitted virtual address */
 static SIZE_T     g_bytes_in_use;
 static UINT8      g_pool_broken; /* corruption reported; stop re-reporting */
+static KSPIN_LOCK g_pool_lock;
 
 static ALWAYS_INLINE POOL_NODE *payload_to_node(void *p)
 {
@@ -194,6 +195,7 @@ static BOOLEAN pool_grow(SIZE_T need)
 
 void ExInitializePool(void)
 {
+    KeInitializeSpinLock(&g_pool_lock);
     g_head = g_tail = NULL;
     g_heap_end = MM_KERNEL_HEAP_BASE;
     g_bytes_in_use = 0;
@@ -230,7 +232,7 @@ static void pool_split(POOL_NODE *node, SIZE_T need)
     node->size = need;
 }
 
-PVOID ExAllocatePoolWithTag(POOL_TYPE type, SIZE_T size, ULONG tag)
+static PVOID ExAllocatePoolWithTagLocked(POOL_TYPE type, SIZE_T size, ULONG tag)
 {
     (void)type; /* everything is non-paged for now */
 
@@ -273,12 +275,20 @@ PVOID ExAllocatePoolWithTag(POOL_TYPE type, SIZE_T size, ULONG tag)
     return NULL;
 }
 
+PVOID ExAllocatePoolWithTag(POOL_TYPE type, SIZE_T size, ULONG tag)
+{
+    UINT64 interrupt_state = KiAcquireRawSpinLock(&g_pool_lock);
+    PVOID allocation = ExAllocatePoolWithTagLocked(type, size, tag);
+    KiReleaseRawSpinLock(&g_pool_lock, interrupt_state);
+    return allocation;
+}
+
 PVOID ExAllocatePool(POOL_TYPE type, SIZE_T size)
 {
     return ExAllocatePoolWithTag(type, size, 0);
 }
 
-void ExFreePool(PVOID p)
+static void ExFreePoolLocked(PVOID p)
 {
     if (!p)
         return;
@@ -327,7 +337,18 @@ void ExFreePool(PVOID p)
     }
 }
 
+void ExFreePool(PVOID p)
+{
+    if (!p) return;
+    UINT64 interrupt_state = KiAcquireRawSpinLock(&g_pool_lock);
+    ExFreePoolLocked(p);
+    KiReleaseRawSpinLock(&g_pool_lock, interrupt_state);
+}
+
 SIZE_T ExPoolBytesInUse(void)
 {
-    return g_bytes_in_use;
+    UINT64 interrupt_state = KiAcquireRawSpinLock(&g_pool_lock);
+    SIZE_T value = g_bytes_in_use;
+    KiReleaseRawSpinLock(&g_pool_lock, interrupt_state);
+    return value;
 }

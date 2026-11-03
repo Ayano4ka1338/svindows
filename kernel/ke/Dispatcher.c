@@ -7,7 +7,8 @@
  * an auto-reset event or a semaphore, only as many waiters as there are signals
  * succeed, and the rest block again).
  *
- * Single-CPU: short critical sections just disable interrupts.
+ * Dispatcher and scheduler state share the scheduler lock. Wait insertion,
+ * signaling, timeout, and ready-queue publication are one atomic transition.
  */
 #include <svindows/Ke.h>
 #include <svindows/Ob.h>
@@ -92,14 +93,14 @@ static void KiWakeWaitingThread(PKTHREAD thread, NTSTATUS status)
     thread->WaitStatus = status;
     thread->WaitDeadline = 0;
     thread->WaitAlertable = FALSE;
-    KiReadyThread(thread);
+    KiReadyThreadWithSchedulerLock(thread);
 }
 
 NTSTATUS KeQueueKernelApc(PKTHREAD thread, const KKERNEL_APC *apc)
 {
     if (!thread || !apc || !apc->Routine)
         return STATUS_INVALID_PARAMETER;
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     NTSTATUS status = STATUS_SUCCESS;
     if (thread->State == ThreadStateTerminated)
         status = STATUS_INVALID_PARAMETER;
@@ -113,7 +114,7 @@ NTSTATUS KeQueueKernelApc(PKTHREAD thread, const KKERNEL_APC *apc)
         if (thread->State == ThreadStateWaiting)
             KiWakeWaitingThread(thread, STATUS_SUCCESS);
     }
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
     return status;
 }
 
@@ -125,20 +126,20 @@ void KiDeliverKernelApcs(void)
     if (!thread || thread->State == ThreadStateTerminated)
         return;
     for (UINT32 delivered = 0; delivered < KE_MAXIMUM_KERNEL_APCS; ++delivered) {
-        UINT64 flags = KiIrqSave();
+        UINT64 flags = KiAcquireSchedulerLock();
         if (!thread->KernelApcCount) {
-            KiIrqRestore(flags);
+            KiReleaseSchedulerLock(flags);
             break;
         }
         KKERNEL_APC apc = thread->KernelApcs[thread->KernelApcHead];
         thread->KernelApcHead = (UINT8)((thread->KernelApcHead + 1) %
                                         KE_MAXIMUM_KERNEL_APCS);
         thread->KernelApcCount--;
+        KiReleaseSchedulerLock(flags);
         KIRQL old_irql;
         KeRaiseIrql(APC_LEVEL, &old_irql);
         apc.Routine(apc.Context, apc.Argument1, apc.Argument2);
         KeLowerIrql(old_irql);
-        KiIrqRestore(flags);
     }
 }
 
@@ -146,7 +147,7 @@ NTSTATUS KeQueueUserApc(PKTHREAD thread, const KUSER_APC *apc)
 {
     if (!thread || !apc || !apc->Routine || !thread->UserMode)
         return STATUS_INVALID_PARAMETER;
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     NTSTATUS status = STATUS_SUCCESS;
     if (thread->State == ThreadStateTerminated ||
         (thread->Process && thread->Process->Exiting))
@@ -161,7 +162,7 @@ NTSTATUS KeQueueUserApc(PKTHREAD thread, const KUSER_APC *apc)
         if (thread->State == ThreadStateWaiting && thread->WaitAlertable)
             KiWakeWaitingThread(thread, STATUS_USER_APC);
     }
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
     return status;
 }
 
@@ -169,30 +170,37 @@ NTSTATUS KeDequeueUserApc(PKTHREAD thread, PKUSER_APC apc)
 {
     if (!thread || !apc)
         return STATUS_INVALID_PARAMETER;
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     if (!thread->UserApcCount) {
-        KiIrqRestore(flags);
+        KiReleaseSchedulerLock(flags);
         return STATUS_NOT_FOUND;
     }
     *apc = thread->UserApcs[thread->UserApcHead];
     thread->UserApcHead = (UINT8)((thread->UserApcHead + 1) %
                                   KE_MAXIMUM_USER_APCS);
     thread->UserApcCount--;
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
     return STATUS_SUCCESS;
 }
 
 BOOLEAN KeHasUserApc(PKTHREAD thread)
 {
     if (!thread) return FALSE;
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     BOOLEAN pending = (BOOLEAN)(thread->UserApcCount != 0);
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
     return pending;
 }
 
 /* Wake every thread waiting on this header so it can re-test the object. */
 void KiSignalObject(PDISPATCHER_HEADER h)
+{
+    UINT64 flags = KiAcquireSchedulerLock();
+    KiSignalObjectWithSchedulerLock(h);
+    KiReleaseSchedulerLock(flags);
+}
+
+void KiSignalObjectWithSchedulerLock(PDISPATCHER_HEADER h)
 {
     while (!IsListEmpty(&h->WaitListHead)) {
         PLIST_ENTRY e = RemoveHeadList(&h->WaitListHead);
@@ -204,10 +212,24 @@ void KiSignalObject(PDISPATCHER_HEADER h)
 
 void KiTimeoutThreadWait(PKTHREAD thread)
 {
+    UINT64 flags = KiAcquireSchedulerLock();
+    KiTimeoutThreadWaitWithSchedulerLock(thread);
+    KiReleaseSchedulerLock(flags);
+}
+
+void KiTimeoutThreadWaitWithSchedulerLock(PKTHREAD thread)
+{
     KiWakeWaitingThread(thread, STATUS_TIMEOUT);
 }
 
 void KiCancelThreadWait(PKTHREAD thread, NTSTATUS status)
+{
+    UINT64 flags = KiAcquireSchedulerLock();
+    KiCancelThreadWaitWithSchedulerLock(thread, status);
+    KiReleaseSchedulerLock(flags);
+}
+
+void KiCancelThreadWaitWithSchedulerLock(PKTHREAD thread, NTSTATUS status)
 {
     KiUnlinkThreadWait(thread);
     thread->WaitStatus = status;
@@ -236,7 +258,7 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
                 return STATUS_INVALID_PARAMETER;
     }
 
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     PKTHREAD thread = KeGetCurrentThread();
     UINT64 now = KeGetTickCount();
     UINT64 deadline = timeout_ticks == ~(UINT64)0 ? 0 :
@@ -244,7 +266,7 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
 
     for (;;) {
         if (alertable && thread && thread->UserApcCount) {
-            KiIrqRestore(flags);
+            KiReleaseSchedulerLock(flags);
             return STATUS_USER_APC;
         }
         if (wait_all) {
@@ -260,14 +282,14 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
                     if (KiConsumeSignal(objects[i]) ==
                         STATUS_ABANDONED_WAIT_0)
                         result = STATUS_ABANDONED_WAIT_0 + i;
-                KiIrqRestore(flags);
+                KiReleaseSchedulerLock(flags);
                 return result;
             }
         } else {
             for (ULONG i = 0; i < count; i++) {
                 if (KiCanAcquire(objects[i])) {
                     NTSTATUS consumed = KiConsumeSignal(objects[i]);
-                    KiIrqRestore(flags);
+                    KiReleaseSchedulerLock(flags);
                     if (consumed == STATUS_ABANDONED_WAIT_0)
                         return STATUS_ABANDONED_WAIT_0 + i;
                     return (NTSTATUS)(STATUS_WAIT_0 + i);
@@ -276,7 +298,7 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
         }
 
         if (timeout_ticks == 0 || (deadline && KeGetTickCount() >= deadline)) {
-            KiIrqRestore(flags);
+            KiReleaseSchedulerLock(flags);
             return STATUS_TIMEOUT;
         }
 
@@ -292,7 +314,8 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
             InsertTailList(&objects[i]->WaitListHead, &block->WaitListEntry);
         }
         thread->State = ThreadStateWaiting;
-        KiBlockCurrentThread(); /* reschedule; returns once signalled */
+        KiBlockCurrentThreadWithSchedulerLock(flags);
+        flags = KiAcquireSchedulerLock();
 
         /* Signaling and timeout paths normally unlink all blocks before making
          * us ready. This is also safe as defensive cleanup. */
@@ -300,12 +323,12 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
         thread->WaitAlertable = FALSE;
         if (thread->WaitStatus == STATUS_USER_APC) {
             thread->WaitBlockCount = 0;
-            KiIrqRestore(flags);
+            KiReleaseSchedulerLock(flags);
             return STATUS_USER_APC;
         }
         if (thread->WaitStatus == STATUS_TIMEOUT) {
             thread->WaitBlockCount = 0;
-            KiIrqRestore(flags);
+            KiReleaseSchedulerLock(flags);
             return STATUS_TIMEOUT;
         }
         thread->WaitBlockCount = 0;
@@ -355,11 +378,11 @@ LONG KeSetEvent(PKEVENT event)
 {
     if (KeGetCurrentIrql() > DISPATCH_LEVEL)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "event signal above DISPATCH_LEVEL");
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     LONG previous = event->Header.SignalState;
     event->Header.SignalState = 1;
-    KiSignalObject(&event->Header);
-    KiIrqRestore(flags);
+    KiSignalObjectWithSchedulerLock(&event->Header);
+    KiReleaseSchedulerLock(flags);
     return previous;
 }
 
@@ -367,9 +390,9 @@ void KeResetEvent(PKEVENT event)
 {
     if (KeGetCurrentIrql() > DISPATCH_LEVEL)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "event reset above DISPATCH_LEVEL");
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     event->Header.SignalState = 0;
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
 }
 
 /* ------------------------------------------------------------------ */
@@ -386,13 +409,13 @@ void KeInitializeSemaphore(PKSEMAPHORE sem, LONG initial, LONG limit)
 
 LONG KeReleaseSemaphore(PKSEMAPHORE sem, LONG count)
 {
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     LONG previous = sem->Header.SignalState;
     sem->Header.SignalState += count;
     if (sem->Limit && sem->Header.SignalState > sem->Limit)
         sem->Header.SignalState = sem->Limit;
-    KiSignalObject(&sem->Header);
-    KiIrqRestore(flags);
+    KiSignalObjectWithSchedulerLock(&sem->Header);
+    KiReleaseSchedulerLock(flags);
     return previous;
 }
 
@@ -402,6 +425,7 @@ LONG KeReleaseSemaphore(PKSEMAPHORE sem, LONG count)
 
 void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned)
 {
+    UINT64 flags = KiAcquireSchedulerLock();
     mutant->Header.Type = MutantObject;
     mutant->Header.SignalState = initially_owned ? 0 : 1;
     InitializeListHead(&mutant->Header.WaitListHead);
@@ -414,13 +438,14 @@ void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned)
                        &mutant->OwnerEntry);
         ObReferenceObject((POBJECT)mutant);
     }
+    KiReleaseSchedulerLock(flags);
 }
 
 BOOLEAN KeReleaseMutant(PKMUTANT mutant, LONG *previous_count)
 {
-    UINT64 flags = KiIrqSave();
+    UINT64 flags = KiAcquireSchedulerLock();
     if (mutant->OwnerThread != KeGetCurrentThread()) {
-        KiIrqRestore(flags);
+        KiReleaseSchedulerLock(flags);
         return FALSE;
     }
     if (previous_count)
@@ -430,15 +455,16 @@ BOOLEAN KeReleaseMutant(PKMUTANT mutant, LONG *previous_count)
         mutant->Header.SignalState = 1;
         RemoveEntryList(&mutant->OwnerEntry);
         InitializeListHead(&mutant->OwnerEntry);
-        KiSignalObject(&mutant->Header);
+        KiSignalObjectWithSchedulerLock(&mutant->Header);
         ObDereferenceObject((POBJECT)mutant);
     }
-    KiIrqRestore(flags);
+    KiReleaseSchedulerLock(flags);
     return TRUE;
 }
 
 void KeAbandonThreadMutants(PKTHREAD thread)
 {
+    UINT64 flags = KiAcquireSchedulerLock();
     while (!IsListEmpty(&thread->OwnedMutantListHead)) {
         PLIST_ENTRY entry = RemoveHeadList(&thread->OwnedMutantListHead);
         PKMUTANT mutant = CONTAINING_RECORD(entry, KMUTANT, OwnerEntry);
@@ -447,7 +473,8 @@ void KeAbandonThreadMutants(PKTHREAD thread)
         mutant->RecursionCount = 0;
         mutant->Abandoned = TRUE;
         mutant->Header.SignalState = 1;
-        KiSignalObject(&mutant->Header);
+        KiSignalObjectWithSchedulerLock(&mutant->Header);
         ObDereferenceObject((POBJECT)mutant);
     }
+    KiReleaseSchedulerLock(flags);
 }

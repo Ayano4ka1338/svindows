@@ -45,5 +45,7 @@ void LinuxThreadBeginWindowsExec(PKTHREAD thread, UINT64 argument);
 /* Bring up the synthetic evdev input devices (/dev/input/eventN). Called once
  * after the PS/2 keyboard and mouse drivers are live. */
 void LinuxInputInitialize(void);
+/* True while Xorg or another Linux client has an evdev keyboard open. */
+BOOLEAN LinuxInputKeyboardActive(void);
 
 #endif

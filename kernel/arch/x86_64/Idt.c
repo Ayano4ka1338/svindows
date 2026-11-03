@@ -60,6 +60,11 @@ void KeInitializeIdt(void)
         idt_set_gate(v, isr_stub_table[v], ist, 0x8E);
     }
 
+    KeLoadIdt();
+}
+
+void KeLoadIdt(void)
+{
     DTR idtr = { .limit = sizeof(g_idt) - 1, .base = (UINT64)&g_idt };
     KiLoadIdtr(&idtr);
 }

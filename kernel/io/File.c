@@ -1677,8 +1677,14 @@ UINT64 NtConsoleControlSimple(UINT64 *a)
     NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type, &object);
     if (!NT_SUCCESS(status)) return (UINT64)status;
     FILE_OBJECT *file = (FILE_OBJECT *)object;
-    if (file->Kind != FileKindConsole) status = STATUS_INVALID_HANDLE;
-    else status = ConControl(operation, argument1, a[3], a[4], result);
+    if (file->Kind == FileKindConsole)
+        status = ConControl(operation, argument1, a[3], a[4], result);
+    else if (file->Kind == FileKindCharDevice && file->CharOps &&
+             file->CharOps->ConsoleControl)
+        status = file->CharOps->ConsoleControl(file->CharContext, operation,
+                                               argument1, a[3], a[4], result);
+    else
+        status = STATUS_INVALID_HANDLE;
     ObDereferenceObject(object);
     return (UINT64)status;
 }

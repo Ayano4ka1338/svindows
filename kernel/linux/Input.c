@@ -656,9 +656,32 @@ const LINUX_EVENT_DEVICE *LinuxEventDevice(UINT32 index)
 void LinuxEventSetOpen(UINT32 index, BOOLEAN open)
 {
     if (index >= LINUX_EVENT_DEVICE_COUNT) return;
-    if (index == 0 || index == 2) {
-        if (open) KbdInputMirrorAcquire();
-        else KbdInputMirrorRelease();
+    BOOLEAN changed = FALSE;
+    if (open) {
+        __sync_add_and_fetch(&g_linux_event_devices[index].OpenReferences, 1);
+        changed = TRUE;
+    } else {
+        UINT32 references;
+        do {
+            references = __sync_fetch_and_add(
+                &g_linux_event_devices[index].OpenReferences, 0);
+            if (!references) break;
+        } while (!__sync_bool_compare_and_swap(
+            &g_linux_event_devices[index].OpenReferences, references,
+            references - 1));
+        changed = references != 0;
     }
-    g_linux_event_devices[index].Open = open;
+    g_linux_event_devices[index].Open =
+        __sync_fetch_and_add(&g_linux_event_devices[index].OpenReferences,
+                             0) != 0;
+    if (index == 0 || index == 2) {
+        if (changed && open) KbdInputMirrorAcquire();
+        else if (changed) KbdInputMirrorRelease();
+    }
+}
+
+BOOLEAN LinuxInputKeyboardActive(void)
+{
+    return __sync_fetch_and_add(&g_linux_event_devices[0].OpenReferences, 0) ||
+           __sync_fetch_and_add(&g_linux_event_devices[2].OpenReferences, 0);
 }
