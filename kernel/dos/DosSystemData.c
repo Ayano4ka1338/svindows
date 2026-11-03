@@ -69,21 +69,48 @@ static void dos_write_mcb(U8 *memory, U16 segment, U8 type, U16 owner,
 }
 
 static void dos_update_mcb_chain(DOS_VM *vm) {
-  U32 next_user = (U32)PSP - 1u;
-  U32 next_free = next_user + (U32)vm->InitialParagraphs + 1u;
-  U32 free_paragraphs = next_free < 0xa000u ? 0xa000u - next_free - 1u : 0;
+  U32 cursor = (U32)PSP + vm->InitialParagraphs;
+  U16 last_mcb = (U16)(PSP - 1u);
   static const char system_name[8] = {'S','V','D','O','S',' ',' ',' '};
   static const char app_name[8] = {'D','O','S','A','P','P',' ',' '};
   dos_put16(dos_system_base(vm), (U16)(DOS_LISTS_OFFSET - 2u),
             DOS_FIRST_SYSTEM_MCB);
   dos_write_mcb(vm->Memory, DOS_FIRST_SYSTEM_MCB, 'M', 0x0008u,
                 (U16)(PSP - DOS_SYSTEM_DATA_SEGMENT - 1u), system_name);
-  dos_write_mcb(vm->Memory, (U16)next_user,
-                free_paragraphs ? 'M' : 'Z', PSP,
+  dos_write_mcb(vm->Memory, (U16)(PSP - 1u), 'M', PSP,
                 vm->InitialParagraphs, app_name);
-  if (free_paragraphs)
-    dos_write_mcb(vm->Memory, (U16)next_free, 'Z', 0, (U16)free_paragraphs,
-                  NULL);
+  for (U32 count = 0; count < DOS_MAX_BLOCKS; count++) {
+    U32 next_segment = 0xffffffffu;
+    DOS_BLOCK *next = NULL;
+    for (U32 i = 0; i < DOS_MAX_BLOCKS; i++) {
+      DOS_BLOCK *block = &vm->Blocks[i];
+      if (block->Used && block->Segment > cursor &&
+          (U32)block->Segment - 1u < next_segment) {
+        next_segment = (U32)block->Segment - 1u;
+        next = block;
+      }
+    }
+    if (!next) break;
+    next_segment = next->Segment - 1u;
+    if (next_segment > cursor) {
+      U32 size = next_segment - cursor - 1u;
+      dos_write_mcb(vm->Memory, (U16)cursor, 'M', 0, (U16)size, NULL);
+    }
+    dos_write_mcb(vm->Memory, (U16)next_segment, 'M', next->OwnerPsp,
+                  next->Paragraphs, NULL);
+    last_mcb = (U16)next_segment;
+    cursor = next_segment + 1u + next->Paragraphs;
+  }
+  if (cursor < 0xa000u) {
+    dos_write_mcb(vm->Memory, (U16)cursor, 'Z', 0,
+                  (U16)(0xa000u - cursor - 1u), NULL);
+  } else {
+    vm->Memory[(U32)last_mcb << 4] = 'Z';
+  }
+}
+
+void DosUpdateMemoryControlBlocks(DOS_VM *vm) {
+  if (vm && vm->Memory) dos_update_mcb_chain(vm);
 }
 
 void DosSyncSystemData(DOS_VM *vm, const char *current_directory) {
@@ -100,7 +127,7 @@ void DosSyncSystemData(DOS_VM *vm, const char *current_directory) {
   dos_put8(base, (U16)(sda + 0x16u), 2u); /* current drive C: */
   dos_put8(base, (U16)(sda + 0x17u), vm->CtrlBreak ? 0xffu : 0u);
   dos_put16(base, (U16)(sda + 0x1au), vm->CurrentPsp);
-  dos_put8(base, (U16)(sda + 0x01u), 0); /* idle between guest INT 21h calls */
+  dos_put8(base, (U16)(sda + 0x01u), vm->InDosCount);
 
   /* Windows 1.x checks this DOS 3.x compatibility byte by subtracting
    * 01A8h from the InDOS pointer returned by AH=34h. */

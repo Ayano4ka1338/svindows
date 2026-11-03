@@ -455,6 +455,13 @@ PKTHREAD  KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
                                        UINT64 user_gs_base, UINT64 user_arg,
                                        LONG priority);
 PKTHREAD  KeGetCurrentThread(void);
+/* Scheduler-owned current-thread pointer. Hot in-kernel emulators may use
+ * this inline accessor to avoid an out-of-line call for each guest operand. */
+extern PKTHREAD KeCurrentThreadPointer;
+static ALWAYS_INLINE PKTHREAD KeGetCurrentThreadFast(void)
+{
+    return KeCurrentThreadPointer;
+}
 void      KeSetUserFsBase(UINT64 base);
 void      KeSetUserGsBase(UINT64 base);
 PKTHREAD  KeLookupThreadById(ULONG thread_id);

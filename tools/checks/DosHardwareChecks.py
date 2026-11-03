@@ -65,7 +65,7 @@ int main(void) {
     assert(DosPortIn(vm,port+5,8) == 0x60);
     assert(!(DosPortIn(vm,port+5,8) & 1));
     assert(DosPortIn(vm,port+2,8) == 1);
-    assert(DosPortIn(vm,port+6,8) == (port == 0x3f8 ? 0xb0 : 0));
+    assert(DosPortIn(vm,port+6,8) == 0); /* modem outputs are inactive */
     DosPortOut(vm,port+3,0x80,8);
     DosPortOut(vm,port,0x60,8);
     assert(DosPortIn(vm,port,8) == 0x60);
@@ -77,6 +77,63 @@ int main(void) {
     DosPortOut(vm,port+7,0x5a,8);
     assert(DosPortIn(vm,port+7,8) == 0x5a);
   }
+
+  /* Windows 1.01 is configured for the Microsoft serial mouse on COM1.
+     Exercise the exact DTR/RTS handshake and IRQ-driven packet path used by
+     its driver, rather than merely checking that the UART registers exist. */
+  MouseState.X = 100; MouseState.Y = 50;
+  MouseState.Buttons = 0; MouseState.Seq = 1;
+  DosPortOut(vm, 0x3f9, 0x01, 8); /* COM1 receive-data interrupt enabled */
+  DosPortOut(vm, 0x3fc, 0x09, 8); /* DTR + OUT2: DSR/RI/DCD go high */
+  assert(vm->SerialMouseActive && vm->SerialMouseUart == 1);
+  assert(DosPortIn(vm, 0x3fe, 8) == 0xea); /* E0 current + DSR/DCD delta */
+  DosPortOut(vm, 0x3fc, 0x0b, 8); /* RTS rises: CTS + serial-mouse reset */
+  /* The completed handshake reports all modem lines and a CTS delta. */
+  assert(DosPortIn(vm, 0x3fe, 8) == 0xf1);
+  assert(DosPortIn(vm, 0x3fe, 8) == 0xf0);
+  assert(DosSerialMouseIrqPending(vm, 1));
+  assert(DosPortIn(vm, 0x3fa, 8) == 0x04);
+  assert(DosPortIn(vm, 0x3fd, 8) == 0x61);
+  assert(DosPortIn(vm, 0x3f8, 8) == 'M');
+  assert(!DosSerialMouseIrqPending(vm, 1));
+
+  MouseState.X = 120; MouseState.Y = 45;
+  MouseState.Buttons = 1; MouseState.Seq++;
+  DosSerialMousePoll(vm);
+  assert(DosSerialMouseIrqPending(vm, 1));
+  assert(DosPortIn(vm, 0x3f8, 8) == 0x6c); /* sync, left button, Y high bits */
+  assert(DosPortIn(vm, 0x3f8, 8) == 5);    /* X low six bits, scaled 1/4 */
+  assert(DosPortIn(vm, 0x3f8, 8) == 0x3f); /* signed -1 Y, scaled 1/4 */
+  assert(!DosSerialMouseIrqPending(vm, 1));
+
+  /* Sub-four-pixel host updates must accumulate instead of being truncated
+     independently. Four one-pixel updates produce one +1 serial mickey. */
+  for (unsigned step = 0; step < 4; ++step) {
+    MouseState.X++;
+    MouseState.Seq++;
+    DosSerialMousePoll(vm);
+    if (step != 3) assert(!DosSerialMouseIrqPending(vm, 1));
+  }
+  assert(DosSerialMouseIrqPending(vm, 1));
+  assert(DosPortIn(vm, 0x3f8, 8) == 0x60);
+  assert(DosPortIn(vm, 0x3f8, 8) == 1);
+  assert(DosPortIn(vm, 0x3f8, 8) == 0);
+  assert(vm->SerialMouseDeltaX == 0 && vm->SerialMouseDeltaY == -1);
+  assert(!DosSerialMouseIrqPending(vm, 1));
+
+  /* Modem-status IRQs are independently reported; dropping and restoring
+     the power lines resets the mouse and sends a fresh 'M' identification. */
+  DosPortOut(vm, 0x3f9, 0x08, 8);
+  DosPortOut(vm, 0x3fc, 0x08, 8); /* DTR and RTS off, OUT2 remains enabled */
+  assert(DosSerialMouseIrqPending(vm, 1));
+  assert(DosPortIn(vm, 0x3fa, 8) == 0x00);
+  assert(DosPortIn(vm, 0x3fe, 8) == 0x0f);
+  assert(DosPortIn(vm, 0x3fe, 8) == 0x00);
+  DosPortOut(vm, 0x3f9, 0x01, 8);
+  DosPortOut(vm, 0x3fc, 0x0a, 8); /* RTS rises first */
+  DosPortOut(vm, 0x3fc, 0x0b, 8); /* DTR rise resets and identifies */
+  assert(DosPortIn(vm, 0x3fe, 8) == 0xfb); /* F0 current + CTS/DSR/DCD deltas */
+  assert(DosPortIn(vm, 0x3f8, 8) == 'M');
   free(vm->Memory); free(vm); return 0;
 }
 '''
@@ -92,6 +149,16 @@ with tempfile.TemporaryDirectory(prefix='sv-dos-hardware-') as directory:
                     '-Wall', '-Wextra', '-Werror', '-Ikernel/include', '-Ikernel/dos',
                     str(cfile), 'kernel/dos/Video.c', '-o', str(exe)], cwd=root, check=True)
     subprocess.run([str(exe)], check=True)
+
+# Serial mouse discovery uses the standard BIOS Data Area inventory, not
+# only the fact that the guest can issue I/O to 3F8h. Keep COM1/COM2 and INT 11h
+# consistent so Windows 1.x can find the explicitly selected COM1 driver.
+dos_source = (root / 'kernel/dos/Dos.c').read_text()
+interrupt_source = (root / 'kernel/dos/Interrupt.c').read_text()
+assert 'vm->Memory[0x400u] = 0xf8u; vm->Memory[0x401u] = 0x03u;' in dos_source
+assert 'vm->Memory[0x402u] = 0xf8u; vm->Memory[0x403u] = 0x02u;' in dos_source
+assert 'vm->Memory[0x410u] = 0x01u; vm->Memory[0x411u] = 0x04u;' in dos_source
+assert 'r[AX] = rw(0x40u, 0x10u);' in interrupt_source
 
 # Decode the emitted IRQ0 stub with ndisasm to check instruction boundaries,
 # the conditional carry into the high word, and the normal interrupt return.

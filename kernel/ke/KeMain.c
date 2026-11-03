@@ -75,9 +75,12 @@ static void InputWorker(PVOID context)
          * arrived through the ordered hardware stream above. */
         while (KbdDataAvailable()) {
             char c = KbdReadChar();
-            if (c) {
+            /* GUI windows already received this key through the ordered
+             * KBD_INPUT stream above. Do not also inject it into the hidden
+             * native console (in particular, Ctrl+C must target the focused
+             * terminal rather than a background cmd.exe). */
+            if (c && !window_owns_keyboard)
                 IoConsoleInputCharacter(c);
-            }
         }
 
         /* Forward pointer motion to the window manager, which hit-tests,
@@ -184,7 +187,7 @@ static void KiBootStepFailed(const char *name, NTSTATUS status)
 /*
  * KiSystemStartup - phase 0 kernel initialization.
  *
- * @magic:    the Multiboot2 bootloader magic reported by GRUB.
+ * @magic:    the Multiboot2 bootloader magic reported by Limine.
  * @mbi_phys: physical address of the Multiboot2 information structure.
  */
 void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
@@ -210,6 +213,8 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     KiBootStepOk("Syscall / exception dispatcher");
 
     /* Phase 1: memory management. */
+    if (GfxRequestBootMode((UINT64)mbi_phys, 1200, 800))
+        KeLog("[gfx]  selected 1200x800 via VBE DISPI\n");
     MmInitialize((UINT64)mbi_phys);
     KiBootStepOk("Physical / virtual memory");
 
@@ -241,6 +246,19 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     CmInitialize();
     KiBootStepOk("Registry manager");
 
+    UINT64 initrd_base = 0, initrd_size = 0;
+    if (MmFindMultibootModule((UINT64)mbi_phys, "initrd.fat",
+                              &initrd_base, &initrd_size) &&
+        initrd_base <= ~(UINT64)0 - initrd_size &&
+        initrd_size <= (SIZE_T)~(SIZE_T)0 &&
+        IoDiskSetMemoryImage(MmPhysToVirt(initrd_base),
+                             (SIZE_T)initrd_size)) {
+        KeLog("[io]   Limine initrd.fat module: %lu bytes at 0x%lx\n",
+              (unsigned long)initrd_size, (unsigned long)initrd_base);
+    } else {
+        KeLog("[io]   required Limine initrd.fat module not found\n");
+    }
+
     /* win32k's shared SERVERINFO, which USER32 reads during process attach. */
     W32kInitializeServerInfo();
     KiBootStepOk("Win32 subsystem data");
@@ -250,12 +268,13 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     LdrInitializeStackGuard();
     KiBootStepOk("Kernel stack guard");
 
-    /* Phase 5/6: mount the disk, then load a PE from it and run it. */
+    /* Phase 5/6: mount initrd.fat, then load a PE from its FAT volume. */
     NTSTATUS io = IoInitialize();
+    const char *filesystem_label = "Limine initrd FAT32 filesystem";
     if (NT_SUCCESS(io))
-        KiBootStepOk("ATA / FAT32 filesystem");
+        KiBootStepOk(filesystem_label);
     else
-        KiBootStepFailed("ATA / FAT32 filesystem", io);
+        KiBootStepFailed(filesystem_label, io);
 
     KeInitializeScheduler();
     KiBootStepOk("Scheduler");

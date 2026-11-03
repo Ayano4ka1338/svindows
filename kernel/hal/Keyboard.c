@@ -138,7 +138,11 @@ static void kbd_decode(UINT8 sc)
     if (kbd_ctrl && ((gui >= 'a' && gui <= 'z') || (gui >= 'A' && gui <= 'Z')))
         gui &= 0x1F;
     kbd_input_push(KBD_INPUT_CHARACTER | (UINT8)gui);
-    kbd_push(c);
+    char console_char = c;
+    if (kbd_ctrl && ((console_char >= 'a' && console_char <= 'z') ||
+                     (console_char >= 'A' && console_char <= 'Z')))
+        console_char &= 0x1F;
+    kbd_push(console_char);
 }
 
 static void kbd_deferred(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)

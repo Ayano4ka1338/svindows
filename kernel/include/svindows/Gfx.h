@@ -34,6 +34,8 @@ BOOLEAN GfxAvailable(void);
  * framebuffer, either because it was not supplied or one of its mappings
  * could not be installed. */
 BOOLEAN GfxInitialize(void);
+/* On Bochs/QEMU VBE adapters, select and publish an exact boot display mode. */
+BOOLEAN GfxRequestBootMode(UINT64 mbi_phys, UINT32 width, UINT32 height);
 
 void GfxPutPixel(UINT32 x, UINT32 y, UINT32 color);
 void GfxFillRect(UINT32 x, UINT32 y, UINT32 w, UINT32 h, UINT32 color);

@@ -51,11 +51,15 @@ enum {
     ConsoleControlFillCharacter,
     ConsoleControlFillAttribute,
     ConsoleControlSetInputMode,
+    ConsoleControlSetForegroundProcess,
+    ConsoleControlRedraw,
+    ConsoleControlStreamControl,
 };
 
 void ConInitialize(void);
 void ConRedraw(void);
 void ConQueueInputCharacter(char character);
+void ConFlushInput(void);
 SIZE_T ConRead(void *buffer, SIZE_T length);
 SIZE_T ConTryRead(void *buffer, SIZE_T length);
 BOOLEAN ConInputAvailable(void);

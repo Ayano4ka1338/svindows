@@ -39,8 +39,10 @@
 #define LWIP_NETCONN_SEM_PER_THREAD    0
 #define LWIP_STATS                     1
 #define LWIP_STATS_DISPLAY             0
-#define LWIP_DEBUG                     0
+#define LWIP_DEBUG                     1
+#define DHCP_DEBUG                     LWIP_DBG_ON
 #define LWIP_DHCP_AUTOIP_COOP          0
+#define LWIP_DHCP_DOES_ACD_CHECK       0
 #define LWIP_DHCP_GET_NTP_SRV          0
 #define LWIP_DHCP_MAX_NTP_SERVERS      0
 #define LWIP_MDNS_RESPONDER            0

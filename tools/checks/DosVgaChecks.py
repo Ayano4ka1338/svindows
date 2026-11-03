@@ -148,7 +148,7 @@ assert 'ah == 0x12 && get8(3) == 0x10u' in interrupt
 assert 'if (n == 0x11)' in interrupt and 'if (n == 0x12)' in interrupt
 assert 'U8 operation = get8(7)' in interrupt  # INT 10h/AH=0Bh uses BH
 assert 'if (n == 0x10 && ah == 0x0b)' in interrupt
-assert 'r[AX] = 0x0001u' in interrupt  # one floppy in INT 11h equipment word
+assert 'r[AX] = rw(0x40u, 0x10u);' in interrupt  # INT 11h returns BIOS BDA equipment word
 # Windows 1.01 system files must be staged together under C:\WINDOWS1.
 windows_files = [
     'ABOUT.TXT', 'CALC.EXE', 'CALENDAR.EXE', 'CARDFILE.EXE', 'CLIPBRD.EXE',
@@ -161,24 +161,36 @@ windows_files = [
     'WINOLDAP.MOD', 'WRITE.DAT', 'WRITE.EXE',
 ]
 windows_dir = root / 'user/d/windows1'
-assert sorted(p.name for p in windows_dir.iterdir() if p.is_file()) == sorted(windows_files)
+actual_windows_files = {p.name for p in windows_dir.iterdir() if p.is_file()}
+assert set(windows_files).issubset(actual_windows_files)
+assert actual_windows_files.issubset(set(windows_files) | {'MOUSE.DRV'})
 for name in windows_files:
     assert (windows_dir / name).is_file(), name
 # Local extraction leftovers may exist in DOOM; staging must filter them out.
 makefile = (root / 'Makefile').read_text()
-assert 'DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS1_NAMES))' in makefile
+assert 'DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS_NAMES))' in makefile
 makefile = (root / 'Makefile').read_text()
-assert 'DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS1_NAMES)),$(sort $(wildcard user/d/doom/*)))' in makefile
+assert 'DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS_NAMES)),$(sort $(wildcard user/d/doom/*)))' in makefile
 assert 'WINDOWS1_FILES := $(sort $(wildcard user/d/windows1/*))' in makefile
-assert 'mcopy -i $(DISK) $(DOOM_FILES) ::DOOM/' in makefile
-assert 'mcopy -i $(DISK) $(WINDOWS1_FILES) ::WINDOWS1/' in makefile
-assert 'mcopy -i $(DISK) user/d/win.bat ::WIN.BAT' in makefile
+assert 'mcopy -i $(INITRD) $(DOOM_FILES) ::DOOM/' in makefile
+assert 'mcopy -i $(INITRD) $(WINDOWS1_FILES) ::WINDOWS1/' in makefile
+assert 'mcopy -i $(INITRD) $(WINDOWS2_FILES) ::WINDOWS2/' in makefile
+assert 'mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT' in makefile
+assert 'mcopy -i $(INITRD) user/d/win.bat ::WIN.BAT' in makefile
 overlay = (windows_dir / 'WIN100.OVL').read_bytes()
 assert overlay.startswith(b'C:\\WINDOWS1\\WIN100.OVL\0')
 assert b'C:\\WINTEST\\WIN100.OVL' not in overlay
-assert 'dos_command_is_win100_bin(command) ? 0x2203u : 0x0005u' in (root / 'kernel/dos/Dos.c').read_text()
+assert 'vm->IsWindows100 = dos_command_is_win100_bin(command);' in (root / 'kernel/dos/Dos.c').read_text()
+assert 'vm->DosVersion = vm->IsWindows100 ? 0x2203u :' in (root / 'kernel/dos/Dos.c').read_text()
+assert '(vm->IsWindows200 ? 0x0004u : 0x0005u)' in (root / 'kernel/dos/Dos.c').read_text()
 assert 'r[AX] = current()->DosVersion;' in (root / 'kernel/dos/Interrupt.c').read_text()
 assert 'r[BX] = 0x0005' in (root / 'kernel/dos/Interrupt.c').read_text()
 assert (root / 'user/d/win.bat').read_bytes().replace(b'\r\n', b'\n').decode().splitlines() == ['@echo off', 'cd \\windows1', 'win.com', 'cd \\']
 assert 'user/d/windows101' not in makefile
-print('PASS DOS VGA planes, CGA scanline banks, BIOS EGA palette, Windows1 staging, overlay path, and SETVER version')
+windows2 = root / 'user/d/windows2'
+assert {'WIN.COM', 'WIN200.BIN', 'WIN200.OVL'}.issubset({p.name.upper() for p in windows2.iterdir() if p.is_file()})
+assert not (windows2 / 'CTMOUSE.EXE').exists()
+assert 'CTMOUSE' not in (windows2 / 'AUTOEXEC.BAT').read_text(encoding='ascii').upper()
+assert 'CTMOUSE' not in (root / 'user/d/win2.bat').read_text(encoding='ascii').upper()
+assert 'WINDOWS2_FILES := $(sort $(wildcard user/d/windows2/*))' in makefile
+print('PASS DOS VGA planes, CGA scanline banks, BIOS EGA palette, Windows 1.x/2.x staging, cursor path, and SETVER versions')

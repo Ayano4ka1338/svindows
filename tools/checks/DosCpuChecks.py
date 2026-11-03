@@ -63,30 +63,38 @@ poll_prelude = r'''
 #include <stdint.h>
 #include <assert.h>
 typedef uint8_t U8;
+typedef uint32_t U32;
+typedef int32_t INT32;
 #define DOS_HW_POLL_INTERVAL 128u
 typedef struct {
+  U32 Steps;
   U8 InterruptShadow;
-  U8 HardwarePollCountdown;
+  U32 HardwarePollDeadline;
 } DOS_VM;
 '''
 poll_test = r'''
 int main(void) {
   DOS_VM vm = {0};
+  vm.Steps++;
   assert(dos_hardware_poll_due(&vm) == 1);
-  assert(vm.HardwarePollCountdown == 127);
-  for (unsigned i = 0; i < 127; ++i)
+  assert(vm.HardwarePollDeadline == 129);
+  for (unsigned i = 0; i < 127; ++i) {
+    vm.Steps++;
     assert(dos_hardware_poll_due(&vm) == 0);
-  assert(vm.HardwarePollCountdown == 0);
+  }
+  vm.Steps++;
   assert(dos_hardware_poll_due(&vm) == 1);
 
   /* A two-instruction shadow suppresses polling and forces the next boundary
    * to poll immediately after the protected instruction window expires. */
   vm.InterruptShadow = 2;
+  vm.Steps++;
   assert(dos_hardware_poll_due(&vm) == 0);
   assert(vm.InterruptShadow == 1);
+  vm.Steps++;
   assert(dos_hardware_poll_due(&vm) == 0);
   assert(vm.InterruptShadow == 0);
-  assert(vm.HardwarePollCountdown == 0);
+  vm.Steps++;
   assert(dos_hardware_poll_due(&vm) == 1);
   return 0;
 }

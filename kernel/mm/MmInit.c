@@ -31,6 +31,16 @@ void MmInitialize(UINT64 mb_info_phys)
           (unsigned long)(g_memory_map.total_available >> 20),
           (unsigned long)g_memory_map.highest_address);
 
+    UINT64 initrd_base = 0, initrd_size = 0;
+    BOOLEAN has_initrd = MmFindMultibootModule(mb_info_phys, "initrd.fat",
+                                               &initrd_base, &initrd_size);
+
     MmInitializePhysicalMemory(&g_memory_map);
+    if (has_initrd) {
+        MmReservePhysicalRange(initrd_base, initrd_size);
+        KeLog("[mm]   reserved initrd.fat physical range 0x%lx..0x%lx\n",
+              (unsigned long)initrd_base,
+              (unsigned long)(initrd_base + initrd_size));
+    }
     MmInitializeVirtualMemory(&g_memory_map);
 }

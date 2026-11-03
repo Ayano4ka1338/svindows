@@ -20,6 +20,24 @@ static KEVENT g_stack_ready_event;
 static BOOLEAN g_lwip_initialized;
 static BOOLEAN g_interface_added;
 
+static void SvNetifStatusChanged(struct netif *netif)
+{
+    const ip4_addr_t *address = netif_ip4_addr(netif);
+    const ip4_addr_t *netmask = netif_ip4_netmask(netif);
+    const ip4_addr_t *gateway = netif_ip4_gw(netif);
+    if (ip4_addr_isany_val(*address)) {
+        KeLog("[net] DHCP address unavailable\n");
+        return;
+    }
+    KeLog("[net] DHCP lease address=%u.%u.%u.%u netmask=%u.%u.%u.%u gateway=%u.%u.%u.%u\n",
+          (unsigned)ip4_addr1(address), (unsigned)ip4_addr2(address),
+          (unsigned)ip4_addr3(address), (unsigned)ip4_addr4(address),
+          (unsigned)ip4_addr1(netmask), (unsigned)ip4_addr2(netmask),
+          (unsigned)ip4_addr3(netmask), (unsigned)ip4_addr4(netmask),
+          (unsigned)ip4_addr1(gateway), (unsigned)ip4_addr2(gateway),
+          (unsigned)ip4_addr3(gateway), (unsigned)ip4_addr4(gateway));
+}
+
 static UINT16 SvReadBe16(const UINT8 *value)
 {
     return (UINT16)(((UINT16)value[0] << 8) | value[1]);
@@ -95,6 +113,67 @@ static void SvTraceDnsFrame(const char *direction, const UINT8 *frame,
           (unsigned)answers, (unsigned)udp_length);
 }
 
+static void SvTraceDhcpFrame(const char *direction, const UINT8 *frame,
+                             UINT32 length)
+{
+    static volatile UINT32 trace_count;
+    if (!frame || length < 14u + 20u + 8u ||
+        SvReadBe16(frame + 12) != 0x0800u)
+        return;
+    const UINT8 *ip = frame + 14u;
+    UINT32 ihl = (UINT32)(ip[0] & 0x0fu) * 4u;
+    if ((ip[0] >> 4) != 4u || ihl < 20u ||
+        length < 14u + ihl + 8u || ip[9] != 17u)
+        return;
+    const UINT8 *udp = ip + ihl;
+    UINT16 source_port = SvReadBe16(udp);
+    UINT16 target_port = SvReadBe16(udp + 2);
+    if (!((source_port == 67u || source_port == 68u) &&
+          (target_port == 67u || target_port == 68u)))
+        return;
+    UINT32 index = __sync_fetch_and_add(&trace_count, 1u);
+    if (index >= 16u) return;
+    const UINT8 *bootp = udp + 8u;
+    if (length < (UINT32)(bootp - frame) + 240u) return;
+    UINT8 message_type = 0;
+    UINT32 options = 240u;
+    while ((UINT32)(bootp - frame) + options + 2u <= length) {
+        UINT8 option = bootp[options++];
+        if (option == 0) continue;
+        if (option == 255) break;
+        UINT8 option_length = bootp[options++];
+        if ((UINT32)(bootp - frame) + options + option_length > length) break;
+        if (option == 53u && option_length == 1u)
+            message_type = bootp[options];
+        options += option_length;
+    }
+    KeLog("[net-dhcp] %s %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u op=%u type=%u xid=%02x%02x%02x%02x yiaddr=%u.%u.%u.%u frame=%u\n",
+          direction,
+          (unsigned)ip[12], (unsigned)ip[13], (unsigned)ip[14], (unsigned)ip[15],
+          (unsigned)source_port,
+          (unsigned)ip[16], (unsigned)ip[17], (unsigned)ip[18], (unsigned)ip[19],
+          (unsigned)target_port, (unsigned)bootp[0], (unsigned)message_type,
+          (unsigned)bootp[4], (unsigned)bootp[5], (unsigned)bootp[6],
+          (unsigned)bootp[7], (unsigned)bootp[16], (unsigned)bootp[17],
+          (unsigned)bootp[18], (unsigned)bootp[19], (unsigned)length);
+}
+
+static void SvTraceArpFrame(const char *direction, const UINT8 *frame,
+                            UINT32 length)
+{
+    static volatile UINT32 trace_count;
+    if (!frame || length < 42u || SvReadBe16(frame + 12) != 0x0806u)
+        return;
+    UINT32 index = __sync_fetch_and_add(&trace_count, 1u);
+    if (index >= 16u) return;
+    KeLog("[net-arp] %s op=%u sender=%u.%u.%u.%u target=%u.%u.%u.%u\n",
+          direction, (unsigned)SvReadBe16(frame + 20),
+          (unsigned)frame[28], (unsigned)frame[29],
+          (unsigned)frame[30], (unsigned)frame[31],
+          (unsigned)frame[38], (unsigned)frame[39],
+          (unsigned)frame[40], (unsigned)frame[41]);
+}
+
 static err_t SvNetifLinkOutput(struct netif *netif, struct pbuf *packet)
 {
     (void)netif;
@@ -105,6 +184,8 @@ static err_t SvNetifLinkOutput(struct netif *netif, struct pbuf *packet)
         return ERR_BUF;
     SvTraceTcpFrame("TX", frame, packet->tot_len);
     SvTraceDnsFrame("TX", frame, packet->tot_len);
+    SvTraceDhcpFrame("TX", frame, packet->tot_len);
+    SvTraceArpFrame("TX", frame, packet->tot_len);
     if (!NetTransmitFrame(frame, packet->tot_len)) {
         KeLog("[net] linkoutput: VirtIO TX queue rejected frame (%u bytes)\n",
               (unsigned)packet->tot_len);
@@ -148,6 +229,7 @@ static void SvTcpipInitialized(void *argument)
             netif_set_default(&g_netif);
             netif_set_up(&g_netif);
             netif_set_link_up(&g_netif);
+            netif_set_status_callback(&g_netif, SvNetifStatusChanged);
             err_t result = dhcp_start(&g_netif);
             if (result != ERR_OK)
                 KeLog("[net] DHCP start failed: %d\n", result);
@@ -166,6 +248,8 @@ static void SvReceiveEthernetFrame(const void *frame, UINT32 length,
         return;
     SvTraceTcpFrame("RX", (const UINT8 *)frame, length);
     SvTraceDnsFrame("RX", (const UINT8 *)frame, length);
+    SvTraceDhcpFrame("RX", (const UINT8 *)frame, length);
+    SvTraceArpFrame("RX", (const UINT8 *)frame, length);
     struct pbuf *packet = pbuf_alloc(PBUF_RAW, (u16_t)length, PBUF_POOL);
     if (!packet) return;
     if (pbuf_take(packet, frame, (u16_t)length) != ERR_OK) {

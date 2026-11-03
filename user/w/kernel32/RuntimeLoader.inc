@@ -358,6 +358,35 @@ __declspec(dllexport) BOOL SetConsoleInputMode(HANDLE console, DWORD mode)
     SetLastError(0); return 1;
 }
 
+/* Keep the COM1 terminal view in step with native-screen line editing. */
+__declspec(dllexport) BOOL SetConsoleStreamControl(HANDLE console,
+                                                   DWORD action,
+                                                   DWORD argument)
+{
+    NTSTATUS status = NtConsoleControlSimple(console, 13, action, argument, 0, 0);
+    if (!NT_SUCCESS(status)) { SetLastError(87); return 0; }
+    SetLastError(0); return 1;
+}
+
+/* Register the child currently owning the native console foreground. Passing
+ * a null process handle clears the foreground slot and drops its reference. */
+__declspec(dllexport) BOOL SetConsoleForegroundProcess(HANDLE console,
+                                                        HANDLE process)
+{
+    NTSTATUS status = NtConsoleControlSimple(console, 11,
+                                              (ULONGLONG)process, 0, 0, 0);
+    if (!NT_SUCCESS(status)) { SetLastError(6); return 0; }
+    SetLastError(0); return 1;
+}
+
+/* Refresh the native text buffer after a full-screen DOS child releases VGA. */
+__declspec(dllexport) BOOL RefreshConsole(HANDLE console)
+{
+    NTSTATUS status = NtConsoleControlSimple(console, 12, 0, 0, 0, 0);
+    if (!NT_SUCCESS(status)) { SetLastError(6); return 0; }
+    SetLastError(0); return 1;
+}
+
 __declspec(dllexport) BOOL GetConsoleScreenBufferInfo(
     HANDLE console, CONSOLE_SCREEN_BUFFER_INFO *info)
 {

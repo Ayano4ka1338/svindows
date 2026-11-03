@@ -4,7 +4,7 @@ LD      := $(CROSS)ld
 NASM    := nasm
 HOSTCC  ?= clang
 
-CONFIG ?= debug
+CONFIG ?= release
 FAT_FAULT_AFTER ?= -1
 ifeq ($(CONFIG),release)
 KERNEL_OPT := -O2
@@ -33,6 +33,10 @@ LWIP_ROOT ?= $(abspath $(BUILD)/lwip/src)
 LWIP_OBJ := $(patsubst $(LWIP_ROOT)/%.c,$(BUILD)/lwip/%.o,$(LWIP_C_SRC))
 KERNEL  := $(BUILD)/svindowskrnl.elf
 ISO     := $(BUILD)/svindows.iso
+INITRD  := $(BUILD)/initrd.fat
+LIMINE_CLI := $(BUILD)/limine-cli
+LIMINE_FILES := limine-bin/BOOTX64.EFI limine-bin/limine-bios-cd.bin \
+                limine-bin/limine-uefi-cd.bin limine-bin/limine-bios.sys
 
 .DEFAULT_GOAL := all
 
@@ -121,7 +125,8 @@ COMMAND_BINS := $(addprefix $(BUILD)/,DIR.EXE TYPE.EXE CLS.EXE VER.EXE HELP.EXE 
                 UNAME.EXE)
 STARTX     := $(BUILD)/startx.elf
 PING       := $(BUILD)/PING.ELF
-NET_TOOLS  := $(PING)
+CURL_HTTP  := $(BUILD)/CURLHTTP.ELF
+NET_TOOLS  := $(PING) $(CURL_HTTP)
 NET_BUILD_REV := 2026-10-31-dpmi-regframe-dns-fallback-r23
 NET_BUILD_STAMP := $(BUILD)/.network-build-rev
 NET_REBUILD_OBJECTS := $(addprefix $(BUILD)/,kernel/net/Pci.c.o \
@@ -132,17 +137,20 @@ NET_REBUILD_OBJECTS := $(addprefix $(BUILD)/,kernel/net/Pci.c.o \
     kernel/linux/File.c.o kernel/linux/Path.c.o kernel/ps/ProcessObject.c.o \
     kernel/dos/Cpu.c.o kernel/dos/Video.c.o kernel/dos/Dos.c.o \
     kernel/dos/Interrupt.c.o kernel/hal/Keyboard.c.o)
-DISK       := $(BUILD)/disk.img
 ALPINE_XORG := $(BUILD)/alpine-xorg/.ready
 ALPINE_FASTFETCH := $(BUILD)/alpine-fastfetch/.ready
 ALPINE_CURL := $(BUILD)/alpine-curl/.ready
 ALPINE_FEH := $(BUILD)/alpine-feh/.ready
-# Windows 1.01 system files are grouped in C:\WINDOWS1.
+# Keep each legacy Windows release isolated; their WIN.COM and system modules
+# share names but must never overwrite one another on the FAT image.
 WINDOWS1_FILES := $(sort $(wildcard user/d/windows1/*))
 WINDOWS1_NAMES := $(notdir $(WINDOWS1_FILES))
-# Filter the Windows names as well, so unpacking this tree over an older source
-# directory cannot accidentally stage stale Windows copies under C:\DOOM.
-DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS1_NAMES)),$(sort $(wildcard user/d/doom/*)))
+WINDOWS2_FILES := $(shell find user/d/windows2 -type f -print | sort)
+WINDOWS2_DIRS := $(shell find user/d/windows2 -mindepth 1 -type d -print | sort)
+WINDOWS2_NAMES := $(notdir $(WINDOWS2_FILES))
+WINDOWS_NAMES := $(sort $(WINDOWS1_NAMES) $(WINDOWS2_NAMES))
+# Filter the Windows names as well, so stale copies cannot leak under C:\DOOM.
+DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS_NAMES)),$(sort $(wildcard user/d/doom/*)))
 LLDLINK    := lld-link
 CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
               -fno-stack-protector -fno-stack-check -funwind-tables \
@@ -155,6 +163,7 @@ CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
 QEMU                 ?= qemu-system-x86_64
 QEMU_MEMORY          ?= 1024M
 QEMU_MACHINE         ?= pc
+QEMU_CPU             ?= max
 QEMU_NET_ID          ?= svnet0
 QEMU_NETDEV          ?= user,id=$(QEMU_NET_ID),ipv6=off
 # Keep the device on the legacy PCI root bus and expose its legacy I/O BARs.
@@ -162,15 +171,14 @@ QEMU_NETDEV          ?= user,id=$(QEMU_NET_ID),ipv6=off
 QEMU_NET_DEVICE      ?= virtio-net-pci,netdev=$(QEMU_NET_ID),disable-modern=on,bus=pci.0,addr=0x04
 QEMU_EXTRA_ARGS      ?=
 QEMU_SERIAL          ?= stdio
-QEMUFLAGS            := -machine $(QEMU_MACHINE) -m $(QEMU_MEMORY) -no-reboot -no-shutdown -boot d \
+QEMUFLAGS            := -machine $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) -no-reboot -no-shutdown -boot d \
                         -netdev $(QEMU_NETDEV) -device $(QEMU_NET_DEVICE) \
                         $(QEMU_EXTRA_ARGS)
-QEMUDISK             := -drive file=$(DISK),format=raw,if=ide,index=0,media=disk
 .PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check lwip-port-check network-check feh-path-check feh-fs-check .FORCE
 
 .FORCE:
 
-all: $(ISO) $(DISK)
+all: $(ISO) $(INITRD)
 
 $(STARTX): user/l/startx/StartX.c user/l/runtime/Memory.c
 	@mkdir -p $(dir $@)
@@ -181,6 +189,13 @@ $(STARTX): user/l/startx/StartX.c user/l/runtime/Memory.c
 
 # The small native Linux-ABI ping client remains a low-level network smoke test.
 $(PING): user/l/net/ping.c user/l/net/netutil.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector \
+	    -fno-pie -no-pie -mno-red-zone -nostdlib -static -O2 \
+	    -Wall -Wextra -Werror -Wl,-e,_start -Wl,--build-id=none \
+	    -o $@ $<
+
+$(CURL_HTTP): user/l/net/curl.c user/l/net/netutil.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector \
 	    -fno-pie -no-pie -mno-red-zone -nostdlib -static -O2 \
@@ -203,7 +218,17 @@ $(NET_BUILD_STAMP): .FORCE
 	@printf '%s\n' '$(NET_BUILD_REV)' > $@.tmp
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 
-$(NET_REBUILD_OBJECTS) $(NET_TOOLS) $(DISK) $(LWIP_OBJ): $(NET_BUILD_STAMP)
+$(NET_REBUILD_OBJECTS) $(NET_TOOLS) $(INITRD) $(LWIP_OBJ): $(NET_BUILD_STAMP)
+
+DOS_COMPAT_REV := 2026-11-02-int21-0c-input-flush-r1
+DOS_COMPAT_STAMP := $(BUILD)/.dos-compat-rev
+DOS_COMPAT_OBJECTS := $(addprefix $(BUILD)/,kernel/dos/Interrupt.c.o \
+    kernel/io/Console.c.o kernel/io/File.c.o)
+$(DOS_COMPAT_STAMP): .FORCE
+	@mkdir -p $(BUILD)
+	@printf '%s\n' '$(DOS_COMPAT_REV)' > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+$(DOS_COMPAT_OBJECTS) $(DOS_TESTS) $(INITRD): $(DOS_COMPAT_STAMP)
 
 $(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(CONTROL_OBJ) $(NOTEPAD) $(CALC): $(BUILD_CONFIG)
 
@@ -211,9 +236,10 @@ $(BUILD)/%.c.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+
 ifneq ($(PROGRAM),cmd.exe)
-DISK_PROGRAM := $(BUILD)/$(PROGRAM)
-DISK_PROGRAM_INPUTS := $(DISK_PROGRAM)
+IMAGE_PROGRAM := $(BUILD)/$(PROGRAM)
+IMAGE_PROGRAM_INPUTS := $(IMAGE_PROGRAM)
 endif
 
 # PROGRAM is supplied through CFLAGS, which make does not otherwise track.
@@ -400,99 +426,115 @@ $(CMDUTIL): user/w/cmdutils/Cmdutils.c $(CRT0) $(KERNEL32)
 $(COMMAND_BINS): $(CMDUTIL)
 	cp $(CMDUTIL) $@
 
-# FAT32 disk image holding the user-space executables, read by the kernel's
-# ATA + FAT drivers at runtime.
-$(ALPINE_XORG): tools/StageAlpineXorg.py tools/alpine-xorg.lock.json
+# FAT32 initrd holding the user-space executables, read through the kernel's
+# memory-backed block device and FAT driver at runtime.
+$(ALPINE_XORG): tools/StageAlpineXorg.py tools/alpine-xorg.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-xorg
 
-$(ALPINE_FASTFETCH): tools/StageAlpineFastfetch.py tools/alpine-fastfetch.lock.json
+$(ALPINE_FASTFETCH): tools/StageAlpineFastfetch.py tools/alpine-fastfetch.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-fastfetch
 
-$(ALPINE_CURL): tools/StageAlpineCurl.py tools/alpine-curl.lock.json
+$(ALPINE_CURL): tools/StageAlpineCurl.py tools/alpine-curl.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-curl
 
-$(ALPINE_FEH): tools/StageAlpineFeh.py tools/alpine-feh.lock.json
+$(ALPINE_FEH): tools/StageAlpineFeh.py tools/alpine-feh.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-feh
 
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(DISK): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) user/d/win.bat other/Logo.png $(DISK_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows2) $(WINDOWS2_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat other/Logo.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
-	dd if=/dev/zero of=$(DISK) bs=1M count=128 status=none
-	mformat -i $(DISK) -F -v SVINDOWS ::
-	mcopy -i $(DISK) $(CMD) ::CMD.EXE
-	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
-	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
-	mcopy -i $(DISK) $(ADVAPI32) ::ADVAPI32.DLL
-	mcopy -i $(DISK) $(MSVCRT) ::MSVCRT.DLL
-	mcopy -i $(DISK) $(USER32) ::USER32.DLL
-	mcopy -i $(DISK) $(GDI32) ::GDI32.DLL
-	mcopy -i $(DISK) $(UXTHEME) ::UXTHEME.DLL
-	if [ -f "$(COMCTL32)" ]; then mcopy -i $(DISK) $(COMCTL32) ::COMCTL32.DLL; fi
-	mmd -i $(DISK) ::WINDOWS ::WINDOWS/SYSTEM32
-	mcopy -i $(DISK) $(KERNEL32) ::WINDOWS/SYSTEM32/KERNEL32.DLL
-	mcopy -i $(DISK) $(NTDLL) ::WINDOWS/SYSTEM32/NTDLL.DLL
-	mcopy -i $(DISK) $(ADVAPI32) ::WINDOWS/SYSTEM32/ADVAPI32.DLL
-	mcopy -i $(DISK) $(MSVCRT) ::WINDOWS/SYSTEM32/MSVCRT.DLL
-	mcopy -i $(DISK) $(USER32) ::WINDOWS/SYSTEM32/USER32.DLL
-	mcopy -i $(DISK) $(GDI32) ::WINDOWS/SYSTEM32/GDI32.DLL
-	mcopy -i $(DISK) $(UXTHEME) ::WINDOWS/SYSTEM32/UXTHEME.DLL
-	if [ -f "$(COMCTL32)" ]; then mcopy -i $(DISK) $(COMCTL32) ::WINDOWS/SYSTEM32/COMCTL32.DLL; fi
-	mcopy -i $(DISK) $(COMMAND_BINS) ::
-	# Keep the complete Windows 1.01 payload together; WIN.BAT in C:\ is a launcher.
-	mmd -i $(DISK) ::WINDOWS1
-	if [ -n "$(WINDOWS1_FILES)" ]; then mcopy -i $(DISK) $(WINDOWS1_FILES) ::WINDOWS1/; fi
-	mcopy -i $(DISK) user/d/win.bat ::WIN.BAT
-	mcopy -i $(DISK) $(STARTX) ::STARTX.ELF
-	mmd -i $(DISK) ::TESTS
-	mcopy -i $(DISK) $(BUILD)/dos-tests/COMSMOKE.COM ::TESTS/COMSMOKE.COM
-	mcopy -i $(DISK) $(BUILD)/dos-tests/MEMSMOKE.COM ::TESTS/MEMSMOKE.COM
-	mcopy -i $(DISK) $(BUILD)/dos-tests/DPMIINFO.COM ::TESTS/DPMIINFO.COM
-	mcopy -i $(DISK) $(BUILD)/dos-tests/FCBPARSE.COM ::TESTS/FCBPARSE.COM
-	mcopy -i $(DISK) $(BUILD)/dos-tests/FFGROUP.COM ::TESTS/FFGROUP.COM
-	mcopy -i $(DISK) $(BUILD)/dos-tests/MZSMOKE.EXE ::TESTS/MZSMOKE.EXE
-	mcopy -i $(DISK) $(BUILD)/dos-tests/DOSCHECK.BAT ::DOSCHECK.BAT
-	mcopy -s -i $(DISK) $(BUILD)/alpine-xorg/root/* ::
-	mcopy -o -s -i $(DISK) $(BUILD)/alpine-curl/root/* ::
-	mcopy -o -s -i $(DISK) $(BUILD)/alpine-feh/root/* ::
-	mcopy -i $(DISK) $(BUILD)/UNAME.EXE ::USR/BIN/UNAME
-	mcopy -i $(DISK) $(BUILD)/alpine-fastfetch/usr/bin/fastfetch ::USR/BIN/FASTFETCH
-	mmd -i $(DISK) ::USR/SHARE/FASTFETCH ::USR/SHARE/HWDATA
-	mcopy -s -i $(DISK) $(BUILD)/alpine-fastfetch/usr/share/fastfetch/* ::USR/SHARE/FASTFETCH/
-	mcopy -i $(DISK) $(BUILD)/alpine-fastfetch/usr/share/hwdata/pci.ids ::USR/SHARE/HWDATA/PCI.IDS
-	mcopy -i $(DISK) $(BUILD)/alpine-fastfetch/etc/os-release ::ETC/OS-RELEASE
-	mcopy -i $(DISK) etc/resolv.conf ::ETC/RESOLV.CONF
+	dd if=/dev/zero of=$(INITRD) bs=1M count=128 status=none
+	mformat -i $(INITRD) -F -v SVINDOWS ::
+	mcopy -i $(INITRD) $(CMD) ::CMD.EXE
+	mcopy -i $(INITRD) $(KERNEL32) ::KERNEL32.DLL
+	mcopy -i $(INITRD) $(NTDLL) ::NTDLL.DLL
+	mcopy -i $(INITRD) $(ADVAPI32) ::ADVAPI32.DLL
+	mcopy -i $(INITRD) $(MSVCRT) ::MSVCRT.DLL
+	mcopy -i $(INITRD) $(USER32) ::USER32.DLL
+	mcopy -i $(INITRD) $(GDI32) ::GDI32.DLL
+	mcopy -i $(INITRD) $(UXTHEME) ::UXTHEME.DLL
+	if [ -f "$(COMCTL32)" ]; then mcopy -i $(INITRD) $(COMCTL32) ::COMCTL32.DLL; fi
+	mmd -i $(INITRD) ::WINDOWS ::WINDOWS/SYSTEM32
+	mcopy -i $(INITRD) $(KERNEL32) ::WINDOWS/SYSTEM32/KERNEL32.DLL
+	mcopy -i $(INITRD) $(NTDLL) ::WINDOWS/SYSTEM32/NTDLL.DLL
+	mcopy -i $(INITRD) $(ADVAPI32) ::WINDOWS/SYSTEM32/ADVAPI32.DLL
+	mcopy -i $(INITRD) $(MSVCRT) ::WINDOWS/SYSTEM32/MSVCRT.DLL
+	mcopy -i $(INITRD) $(USER32) ::WINDOWS/SYSTEM32/USER32.DLL
+	mcopy -i $(INITRD) $(GDI32) ::WINDOWS/SYSTEM32/GDI32.DLL
+	mcopy -i $(INITRD) $(UXTHEME) ::WINDOWS/SYSTEM32/UXTHEME.DLL
+	if [ -f "$(COMCTL32)" ]; then mcopy -i $(INITRD) $(COMCTL32) ::WINDOWS/SYSTEM32/COMCTL32.DLL; fi
+	mcopy -i $(INITRD) $(COMMAND_BINS) ::
+	# Keep each Windows release together; root batch files are launchers.
+	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS2
+	if [ -n "$(WINDOWS1_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS1_FILES) ::WINDOWS1/; fi
+	for d in $(WINDOWS2_DIRS); do \
+	    rel=$${d#user/d/windows2/}; \
+	    mmd -i $(INITRD) "::WINDOWS2/$$rel"; \
+	done
+	for f in $(WINDOWS2_FILES); do \
+	    rel=$${f#user/d/windows2/}; \
+	    mcopy -i $(INITRD) "$$f" "::WINDOWS2/$$rel"; \
+	done
+	mcopy -i $(INITRD) user/d/win.bat ::WIN.BAT
+	mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT
+	mcopy -i $(INITRD) user/d/win3.bat ::WIN3.BAT
+	mcopy -i $(INITRD) $(STARTX) ::STARTX.ELF
+	mmd -i $(INITRD) ::TESTS
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/COMSMOKE.COM ::TESTS/COMSMOKE.COM
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/MEMSMOKE.COM ::TESTS/MEMSMOKE.COM
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/DPMIINFO.COM ::TESTS/DPMIINFO.COM
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/FCBPARSE.COM ::TESTS/FCBPARSE.COM
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/INPFLUSH.COM ::TESTS/INPFLUSH.COM
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/FFGROUP.COM ::TESTS/FFGROUP.COM
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/MZSMOKE.EXE ::TESTS/MZSMOKE.EXE
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/DOSCHECK.BAT ::DOSCHECK.BAT
+	mcopy -s -i $(INITRD) $(BUILD)/alpine-xorg/root/* ::
+	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-curl/root/* ::
+	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-feh/root/* ::
+	mcopy -i $(INITRD) $(BUILD)/UNAME.EXE ::USR/BIN/UNAME
+	mcopy -i $(INITRD) $(BUILD)/alpine-fastfetch/usr/bin/fastfetch ::USR/BIN/FASTFETCH
+	mmd -i $(INITRD) ::USR/SHARE/FASTFETCH ::USR/SHARE/HWDATA
+	mcopy -s -i $(INITRD) $(BUILD)/alpine-fastfetch/usr/share/fastfetch/* ::USR/SHARE/FASTFETCH/
+	mcopy -i $(INITRD) $(BUILD)/alpine-fastfetch/usr/share/hwdata/pci.ids ::USR/SHARE/HWDATA/PCI.IDS
+	mcopy -i $(INITRD) $(BUILD)/alpine-fastfetch/etc/os-release ::ETC/OS-RELEASE
+	mcopy -i $(INITRD) etc/resolv.conf ::ETC/RESOLV.CONF
 	# The Linux-side name for the command processor: /usr/bin/cmd is the
 	# same PE image as C:\CMD.EXE, launched through execve from xterm.
 	# The extensionless copy lets the Linux path /usr/bin/cmd resolve.
-	mcopy -i $(DISK) $(CMD) ::USR/BIN/CMD
-	mcopy -i $(DISK) $(BUILD)/alpine-xorg/root/usr/bin/twm ::TWM.ELF
-	mcopy -i $(DISK) $(BUILD)/alpine-xorg/root/usr/bin/xterm ::XTERM.ELF
-	mcopy -o -i $(DISK) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURL
-	mcopy -o -i $(DISK) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURL.ELF
+	mcopy -i $(INITRD) $(CMD) ::USR/BIN/CMD
+	mcopy -i $(INITRD) $(BUILD)/alpine-xorg/root/usr/bin/twm ::TWM.ELF
+	mcopy -i $(INITRD) $(BUILD)/alpine-xorg/root/usr/bin/xterm ::XTERM.ELF
+	# Also expose the upstream client under an explicit TLS-oriented name.
+	mcopy -o -i $(INITRD) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURLTLS
+	mcopy -o -i $(INITRD) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURLTLS.ELF
+	# The packaged Alpine curl links against OpenSSL and the installed CA bundle.
+	mcopy -o -i $(INITRD) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURL
+	mcopy -o -i $(INITRD) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURL.ELF
 	# Extensionless Linux command paths plus .ELF names for the Windows shell.
-	mcopy -i $(DISK) $(PING) ::USR/BIN/PING
-	mcopy -i $(DISK) $(PING) ::USR/BIN/PING.ELF
-	mmd -i $(DISK) ::DEV ::DEV/PTS
-	mmd -i $(DISK) ::TMP
+	mcopy -i $(INITRD) $(PING) ::USR/BIN/PING
+	mcopy -i $(INITRD) $(PING) ::USR/BIN/PING.ELF
+	mcopy -i $(INITRD) $(CURL_HTTP) ::USR/BIN/CURLHTTP.ELF
+	mmd -i $(INITRD) ::DEV ::DEV/PTS
+	mmd -i $(INITRD) ::TMP
 	# Provide a known-good image for the first feh smoke test.
-	mcopy -i $(DISK) other/Logo.png ::LOGO.PNG
+	mcopy -i $(INITRD) other/Logo.png ::LOGO.PNG
 	# Give POSIX programs a real HOME rather than leaving HOME unset.
-	mmd -i $(DISK) ::HOME ::HOME/USER ::HOME/USER/.CONFIG ::HOME/USER/.CONFIG/FEH
+	mmd -i $(INITRD) ::HOME ::HOME/USER ::HOME/USER/.CONFIG ::HOME/USER/.CONFIG/FEH
 	if [ -n "$(DOOM_FILES)" ]; then \
-	    mmd -i $(DISK) ::DOOM && \
-	    mcopy -i $(DISK) $(DOOM_FILES) ::DOOM/ && \
-	    mcopy -i $(DISK) user/d/doom/doom.bat ::DOOM.BAT; \
+	    mmd -i $(INITRD) ::DOOM && \
+	    mcopy -i $(INITRD) $(DOOM_FILES) ::DOOM/ && \
+	    mcopy -i $(INITRD) user/d/doom/doom.bat ::DOOM.BAT; \
 	fi
 	# Xorg writes its default log to /var/log/Xorg.0.log; the Alpine package
 	# owns /var/log, so the emulated C: root must provide it. FAT mirrors the
 	# Linux path /var/log as C:\var\log.
-	mmd -i $(DISK) ::VAR
-	mmd -i $(DISK) ::VAR/LOG
-	if [ -n "$(DISK_PROGRAM)" ]; then mcopy -i $(DISK) $(DISK_PROGRAM) ::$(PROGRAM); fi
+	mmd -i $(INITRD) ::VAR
+	mmd -i $(INITRD) ::VAR/LOG
+	if [ -n "$(IMAGE_PROGRAM)" ]; then mcopy -i $(INITRD) $(IMAGE_PROGRAM) ::$(PROGRAM); fi
 
-	@echo "  DISK  $(DISK)"
+	@echo "  INITRD $(INITRD)"
 
 $(KERNEL): $(OBJ) $(LWIP_MAKEFILE) kernel/arch/x86_64/Linker.ld
 	@mkdir -p $(dir $@)
@@ -504,6 +546,11 @@ iso: $(ISO)
 dos-tests: $(DOS_TESTS)
 
 dos-vm-check:
+	python3 tools/checks/DosInputChecks.py
+	python3 tools/checks/DosMemoryChecks.py
+	python3 tools/checks/DosMultiplexChecks.py
+	python3 tools/checks/DosPspTerminationChecks.py
+	python3 tools/checks/DosExecChecks.py user/d/windows1/WIN100.BIN user/d/windows2/WIN200.BIN
 	python3 tools/checks/DosVmChecks.py
 	python3 tools/checks/DosCpuChecks.py
 	python3 tools/checks/DosLoaderChecks.py
@@ -515,20 +562,32 @@ dos-vm-check:
 	python3 tools/checks/DosSystemDataChecks.py
 	python3 tools/checks/DosX87Checks.py
 
-$(ISO): $(KERNEL) boot/Grub.cfg
-	@mkdir -p $(BUILD)/isodir/boot/grub
-	@cp $(KERNEL) $(BUILD)/isodir/boot/svindowskrnl.elf
-	@cp boot/Grub.cfg $(BUILD)/isodir/boot/grub/grub.cfg
-	grub-mkrescue -o $@ $(BUILD)/isodir 2>/dev/null
+$(LIMINE_CLI): limine-bin/limine.c limine-bin/limine-bios-hdd.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -std=c11 $< -o $@
+
+$(ISO): Makefile $(KERNEL) $(INITRD) boot/limine.conf other/Logo.png $(LIMINE_FILES) $(LIMINE_CLI)
+	@mkdir -p $(BUILD)/limine-isodir/boot/limine $(BUILD)/limine-isodir/EFI/BOOT
+	@cp $(KERNEL) $(BUILD)/limine-isodir/boot/svindowskrnl.elf
+	@cp $(INITRD) $(BUILD)/limine-isodir/boot/initrd.fat
+	@cp boot/limine.conf $(BUILD)/limine-isodir/boot/limine/limine.conf
+	@cp other/Logo.png $(BUILD)/limine-isodir/logo.png
+	@cp limine-bin/limine-bios.sys limine-bin/limine-bios-cd.bin \
+	    limine-bin/limine-uefi-cd.bin $(BUILD)/limine-isodir/boot/limine/
+	@cp limine-bin/BOOTX64.EFI $(BUILD)/limine-isodir/EFI/BOOT/BOOTX64.EFI
+	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
+	    -no-emul-boot -boot-load-size 4 -boot-info-table \
+	    -eltorito-alt-boot -e boot/limine/limine-uefi-cd.bin \
+	    -no-emul-boot -isohybrid-gpt-basdat -o $@ $(BUILD)/limine-isodir
+	$(LIMINE_CLI) bios-install $@
 	@echo "  ISO   $@"
 
 run: all
-	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) $(QEMUDISK) -serial $(QEMU_SERIAL) -display none
+	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) -serial $(QEMU_SERIAL) -display none
 
 run-gui:
 	$(MAKE) BUILD=build/gui PROGRAM=cmd.exe CMDLINE=cmd.exe all
 	$(QEMU) $(QEMUFLAGS) -cdrom build/gui/svindows.iso \
-	    -drive file=build/gui/disk.img,format=raw,if=ide,index=0,media=disk \
 	    -serial $(QEMU_SERIAL)
 
 # Explicit alias for testing DHCP/DNS/TCP/HTTP with the kernel's lwIP smoke

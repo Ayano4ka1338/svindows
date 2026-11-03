@@ -22,9 +22,11 @@ UINT64 LinuxUname(UINT64 destination)
 
     LINUX_UTSNAME result;
     memset(&result, 0, sizeof(result));
+    /* This is a Linux-compatible ABI on Svindows; expose the host OS identity
+     * so tools such as fastfetch do not mislabel the system as Linux. */
     memcpy(result.Sysname, "Svindows", sizeof("Svindows"));
     memcpy(result.Nodename, "svindows", sizeof("svindows"));
-    memcpy(result.Release, "0.1.0", sizeof("0.1.0"));
+    memcpy(result.Release, "0.6.0", sizeof("0.6.0"));
     memcpy(result.Version, "Svindows 0.6.0", sizeof("Svindows 0.6.0"));
     memcpy(result.Machine, "x86_64", sizeof("x86_64"));
     memcpy((void *)(ULONG_PTR)destination, &result, sizeof(result));

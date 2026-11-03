@@ -22,6 +22,7 @@ for fragment in (
     "DOS_LISTS_OFFSET + 0x04u",
     "DOS_SDA_OFFSET",
     "DOS_CDS_OFFSET",
+    "vm->InDosCount",
     "dos_update_mcb_chain(vm)",
 ):
     if fragment not in source:
@@ -94,6 +95,29 @@ int main(void) {
   assert(free_mcb[0] == 'Z');
   assert(rd16(free_mcb + 1) == 0);
 
+  /* Allocated DOS blocks appear as real MCB nodes, with header paragraphs
+   * excluded from both neighbouring free ranges. */
+  vm->Blocks[0] = (DOS_BLOCK){0x9100, 0x20, TRUE, PSP};
+  DosUpdateMemoryControlBlocks(vm);
+  U8 *leading_free_mcb = vm->Memory + linear(0x9000, 0);
+  U8 *allocated_mcb = vm->Memory + linear(0x90ff, 0);
+  U8 *trailing_free_mcb = vm->Memory + linear(0x9120, 0);
+  assert(leading_free_mcb[0] == 'M');
+  assert(rd16(leading_free_mcb + 3) == 0x00fe);
+  assert(allocated_mcb[0] == 'M');
+  assert(rd16(allocated_mcb + 1) == PSP);
+  assert(rd16(allocated_mcb + 3) == 0x20);
+  vm->CurrentPsp = 0x2345;
+  DosUpdateMemoryControlBlocks(vm);
+  assert(rd16(vm->Memory + linear(0x90ff, 1)) == PSP);
+  assert(trailing_free_mcb[0] == 'Z');
+  assert(rd16(trailing_free_mcb + 1) == 0);
+  vm->Blocks[0].Used = FALSE;
+  DosUpdateMemoryControlBlocks(vm);
+  free_mcb = vm->Memory + linear(0x9000, 0);
+  assert(free_mcb[0] == 'Z');
+  assert(rd16(free_mcb + 3) == 0x0fff);
+
   /* Device chain and standard SFT handles. */
   U16 nul = (U16)(DOS_LISTS_OFFSET + 0x22);
   assert(rd16(base + nul) == DOS_DEVICE_CLOCK_OFFSET);
@@ -111,6 +135,7 @@ int main(void) {
   vm->DtaSegment = 0x1234;
   vm->DtaOffset = 0x5678;
   vm->CtrlBreak = 0;
+  vm->InDosCount = 1;
   vm->CurrentPsp = 0x2345;
   DosSyncSystemData(vm, "C:\\WINDOWS1\\SYSTEM");
   assert(rd16(base + DOS_SDA_OFFSET + 0x10) == 0x2345);
@@ -119,6 +144,7 @@ int main(void) {
   assert(rd16(base + DOS_SDA_OFFSET + 0x0e) == 0x1234);
   assert(rd16(base + DOS_LISTS_OFFSET + 0x202) == 0x5678);
   assert(rd16(base + DOS_LISTS_OFFSET + 0x204) == 0x1234);
+  assert(base[DOS_SDA_OFFSET + 1] == 1);
   assert(base[DOS_SDA_OFFSET + 1 - 0x1a8] == 0);
   assert(!strcmp((const char *)(base + c_cds), "C:\\WINDOWS1\\SYSTEM"));
 

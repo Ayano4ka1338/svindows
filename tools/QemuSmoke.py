@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Boot and exercise shipped commands on a disposable copy of the FAT disk."""
+"""Boot the Limine ISO and exercise the system from its FAT initrd."""
 import argparse
 import json
 import os
 from pathlib import Path
 import re
 import selectors
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -20,6 +19,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=45)
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--skip-network", action="store_true",
+                        help="skip the DHCP/DNS/TCP/HTTP/HTTPS check when offline")
     parser.add_argument("--doom-probe", action="store_true",
                         help="launch the bundled Doom DOS/4G image and require VGA graphics startup")
     parser.add_argument("--doom-probe-timeout", type=float, default=180,
@@ -34,14 +35,11 @@ def main():
         process = None
         try:
             with tempfile.TemporaryDirectory(prefix="svindows-smoke-") as temporary:
-                disk = Path(temporary) / "disk.img"
-                shutil.copyfile(ROOT / "build/disk.img", disk)
                 qmp_path = Path(temporary) / "qmp.sock"
                 process = subprocess.Popen([
                     "qemu-system-x86_64", "-m", "1024M", "-no-reboot",
-                    "-no-shutdown", "-boot", "d", "-machine", "pc", "-cdrom",
-                    str(ROOT / "build/svindows.iso"), "-drive",
-                    f"file={disk},format=raw,if=ide", "-netdev", "user,id=svnet0",
+                    "-no-shutdown", "-boot", "d", "-machine", "pc", "-cpu", "max", "-cdrom",
+                    str(ROOT / "build/svindows.iso"), "-netdev", "user,id=svnet0",
                     "-device", "virtio-net-pci,netdev=svnet0,disable-modern=on,bus=pci.0,addr=0x04",
                     "-display", "none", "-monitor", "none", "-serial", "stdio",
                     "-qmp", f"unix:{qmp_path},server=on,wait=off",
@@ -71,11 +69,6 @@ def main():
                                 raw.extend(chunk)
 
                     wait_for(r"C:\\>")
-                    network_output = wait_for(r"\[net-test\] INTERNET (?:PASS|FAIL)", 0,
-                                              timeout=max(args.timeout, 75))
-                    if not re.search(r"\[net-test\] INTERNET PASS", network_output):
-                        raise RuntimeError("real DHCP/DNS/TCP/HTTP connectivity test failed")
-                    print("PASS QEMU Internet: DHCP + DNS + TCP + HTTP", flush=True)
                     # Exercise the real emulated PS/2 controller and ISR/DPC
                     # path, not only the serial input used by other commands.
                     start = len(ANSI.sub("", raw.decode("utf-8", errors="replace")))
@@ -109,7 +102,20 @@ def main():
                                 time.sleep(0.03)  # release before the next key
                     wait_for(r"\nps2ok\r*\n", start)
                     print("PASS PS/2 keyboard ISR/DPC input", flush=True)
+                    if not args.skip_network:
+                        wait_for(r"\[net\] DHCP lease address=", 0,
+                                 timeout=args.timeout)
+                        print("PASS QEMU DHCP lease", flush=True)
                     commands = [
+                        *(([] if args.skip_network else [
+                            ("ping -c 1 10.0.2.2", r"1 packets transmitted, 1 received"),
+                            ("ping -c 1 example.com", r"1 packets transmitted, 1 received"),
+                            ("curl -I http://example.com/",
+                             r"HTTP/1\.[01] [1-5][0-9][0-9]"),
+                            ("curl --version", r"curl 8\.14\.1"),
+                            ("curl -I --connect-timeout 10 https://example.com/",
+                             r"HTTP/(?:1\.[01]|2) [1-5][0-9][0-9]"),
+                        ])),
                         ("ver", r"Svindows"),
                         ("hostname", r"(?i)SVINDOWS"),
                         ("dir", r"(?i)KERNEL32\.DLL"),
@@ -140,6 +146,13 @@ def main():
                         status_marker = f"SMOKE_STATUS_{index}_"
                         process.stdin.write((command + "\n").encode())
                         process.stdin.flush()
+                        # A batch can launch several DOS children. If we queue
+                        # the synchronization commands immediately, its first
+                        # child may consume those keystrokes as stdin. Wait for
+                        # the batch's final expected output before sending the
+                        # parent-shell markers.
+                        if command.lower().endswith(".bat") and expected:
+                            wait_for(expected, start)
                         process.stdin.write(("echo " + status_marker +
                                              "%ERRORLEVEL%\necho " + marker + "\n").encode())
                         process.stdin.flush()
@@ -161,6 +174,8 @@ def main():
                                 output):
                             raise RuntimeError(f"command failed: {command!r}")
                         print(f"PASS {command}", flush=True)
+                    if not args.skip_network:
+                        print("PASS QEMU Internet: IPv4 + DHCP + DNS + ICMP + TCP + HTTP + HTTPS/TLS", flush=True)
                     if args.doom_probe:
                         # Require the real game startup, including WAD loading
                         # and mode 13h, then observe it for delayed CPU faults.

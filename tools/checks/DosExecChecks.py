@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/dos/Dos.c').read_text()
-start = source.index('static BOOLEAN dos_command_is_win100_bin(')
+start = source.index('static BOOLEAN dos_command_is_image_named(')
 end = source.index('\nU16 free_paragraphs_from(', start)
 helper_source = source[start:end]
 image_start = source.index('BOOLEAN DosIsImage(')
@@ -41,6 +41,10 @@ int main(int argc, char **argv) {
   assert(dos_command_is_win100_bin("C:\\WINDOWS1\\WIN100.BIN"));
   assert(dos_command_is_win100_bin("\"c:\\windows1\\win100.bin\" /n"));
   assert(!dos_command_is_win100_bin("C:\\WINDOWS1\\WIN.COM"));
+  assert(dos_command_is_win200_bin("C:\\WINDOWS2\\WIN200.BIN"));
+  assert(dos_command_is_win200_bin("\"c:\\windows2\\win200.bin\" /s"));
+  assert(!dos_command_is_win200_bin("C:\\WINDOWS2\\WIN.COM"));
+  assert(!dos_command_is_win200_bin("C:\\WINDOWS1\\WIN100.BIN"));
   assert(!dos_command_is_win100_bin("C:\\DOOM\\DOOM.EXE"));
 
   /* Windows 1.x MZ/NE files carry a DOS entry stub and must be EXEC-able. */
@@ -60,7 +64,7 @@ int main(int argc, char **argv) {
   win_le[0x400] = 'L'; win_le[0x401] = 'E';
   assert(!DosIsImage("C:\\WINDOWS1\\DOS4GW.EXE", win_le, sizeof(win_le)));
   /* Exercise the real Windows 1.01 MZ/NE kernel, not only a synthetic header. */
-  assert(argc == 2);
+  assert(argc == 3);
   FILE *win_file = fopen(argv[1], "rb");
   assert(win_file);
   assert(fseek(win_file, 0, SEEK_END) == 0);
@@ -79,6 +83,25 @@ int main(int argc, char **argv) {
   assert(win_image[win_ne_offset] == 'N' && win_image[win_ne_offset + 1] == 'E');
   assert(DosIsImage("C:\\WINDOWS1\\WIN100.BIN", win_image, (SIZE_T)win_size));
   free(win_image);
+
+  FILE *win2_file = fopen(argv[2], "rb");
+  assert(win2_file);
+  assert(fseek(win2_file, 0, SEEK_END) == 0);
+  long win2_size = ftell(win2_file);
+  assert(win2_size > 0);
+  rewind(win2_file);
+  U8 *win2_image = malloc((size_t)win2_size);
+  assert(win2_image);
+  assert(fread(win2_image, 1, (size_t)win2_size, win2_file) == (size_t)win2_size);
+  fclose(win2_file);
+  assert(win2_image[0] == 'M' && win2_image[1] == 'Z');
+  U32 win2_ne_offset = (U32)win2_image[0x3c] |
+      ((U32)win2_image[0x3d] << 8) | ((U32)win2_image[0x3e] << 16) |
+      ((U32)win2_image[0x3f] << 24);
+  assert(win2_ne_offset + 2 <= (U32)win2_size);
+  assert(win2_image[win2_ne_offset] == 'N' && win2_image[win2_ne_offset + 1] == 'E');
+  assert(DosIsImage("C:\\WINDOWS2\\WIN200.BIN", win2_image, (SIZE_T)win2_size));
+  free(win2_image);
   return 0;
 }
 '''
@@ -88,7 +111,8 @@ with tempfile.TemporaryDirectory(prefix='sv-dos-exec-') as directory:
     cfile.write_text(prelude + helper_source + test)
     subprocess.run([os.environ.get('HOSTCC', 'cc'), '-std=c11', '-Wall', '-Wextra',
                     '-Werror', str(cfile), '-o', str(exe)], check=True)
-    subprocess.run([str(exe), str(root / 'user/d/windows1/WIN100.BIN')], check=True)
+    subprocess.run([str(exe), str(root / 'user/d/windows1/WIN100.BIN'),
+                    str(root / 'user/d/windows2/WIN200.BIN')], check=True)
 
 interrupt = (root / 'kernel/dos/Interrupt.c').read_text()
 assert 'parent->Dos4gImage && parent->ExecDepth == 0' in interrupt
@@ -96,10 +120,17 @@ assert 'size == parent->ImageSize' in interrupt
 assert 'DosImageHash((const U8 *)image, (U32)size) == parent->ImageHash' in interrupt
 assert 'parent->ExitCode = child_status;' in interrupt
 assert 'parent->Running = FALSE;' in interrupt
-assert 'vm->DosVersion = dos_command_is_win100_bin(command) ? 0x2203u : 0x0005u;' in source
+assert 'vm->DosVersion = vm->IsWindows100 ? 0x2203u :' in source
+assert '(vm->IsWindows200 ? 0x0004u : 0x0005u)' in source
 win_com = (root / 'user/d/windows1/WIN.COM').read_bytes()
 assert b'\xB8\x00\x4B\xCD\x21' in win_com  # WIN.COM EXECs WIN100.BIN via INT 21h/4B00h
 assert 'r[AX] = current()->DosVersion;' in interrupt
+makefile = (root / 'Makefile').read_text()
+assert 'WINDOWS2_FILES := $(sort $(wildcard user/d/windows2/*))' in makefile
+assert (root / 'user/d/windows2/WIN200.OVL').is_file()
+assert (root / 'user/d/windows2/WIN.COM').is_file()
+assert '::WINDOWS2/' in makefile and 'user/d/win2.bat ::WIN2.BAT' in makefile
+assert (root / 'user/d/win2.bat').read_bytes().startswith(b'@echo off\r\ncd \\windows2\r\n')
 assert 'image[pe + 1] == ' in source or "image[pe + 1] == 'E'" in source
 
 doom = (root / 'user/d/doom/doom.exe').read_bytes()

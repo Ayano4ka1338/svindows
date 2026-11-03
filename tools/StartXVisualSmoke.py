@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 import selectors
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -93,16 +92,13 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="svindows-startx-") as temporary:
         temporary = Path(temporary)
-        disk = temporary / "disk.img"
         qmp_path = temporary / "qmp.sock"
-        shutil.copyfile(ROOT / "build/disk.img", disk)
         command = ["qemu-system-x86_64"]
         if args.kvm:
             command.append("-enable-kvm")
         command += [
             "-m", "1024M", "-no-reboot", "-no-shutdown", "-boot", "d",
             "-cdrom", str(ROOT / "build/svindows.iso"),
-            "-drive", f"file={disk},format=raw,if=ide",
             "-display", "none", "-monitor", "none", "-serial", "stdio",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
         ]

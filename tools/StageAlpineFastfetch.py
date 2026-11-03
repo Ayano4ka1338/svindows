@@ -10,34 +10,14 @@ from pathlib import Path
 import shutil
 import tarfile
 import zlib
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from AlpineFetch import fetch_many
 
 LOCK = Path(__file__).with_name("alpine-fastfetch.lock.json")
 BRANCH = ""
 ARCH = ""
-BASE_URLS = (
-    "https://dl-cdn.alpinelinux.org/alpine",
-    "https://mirrors.huaweicloud.com/repository/alpine",
-)
 
 
-def fetch(relative: str) -> bytes:
-    preferred = os.environ.get("ALPINE_MIRROR", "").rstrip("/")
-    bases = ([preferred] if preferred else []) + list(BASE_URLS)
-    errors = []
-    for base in dict.fromkeys(bases):
-        url = f"{base}/{relative}"
-        try:
-            with urlopen(url, timeout=30) as response:
-                return response.read()
-        except (HTTPError, URLError, TimeoutError, OSError) as error:
-            errors.append(f"{url}: {error}")
-    raise RuntimeError("Unable to fetch Alpine package data:\n  " + "\n  ".join(errors))
-
-
-def package_index(repository: str) -> dict[str, str]:
-    raw = fetch(f"{BRANCH}/{repository}/{ARCH}/APKINDEX.tar.gz")
+def package_index(repository: str, raw: bytes) -> dict[str, str]:
     with tarfile.open(fileobj=BytesIO(raw), mode="r:gz") as archive:
         member = archive.extractfile("APKINDEX")
         if member is None:
@@ -74,8 +54,8 @@ def gzip_members(data: bytes) -> list[bytes]:
 
 
 def extract_package(repository: str, name: str, version: str,
-                    destination: Path) -> None:
-    index = package_index(repository)
+                    destination: Path, index_raw: bytes, apk_path: Path) -> None:
+    index = package_index(repository, index_raw)
     record = index.get(name)
     if record is None or record.get("V") != version:
         raise RuntimeError(f"Alpine {name} {version} not found in {BRANCH}/{repository}")
@@ -84,8 +64,7 @@ def extract_package(repository: str, name: str, version: str,
         raise RuntimeError(f"Alpine index has no SHA-1 data checksum for {name}")
 
     filename = f"{name}-{version}.apk"
-    relative = f"{BRANCH}/{repository}/{ARCH}/{filename}"
-    apk = fetch(relative)
+    apk = apk_path.read_bytes()
     members = gzip_members(apk)
     # APK v2 C:Q1 is the SHA-1 of the compressed control member,
     # immediately before the final data member. It is NOT a checksum
@@ -129,8 +108,18 @@ def stage(destination: Path) -> None:
     architecture = lock["architecture"]
     global BRANCH, ARCH
     BRANCH, ARCH = branch, architecture
+    repositories = sorted({package["repository"] for package in lock["packages"].values()})
+    index_paths = fetch_many(
+        {repository: f"{BRANCH}/{repository}/{ARCH}/APKINDEX.tar.gz"
+         for repository in repositories}, immutable=False, label="fastfetch index")
+    apk_paths = fetch_many(
+        {name: f"{BRANCH}/{package['repository']}/{ARCH}/{name}-{package['version']}.apk"
+         for name, package in lock["packages"].items()},
+        immutable=True, label="fastfetch APK")
     for name, package in lock["packages"].items():
-        extract_package(package["repository"], name, package["version"], destination)
+        repository = package["repository"]
+        extract_package(repository, name, package["version"], destination,
+                        index_paths[repository].read_bytes(), apk_paths[name])
 
     binary = destination / "usr/bin/fastfetch"
     if not binary.is_file():

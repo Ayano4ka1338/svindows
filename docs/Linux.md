@@ -70,13 +70,14 @@ including `F_DUPFD`),
 `getpgid` (121), `getsid` (124), `arch_prctl` (158), `gettid` (186), `futex` (202,
 wait/wake), `epoll_create` (213), `getdents64` (217),
 `set_tid_address` (218),
-`clock_gettime` (228, realtime and monotonic),
+`clock_gettime` (228, realtime and monotonic), `clock_getres` (229),
 `exit_group` (231), `epoll_wait` (232), `epoll_ctl` (233),
 `openat` (257), `newfstatat` (262), `readlinkat` (267), `pselect6` (270),
 `epoll_pwait` (281, without a signal mask),
 `accept4` (288), `epoll_create1` (291), `dup3` (292), `pipe2` (293),
 and read-only `prlimit64` (302, `RLIMIT_NOFILE`). Unknown calls
 return `-ENOSYS`.
+
 `clone` (56) supports threads sharing the process address space, file table,
 and working directory. It supports TLS and parent/child TID pointers; Linux
 namespace flags are not implemented. `fork` copies user pages and inherits

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side checks for DOSBox-style software mouse cursor composition."""
+"""Check DOS INT 33h cursor composition and forbid a synthetic Windows cursor."""
 from pathlib import Path
 import os
 import subprocess
@@ -28,12 +28,6 @@ typedef struct {
   U32 *Base;
   U32 Pitch, Width, Height;
 } GFX_FRAMEBUFFER;
-typedef struct {
-  INT32 X, Y;
-  U8 Buttons;
-  U32 Seq;
-} MOUSE_STATE;
-static MOUSE_STATE MouseState;
 static GFX_FRAMEBUFFER GfxFramebuffer;
 static U32 GfxColor(U8 r, U8 g, U8 b) {
   return ((U32)r << 16) | ((U32)g << 8) | b;
@@ -46,13 +40,14 @@ typedef struct {
   U16 MouseConditionalRight, MouseConditionalBottom;
   U8 MouseCursorWidthWords, MouseCursorHeight;
   U8 MouseHideCount;
-  BOOLEAN MouseInitialized, SerialMouseActive;
-  BOOLEAN MouseDisabled, MouseConditionalOff;
+  BOOLEAN MouseInitialized, MouseDisabled, MouseConditionalOff;
+  BOOLEAN IsWindows100, IsWindows200;
 } DOS_VM;
 '''
+
 checks = r'''
 int main(void) {
-  enum { W = 640, H = 200 };
+  enum { W = 1024, H = 768 };
   U32 pixels[W * H];
   DOS_VM vm;
   memset(&vm, 0, sizeof(vm));
@@ -72,51 +67,44 @@ int main(void) {
   assert(vm.MouseXorMask[1][0] == 0x4000);
 
   dos_video_draw_mouse_cursor(&vm, 0, 0, 1, 640, 200, 640);
-  /* Arrow tip/outline are black, its interior is white, and the rest is
-     transparent.  The guest framebuffer is not modified outside the mask. */
   assert(pixels[20 * W + 40] == 0x000000u);
   assert(pixels[20 * W + 41] == 0x000000u);
   assert(pixels[21 * W + 41] == 0xffffffu);
   assert(pixels[20 * W + 42] == 0x123456u);
 
-  /* The hotspot is applied before clipping and scaling. */
+  /* DOS mouse hotspot is applied before clipping and scaling. */
   for (unsigned i = 0; i < W * H; ++i) pixels[i] = 0x123456u;
   vm.MouseX = 50; vm.MouseY = 30;
   vm.MouseHotX = 2; vm.MouseHotY = 3;
   dos_video_draw_mouse_cursor(&vm, 0, 0, 1, 640, 200, 640);
   assert(pixels[27 * W + 48] == 0x000000u);
 
-  /* INT 33h hide suppresses the cursor, but an active serial mouse has no
-     guest hide call, so the normal Windows pointer stays visible. */
+  /* DOS INT 33h hide and disable state still work. */
   for (unsigned i = 0; i < W * H; ++i) pixels[i] = 0x123456u;
   vm.MouseHideCount = 1;
   vm.MouseHotX = vm.MouseHotY = 0;
   dos_video_draw_mouse_cursor(&vm, 0, 0, 1, 640, 200, 640);
   assert(pixels[30 * W + 50] == 0x123456u);
-  vm.SerialMouseActive = TRUE;
-  MouseState.X = 50; MouseState.Y = 30;
-  dos_video_draw_mouse_cursor(&vm, 0, 0, 1, 640, 200, 640);
-  assert(pixels[30 * W + 50] == 0x000000u);
-
-  /* The Windows 1.x serial driver uses COM1 instead of INT 33h.  Its
-     pointer overlay follows the host absolute position, remains visible if
-     INT 33h hide/disable was called, and is not scaled with guest pixels. */
-  for (unsigned i = 0; i < W * H; ++i) pixels[i] = 0x123456u;
-  DosMouseSetDefaultCursor(&vm);
-  vm.SerialMouseActive = TRUE;
-  vm.MouseHideCount = 2;
-  vm.MouseDisabled = TRUE;
-  vm.MouseX = 10; vm.MouseY = 10;
-  MouseState.X = 300; MouseState.Y = 100;
-  dos_video_draw_mouse_cursor(&vm, 0, 0, 2, 320, 200, 640);
-  assert(pixels[100 * W + 300] == 0x000000u);
-  assert(pixels[101 * W + 301] == 0xffffffu);
-  assert(pixels[10 * W + 10] == 0x123456u);
-  vm.SerialMouseActive = FALSE;
-  vm.MouseDisabled = FALSE;
   vm.MouseHideCount = 0;
+  vm.MouseDisabled = TRUE;
+  dos_video_draw_mouse_cursor(&vm, 0, 0, 1, 640, 200, 640);
+  assert(pixels[30 * W + 50] == 0x123456u);
+  vm.MouseDisabled = FALSE;
 
-  /* A custom cursor with an all-zero AND/XOR mask is fully black. */
+  /* Windows 1.x must never receive a cursor from this compositor, even if
+     INT 33h state was initialized by an unrelated DOS probe. */
+  vm.IsWindows100 = TRUE;
+  for (unsigned i = 0; i < W * H; ++i) pixels[i] = 0x123456u;
+  dos_video_draw_mouse_cursor(&vm, 0, 0, 1, 640, 200, 640);
+  assert(pixels[30 * W + 50] == 0x123456u);
+  vm.IsWindows100 = FALSE;
+  vm.IsWindows200 = TRUE;
+  for (unsigned i = 0; i < W * H; ++i) pixels[i] = 0x123456u;
+  dos_video_draw_mouse_cursor(&vm, 0, 0, 1, 640, 200, 640);
+  assert(pixels[30 * W + 50] == 0x123456u);
+  vm.IsWindows200 = FALSE;
+
+  /* A custom DOS cursor with an all-zero AND/XOR mask is fully black. */
   memset(vm.MouseAndMask, 0, sizeof(vm.MouseAndMask));
   memset(vm.MouseXorMask, 0, sizeof(vm.MouseXorMask));
   vm.MouseCursorWidthWords = 1;
@@ -140,15 +128,27 @@ with tempfile.TemporaryDirectory(prefix="sv-dos-cursor-") as directory:
     ], check=True)
     subprocess.run([str(exe)], check=True)
 
-# Ensure all framebuffer presenters composite the cursor only after the guest
-# image is painted, and that the software cursor remains outside guest memory.
+# Presenters may call the DOS cursor after painting guest memory, but Windows
+# 1.x must have no host-side cursor overlay or host-pointer position path.
 present = source[source.index("void DosVideoPresent("):source.index("void DosVideoStop(")]
 assert present.count("dos_video_draw_mouse_cursor(vm,") == 3
 assert "vm->VideoDirty = FALSE;" in present
-assert "DosVideoWriteMemory" not in implementation
+assert "MouseState" not in implementation
+assert "SerialMouseActive" not in implementation
+assert "vm->IsWindows100" in implementation
+assert "host_overlay" not in source
 serial_poll = source[source.index("void DosSerialMousePoll("):source.index("BOOLEAN DosSerialMouseIrqPending(")]
-assert "vm->VideoDirty = TRUE;" in serial_poll
+assert "vm->VideoDirty" not in serial_poll
+assert "WindowsMouseHostSeq" not in serial_poll
+assert "SerialMouseDeltaX" in serial_poll and "SerialMouseDeltaY" in serial_poll
+init_source = (ROOT / "kernel/dos/Dos.c").read_text()
+assert "vm->IsWindows100 = dos_command_is_win100_bin(command);" in init_source
 interrupt_source = (ROOT / "kernel/dos/Interrupt.c").read_text()
 mouse_poll = interrupt_source[interrupt_source.index("static void dos_mouse_poll("):interrupt_source.index("void DosMousePoll(")]
 assert "vm->VideoDirty = TRUE;" in mouse_poll
-print("PASS DOS mouse default arrow, host serial pointer, masks, hotspot, hide state, scaling, movement invalidation, and CGA/EGA/VGA presenters")
+mouse_ini = (ROOT / "user/d/windows1/MOUSE.INI").read_text()
+assert "MouseType=Serial1" in mouse_ini
+assert "MouseType=PS2" not in mouse_ini
+windows_files = {p.name.upper() for p in (ROOT / "user/d/windows1").iterdir() if p.is_file()}
+assert {"MOUSE.COM", "MOUSE.SYS"}.issubset(windows_files)
+print("PASS DOS INT 33h cursor, Windows-native-cursor exclusion, COM1 serial mouse path and no host cursor overlay")

@@ -114,6 +114,13 @@ void MmInitializePhysicalMemory(const MM_MEMORY_MAP *map)
           (unsigned long)(g_pmm.bitmap_bytes >> 10));
 }
 
+void MmReservePhysicalRange(UINT64 base, UINT64 length)
+{
+    if (!g_pmm.total_pages || !length || base > ~(UINT64)0 - length)
+        return;
+    reserve_range(base, length);
+}
+
 UINT64 MmAllocatePage(void)
 {
     for (UINT64 scan = 0; scan < g_pmm.total_pages; scan++) {

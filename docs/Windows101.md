@@ -72,4 +72,15 @@ three-byte Microsoft serial-mouse protocol used by Windows 1.x drivers. The
 framebuffer presenter composites the classic 16x16 arrow or guest-defined
 AND/XOR cursor after painting CGA, EGA and VGA frames, honoring the cursor
 hotspot and hide state without writing cursor pixels into guest video memory.
-DPMI protected-mode mouse callback delivery is not implemented.
+For `WIN100.BIN`, the presenter does not draw or overlay any cursor. Windows
+must load its own `MOUSE.DRV` and render its pointer into guest video memory;
+COM1 only supplies the Microsoft serial-mouse hardware interface. The current
+supplied `user/d/windows1` tree contains `MOUSE.COM` and `MOUSE.SYS` (DOS
+mouse drivers), but currently lacks the Windows 1.01 `MOUSE.DRV` graphics
+driver. Add the correct `MOUSE.DRV` selected for the serial mouse from the
+original Windows 1.01 installation media to `user/d/windows1`; the Makefile's
+Windows file wildcard will then stage it automatically. DPMI protected-mode
+mouse callback delivery is not implemented.
+
+
+The DOS BIOS Data Area now advertises COM1 (`03F8h`) and COM2 (`02F8h`) and reports both in the INT 11h equipment word, matching the virtual UARTs.

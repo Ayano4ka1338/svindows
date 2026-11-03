@@ -36,7 +36,7 @@ extern void KiEnterLinuxCloneUserMode(UINT64 entry, UINT64 stack,
 
 static KPROCESS       g_system_process;
 static KTHREAD        g_idle_thread;
-static PKTHREAD       g_current_thread;
+PKTHREAD              KeCurrentThreadPointer;
 static LIST_ENTRY     g_ready_queue;
 static LIST_ENTRY     g_all_threads;
 static ULONG          g_next_thread_id;
@@ -58,13 +58,23 @@ static void KepSignalThreadTermination(PKTHREAD thread)
     ObDereferenceObject((POBJECT)termination);
 }
 
+/* Process handles are waitable too. Wake their waiters only after the exit
+ * status and all sibling-thread termination state have been published. */
+static void KepSignalProcessTermination(PKPROCESS process)
+{
+    if (!process || !process->Object) return;
+    PDISPATCHER_HEADER header = (PDISPATCHER_HEADER)process->Object;
+    header->SignalState = 1;
+    KiSignalObject(header);
+}
+
 static void KepReapTerminatedThreads(void)
 {
     PLIST_ENTRY head = &g_all_threads;
     for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
         PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
         entry = entry->Flink;
-        if (thread == g_current_thread ||
+        if (thread == KeCurrentThreadPointer ||
             thread->State != ThreadStateTerminated)
             continue;
         W32kCleanupThreadUser(thread);
@@ -93,7 +103,7 @@ static void KepReapTerminatedThreads(void)
     }
 }
 
-PKTHREAD KeGetCurrentThread(void) { return g_current_thread; }
+PKTHREAD KeGetCurrentThread(void) { return KeCurrentThreadPointer; }
 
 /* Called by native thread services while the syscall has interrupts masked. */
 PKTHREAD KeLookupThreadById(ULONG thread_id)
@@ -125,7 +135,7 @@ NTSTATUS KeSuspendThread(PKTHREAD thread, ULONG *previous_count)
         thread->State = ThreadStateSuspended;
     }
     if (previous_count) *previous_count = count;
-    if (thread == g_current_thread && !count &&
+    if (thread == KeCurrentThreadPointer && !count &&
         thread->State == ThreadStateRunning) {
         thread->State = ThreadStateSuspended;
         KiSchedule();
@@ -186,7 +196,7 @@ void KeInitializeScheduler(void)
     InsertTailList(&g_system_process.ThreadListHead, &g_idle_thread.ProcessEntry);
     InsertTailList(&g_all_threads, &g_idle_thread.SchedulerEntry);
 
-    g_current_thread = &g_idle_thread;
+    KeCurrentThreadPointer = &g_idle_thread;
     KeSetCurrentThread(&g_idle_thread);
     g_next_thread_id = 1;
 
@@ -334,7 +344,7 @@ static void KiSchedule(void)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "scheduler above APC_LEVEL");
     g_reschedule_pending = FALSE;
     KepReapTerminatedThreads();
-    PKTHREAD prev = g_current_thread;
+    PKTHREAD prev = KeCurrentThreadPointer;
     PKTHREAD next;
 
     if (IsListEmpty(&g_ready_queue)) {
@@ -370,7 +380,7 @@ static void KiSchedule(void)
 
     next->State = ThreadStateRunning;
     next->Quantum = DEFAULT_QUANTUM;
-    g_current_thread = next;
+    KeCurrentThreadPointer = next;
     KeSetCurrentThread(next);
 
     /* Kernel mappings are shared, so it is safe to change CR3 while running
@@ -426,7 +436,7 @@ void KiBlockCurrentThread(void)
 /* Entered from KiThreadStartup (assembly) the first time a new thread runs. */
 void KiThreadBootstrap(void)
 {
-    PKTHREAD t = g_current_thread;
+    PKTHREAD t = KeCurrentThreadPointer;
     KiDeliverKernelApcs();
 
     if (t->UserMode) {
@@ -452,7 +462,7 @@ NORETURN void KeTerminateThread(void)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "thread termination above APC_LEVEL");
     (void)KiIrqSave(); /* disable preemption for good on this thread */
 
-    PKTHREAD t = g_current_thread;
+    PKTHREAD t = KeCurrentThreadPointer;
     t->State = ThreadStateTerminated;
     LinuxThreadExited(t);
     KeLog("[ke]   thread '%s' (id %u) terminated\n", t->Name, t->ThreadId);
@@ -474,6 +484,7 @@ NORETURN void KeTerminateThread(void)
             PKTHREAD other = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
             if (other == t || other->State == ThreadStateTerminated)
                 continue;
+            LinuxThreadExited(other);
             if (other->State == ThreadStateReady)
                 RemoveEntryList(&other->ReadyEntry);
             else if (other->State == ThreadStateWaiting)
@@ -485,6 +496,7 @@ NORETURN void KeTerminateThread(void)
             KeLog("[ke]   process exit terminated thread '%s' (id %u)\n",
                   other->Name, other->ThreadId);
         }
+        KepSignalProcessTermination(process);
     }
     KepSignalThreadTermination(t);
     KiSchedule();
@@ -500,11 +512,12 @@ NTSTATUS KeTerminateThreadByPointer(PKTHREAD target, NTSTATUS exit_status)
 {
     if (!target || target->State == ThreadStateTerminated)
         return STATUS_INVALID_HANDLE;
-    if (target == g_current_thread) {
+    if (target == KeCurrentThreadPointer) {
         target->ExitStatus = exit_status;
         KeTerminateThread();
     }
     UINT64 flags = KiIrqSave();
+    LinuxThreadExited(target);
     if (target->State == ThreadStateReady)
         RemoveEntryList(&target->ReadyEntry);
     else if (target->State == ThreadStateWaiting)
@@ -520,8 +533,9 @@ NTSTATUS KeTerminateThreadByPointer(PKTHREAD target, NTSTATUS exit_status)
         for (PLIST_ENTRY entry = process->ThreadListHead.Flink;
              entry != &process->ThreadListHead; entry = entry->Flink) {
             PKTHREAD other = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
-            if (other == target || other == g_current_thread ||
+            if (other == target || other == KeCurrentThreadPointer ||
                 other->State == ThreadStateTerminated) continue;
+            LinuxThreadExited(other);
             if (other->State == ThreadStateReady)
                 RemoveEntryList(&other->ReadyEntry);
             else if (other->State == ThreadStateWaiting)
@@ -531,13 +545,14 @@ NTSTATUS KeTerminateThreadByPointer(PKTHREAD target, NTSTATUS exit_status)
             KeAbandonThreadMutants(other);
             KepSignalThreadTermination(other);
         }
+        KepSignalProcessTermination(process);
     }
     KepSignalThreadTermination(target);
     BOOLEAN exit_caller = target->ProcessMainThread &&
-                          g_current_thread->Process == target->Process;
+                          KeCurrentThreadPointer->Process == target->Process;
     KiIrqRestore(flags);
     if (exit_caller) {
-        g_current_thread->ExitStatus = exit_status;
+        KeCurrentThreadPointer->ExitStatus = exit_status;
         KeTerminateThread();
     }
     return STATUS_SUCCESS;
@@ -566,7 +581,7 @@ void KeClockTick(void)
 {
     g_tick_count++;
     KeInsertQueueDpc(&g_clock_dpc, NULL, NULL);
-    PKTHREAD t = g_current_thread;
+    PKTHREAD t = KeCurrentThreadPointer;
     if (t->Quantum > 0)
         t->Quantum--;
 

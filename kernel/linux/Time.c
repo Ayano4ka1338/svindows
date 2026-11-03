@@ -31,6 +31,22 @@ UINT64 LinuxClockGettime(UINT64 clock_id, UINT64 destination)
     return 0;
 }
 
+UINT64 LinuxClockGetres(UINT64 clock_id, UINT64 destination)
+{
+    if (clock_id != 0 && clock_id != 1)
+        return LinuxError(LINUX_EINVAL);
+    if (!destination) return 0;
+    if (!MmProbeForWrite(destination, sizeof(LINUX_TIMESPEC)))
+        return LinuxError(LINUX_EFAULT);
+
+    /* Both realtime and monotonic clocks advance from the 100 Hz PIT tick. */
+    LINUX_TIMESPEC *resolution =
+        (LINUX_TIMESPEC *)(ULONG_PTR)destination;
+    resolution->Seconds = 0;
+    resolution->Nanoseconds = 10000000;
+    return 0;
+}
+
 UINT64 LinuxNanosleep(UINT64 requested, UINT64 remaining)
 {
     LINUX_TIMESPEC duration;

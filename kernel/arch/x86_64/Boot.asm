@@ -1,7 +1,7 @@
 ; ============================================================================
 ; arch/x86_64/Boot.asm - Multiboot2 entry and the 32-bit -> 64-bit trampoline.
 ;
-; GRUB loads this ELF64 image and enters `_start` in 32-bit protected mode with
+; Limine loads this Multiboot2 ELF64 image and enters `_start` in 32-bit protected mode with
 ; paging disabled. We then:
 ;   1. save the Multiboot2 magic + info pointer,
 ;   2. build boot page tables that map the low 1 GiB both identity-mapped and
@@ -37,13 +37,13 @@ mb_header_start:
     dd  mb_header_end - mb_header_start
     dd  -(MB2_MAGIC + MB2_ARCH_I386 + (mb_header_end - mb_header_start))
 
-    ; Framebuffer request tag (type = 5): ask GRUB for a linear framebuffer.
+    ; Framebuffer request tag (type = 5): ask the bootloader for a linear framebuffer.
     align 8
     dw  5                       ; type = framebuffer
-    dw  1                       ; flags: optional (fall back if unavailable)
+    dw  1                       ; flags: optional; the kernel applies it on VBE adapters
     dd  20                      ; size
-    dd  1920                    ; preferred width
-    dd  1440                    ; preferred height
+    dd  1200                    ; preferred width
+    dd  800                     ; preferred height
     dd  32                      ; preferred bits per pixel
 
     ; End tag (type = 0, size = 8).
@@ -66,7 +66,7 @@ _start:
     cli
     mov     esp, boot_stack_top       ; a stack in low identity memory
 
-    ; Preserve what GRUB handed us (eax = magic, ebx = info pointer).
+    ; Preserve the Multiboot2 hand-off (eax = magic, ebx = info pointer).
     mov     [saved_magic], eax
     mov     [saved_mbi], ebx
 

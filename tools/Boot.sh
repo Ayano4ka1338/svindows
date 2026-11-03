@@ -34,12 +34,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-make -s PROGRAM="$PROGRAM" iso build/disk.img >/dev/null || exit 1
+make -s PROGRAM="$PROGRAM" iso build/initrd.fat >/dev/null || exit 1
 rm -f "$LOG" "$SHOT"
 
-qemu-system-x86_64 -m 1024M -no-reboot -no-shutdown -boot d \
+qemu-system-x86_64 -m 1024M -cpu max -no-reboot -no-shutdown -boot d \
     -cdrom build/svindows.iso \
-    -drive file=build/disk.img,format=raw,if=ide,index=0,media=disk \
     -serial "file:$LOG" -display none \
     -monitor "unix:$MON,server,nowait" &
 BOOT_PID=$!

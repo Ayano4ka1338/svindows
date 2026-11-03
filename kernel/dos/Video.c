@@ -390,47 +390,28 @@ void DosVideoPresent(DOS_VM *vm)
     if (vm->VideoMode == 0x06u || vm->VideoMode == 0x04u ||
         vm->VideoMode == 0x05u) {
         UINT32 source_width = vm->VideoMode == 0x06u ? 640u : 320u;
-        UINT32 scale_x = width / source_width;
-        UINT32 scale_y = height / 200u;
-        UINT32 scale = scale_x < scale_y ? scale_x : scale_y;
-        if (!scale) scale = 1;
-        if (scale > 4) scale = 4;
-        UINT32 out_w = source_width * scale;
-        UINT32 out_h = 200u * scale;
-        UINT32 left = width > out_w ? (width - out_w) / 2u : 0;
-        UINT32 top = height > out_h ? (height - out_h) / 2u : 0;
-        UINT32 draw_w = width - left < out_w ? width - left : out_w;
-        UINT32 draw_h = height - top < out_h ? height - top : out_h;
+        /* VGA modes describe a logical display, not a window. Stretch it to
+         * the active framebuffer so legacy graphics programs use the whole
+         * Svindows display at both low and high host resolutions. */
+        UINT32 left = 0, top = 0;
         UINT32 palette[4];
         for (unsigned i = 0; i < 4; i++)
             palette[i] = dos_ega_color(vm->VgaAttribute[i]);
         const U8 *cga = vm->Memory + 0xb8000u;
-        for (UINT32 y = 0; y < draw_h; y++) {
-            UINT32 sy = y / scale;
-            UINT32 *dst = GfxFramebuffer.Base + (top + y) * stride + left;
-            if (y % scale) {
-                memcpy(dst, dst - stride, draw_w * sizeof(*dst));
-                continue;
-            }
-            U32 row = dos_cga_scanline_offset(sy);
-            if (vm->VideoMode == 0x06u) {
-                for (UINT32 sx = 0; sx < 640u && sx < draw_w / scale; sx++) {
-                    U8 bits = cga[row + (sx >> 3)];
-                    UINT32 color = palette[(bits >> (7u - (sx & 7u))) & 1u];
-                    for (UINT32 dx = 0; dx < scale && sx * scale + dx < draw_w; dx++)
-                        dst[sx * scale + dx] = color;
-                }
-            } else {
-                for (UINT32 sx = 0; sx < 320u && sx < draw_w / scale; sx++) {
-                    U8 bits = cga[row + (sx >> 2)];
-                    UINT32 pixel = (bits >> (6u - ((sx & 3u) * 2u))) & 3u;
-                    UINT32 color = palette[pixel];
-                    for (UINT32 dx = 0; dx < scale && sx * scale + dx < draw_w; dx++)
-                        dst[sx * scale + dx] = color;
-                }
+        for (UINT32 y = 0; y < height; y++) {
+            UINT32 sy = y * 200u / height;
+            UINT32 row = dos_cga_scanline_offset(sy);
+            UINT32 *dst = GfxFramebuffer.Base + y * stride;
+            for (UINT32 x = 0; x < width; x++) {
+                UINT32 sx = x * source_width / width;
+                U8 bits = cga[row + (vm->VideoMode == 0x06u ? (sx >> 3) : (sx >> 2))];
+                U32 pixel = vm->VideoMode == 0x06u
+                    ? ((bits >> (7u - (sx & 7u))) & 1u)
+                    : ((bits >> (6u - ((sx & 3u) * 2u))) & 3u);
+                dst[x] = palette[pixel];
             }
         }
-        dos_video_draw_mouse_cursor(vm, left, top, scale, source_width,
+        dos_video_draw_mouse_cursor(vm, left, top, 1u, source_width,
                                     200u, 640u);
         vm->VideoDirty = FALSE;
         return;
@@ -439,62 +420,45 @@ void DosVideoPresent(DOS_VM *vm)
     if (vm->VideoMode >= 0x0du && vm->VideoMode <= 0x12u) {
         U32 sw = vm->VideoMode == 0x0du ? 320u : 640u;
         U32 sh = vm->VideoMode <= 0x0eu ? 200u : vm->VideoMode <= 0x10u ? 350u : 480u;
-        U32 scale = width / sw < height / sh ? width / sw : height / sh;
-        if (!scale) scale = 1;
-        U32 left = width > sw * scale ? (width - sw * scale) / 2u : 0;
-        U32 top = height > sh * scale ? (height - sh * scale) / 2u : 0;
+        U32 left = 0, top = 0;
         U32 start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
         U32 colors[16];
         for (unsigned i = 0; i < 16; i++) colors[i] = dos_ega_color(vm->VgaAttribute[i]);
-        for (U32 y = 0; y < sh && top + y * scale < height; y++) {
-            for (U32 x = 0; x < sw && left + x * scale < width; x++) {
-                U32 offset = (start + y * (sw / 8u) + x / 8u) & 0xffffu;
+        for (U32 y = 0; y < height; y++) {
+            U32 source_y = y * sh / height;
+            for (U32 x = 0; x < width; x++) {
+                U32 source_x = x * sw / width;
+                U32 offset = (start + source_y * (sw / 8u) + source_x / 8u) & 0xffffu;
                 U8 pixel = 0;
                 for (unsigned plane = 0; plane < 4; plane++)
-                    pixel |= ((vm->VgaPlanes[plane][offset] >> (7u - (x & 7u))) & 1u) << plane;
-                for (U32 dy = 0; dy < scale && top + y * scale + dy < height; dy++)
-                    for (U32 dx = 0; dx < scale && left + x * scale + dx < width; dx++)
-                        GfxFramebuffer.Base[(top + y * scale + dy) * stride + left + x * scale + dx] = colors[pixel];
+                    pixel |= ((vm->VgaPlanes[plane][offset] >> (7u - (source_x & 7u))) & 1u) << plane;
+                GfxFramebuffer.Base[y * stride + x] = colors[pixel];
             }
         }
-        dos_video_draw_mouse_cursor(vm, left, top, scale, sw, sh,
+        dos_video_draw_mouse_cursor(vm, left, top, 1u, sw, sh,
                                     vm->VideoMode == 0x0du ? 320u : 640u);
         vm->VideoDirty = FALSE;
         return;
     }
     if (vm->VideoMode != 0x13u) return;
-    UINT32 scale_x = width / 320u;
-    UINT32 scale_y = height / 200u;
-    UINT32 scale = scale_x < scale_y ? scale_x : scale_y;
-    if (!scale) scale = 1;
-    if (scale > 4) scale = 4;
-    UINT32 out_w = 320u * scale;
-    UINT32 out_h = 200u * scale;
-    UINT32 left = width > out_w ? (width - out_w) / 2u : 0;
-    UINT32 top = height > out_h ? (height - out_h) / 2u : 0;
-    UINT32 draw_w = width - left < out_w ? width - left : out_w;
-    UINT32 draw_h = height - top < out_h ? height - top : out_h;
+    UINT32 left = 0, top = 0;
     UINT8 *source = vm->Memory + VGA_MEMORY_BASE;
 
     UINT32 colors[256];
     for (unsigned i = 0; i < 256; i++) colors[i] = dos_vga_color(vm, (U8)i);
     U32 start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
-    for (UINT32 y = 0; y < draw_h; y++) {
-        UINT32 sy = y / scale;
-        UINT32 *dst = GfxFramebuffer.Base + (top + y) * stride + left;
-        if (y % scale) {
-            memcpy(dst, dst - stride, draw_w * sizeof(*dst));
-            continue;
-        }
-        for (UINT32 sx = 0; sx < 320u && sx * scale < draw_w; sx++) {
+    for (UINT32 y = 0; y < height; y++) {
+        UINT32 sy = y * 200u / height;
+        UINT32 *dst = GfxFramebuffer.Base + y * stride;
+        for (UINT32 x = 0; x < width; x++) {
+            UINT32 sx = x * 320u / width;
             U8 pixel = (vm->VgaSequencer[4] & 8u) ? source[sy * 320u + sx]
                 : vm->VgaPlanes[sx & 3u][(start + sy * 80u + sx / 4u) & 0xffffu];
             UINT32 color = colors[pixel];
-            for (UINT32 dx = 0; dx < scale && sx * scale + dx < draw_w; dx++)
-                dst[sx * scale + dx] = color;
+            dst[x] = color;
         }
     }
-    dos_video_draw_mouse_cursor(vm, left, top, scale, 320u, 200u, 640u);
+    dos_video_draw_mouse_cursor(vm, left, top, 1u, 320u, 200u, 640u);
     vm->VideoDirty = FALSE;
 }
 
@@ -651,6 +615,24 @@ U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
         return uart[reg];
     }
     switch (port) {
+    case 0x0000: case 0x0001: case 0x0002: case 0x0003:
+    case 0x0004: case 0x0005: case 0x0006: case 0x0007: {
+        U16 *reg = &vm->DmaRegisters[port];
+        byte = vm->DmaFlipFlop ? (U8)(*reg >> 8) : (U8)*reg;
+        vm->DmaFlipFlop ^= 1u;
+        break;
+    }
+    case 0x0008:
+        byte = vm->DmaStatus;
+        vm->DmaStatus &= 0xf0u; /* reading status clears terminal-count bits */
+        break;
+    case 0x000f: byte = vm->DmaMask; break;
+    case 0x0080: case 0x0081: case 0x0082: case 0x0083:
+    case 0x0084: case 0x0085: case 0x0086: case 0x0087:
+    case 0x0088: case 0x0089: case 0x008a: case 0x008b:
+    case 0x008c: case 0x008d: case 0x008e: case 0x008f:
+        byte = vm->DmaPageRegisters[port - 0x80u];
+        break;
     case 0x0060: byte = dos_keyboard_read(vm); break;
     case 0x0064: byte = (vm->KeyboardDataReady || KbdMirroredInputEventAvailable()) ? 0x01u : 0x00u; break;
     case 0x0061: byte = vm->VgaSpeakerControl; break;
@@ -745,6 +727,39 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
         return;
     }
     switch (port) {
+    case 0x0000: case 0x0001: case 0x0002: case 0x0003:
+    case 0x0004: case 0x0005: case 0x0006: case 0x0007: {
+        U16 *reg = &vm->DmaRegisters[port];
+        if (vm->DmaFlipFlop) *reg = (U16)((*reg & 0x00ffu) | ((U16)byte << 8));
+        else *reg = (U16)((*reg & 0xff00u) | byte);
+        vm->DmaFlipFlop ^= 1u;
+        break;
+    }
+    case 0x0008: vm->DmaCommand = byte; break;
+    case 0x0009: /* DMA request register: retain in channel mask state. */
+        vm->DmaStatus = (U8)((vm->DmaStatus & 0xf0u) | (byte & 0x0fu));
+        break;
+    case 0x000a:
+        if (byte & 0x04u) vm->DmaMask |= (U8)(1u << (byte & 3u));
+        else vm->DmaMask &= (U8)~(1u << (byte & 3u));
+        break;
+    case 0x000b: vm->DmaMode = byte; break;
+    case 0x000c: vm->DmaFlipFlop = 0; break;
+    case 0x000d:
+        vm->DmaFlipFlop = 0;
+        vm->DmaStatus = 0;
+        vm->DmaMask = 0x0fu;
+        vm->DmaCommand = 0;
+        vm->DmaMode = 0;
+        break;
+    case 0x000e: vm->DmaMask = 0; break;
+    case 0x000f: vm->DmaMask = byte & 0x0fu; break;
+    case 0x0080: case 0x0081: case 0x0082: case 0x0083:
+    case 0x0084: case 0x0085: case 0x0086: case 0x0087:
+    case 0x0088: case 0x0089: case 0x008a: case 0x008b:
+    case 0x008c: case 0x008d: case 0x008e: case 0x008f:
+        vm->DmaPageRegisters[port - 0x80u] = byte;
+        break;
     case 0x0060: /* 8042 command/data port: acknowledge, do not control host */
     case 0x0064:
         break;

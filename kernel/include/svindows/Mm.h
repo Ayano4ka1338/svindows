@@ -96,6 +96,8 @@ typedef struct _MM_MEMORY_MAP {
 
 /* Parse the Multiboot2 info block (physical pointer) into `out`. */
 BOOLEAN MmParseMultibootMemoryMap(UINT64 mb_info_phys, MM_MEMORY_MAP *out);
+BOOLEAN MmFindMultibootModule(UINT64 mb_info_phys, const char *name,
+                              UINT64 *base_out, UINT64 *size_out);
 const char *MmRegionTypeName(MM_REGION_TYPE type);
 
 /* ------------------------------------------------------------------ */
@@ -105,6 +107,7 @@ const char *MmRegionTypeName(MM_REGION_TYPE type);
 #define MM_INVALID_PHYS ((UINT64)-1)
 
 void   MmInitializePhysicalMemory(const MM_MEMORY_MAP *map);
+void   MmReservePhysicalRange(UINT64 base, UINT64 length);
 UINT64 MmAllocatePage(void);                 /* one 4 KiB frame, or MM_INVALID_PHYS */
 UINT64 MmAllocatePages(SIZE_T count);        /* `count` contiguous frames          */
 /* DMA32 allocations are physically below 4 GiB for legacy bus masters. */

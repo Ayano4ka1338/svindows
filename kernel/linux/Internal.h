@@ -181,6 +181,7 @@ UINT64 LinuxSelect(PKPROCESS process, UINT64 nfds, UINT64 read_set,
                    UINT64 write_set, UINT64 except_set, UINT64 timeout,
                    BOOLEAN pselect);
 UINT64 LinuxClockGettime(UINT64 clock_id, UINT64 destination);
+UINT64 LinuxClockGetres(UINT64 clock_id, UINT64 destination);
 UINT64 LinuxNanosleep(UINT64 requested, UINT64 remaining);
 UINT64 LinuxUname(UINT64 destination);
 UINT64 LinuxChownPath(PKPROCESS process, UINT64 path, UINT64 uid, UINT64 gid);
