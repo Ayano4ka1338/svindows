@@ -28,7 +28,7 @@ that, any physical page is reachable at `MM_DIRECT_MAP_BASE + phys` via
 ## Boot flow
 
 ```
-BIOS ──▶ GRUB (Multiboot2) ──▶ _start (32-bit, arch/x86_64/Boot.asm)
+BIOS/UEFI ──▶ Limine (Multiboot2) ──▶ _start (32-bit, arch/x86_64/Boot.asm)
    │
    │  1. save Multiboot2 info pointer + magic
    │  2. build boot page tables (identity + higher half, 2 MiB pages)
@@ -98,22 +98,23 @@ NT boundary are converted between UTF-8 and UTF-16 without discarding Unicode.
 disposition classes, so Win32 mutations retain handle/share semantics instead
 of bypassing the I/O manager with pathname-only calls.
 
-FAT32 accesses the disk through a 64-sector write-back cache. Dirty sectors
-are written on eviction, when a disk/directory File object closes, or through
-`NtFlushBuffersFile` (`FlushFileBuffers` in kernel32); the flush path also
-issues the ATA cache-flush command before reporting success. This provides
-explicit persistence. File replacement uses ordered copy-on-write phases:
+FAT32 accesses Limine's `initrd.fat` through a 64-sector write-back cache and
+an in-memory block device. Dirty sectors are written into the initrd module on
+eviction, when a disk/directory File object closes, or through
+`NtFlushBuffersFile` (`FlushFileBuffers` in kernel32). These writes remain
+visible for the rest of the boot session and are lost at reboot. File
+replacement uses ordered copy-on-write phases:
 write and flush unreferenced data, publish and flush its FAT chain, publish and
 flush the directory entry, then release the old chain. Allocation exhaustion
 is reported as `STATUS_DISK_FULL`. A build-time physical-sector fault injector
 (`FAT_FAULT_AFTER`) exercises failed writes without requiring a test program.
 Metadata mutations additionally use bounded sector-cache transactions. The
 cache snapshots each sector before its first modification, flushes the changed
-set on commit, and can rewrite the snapshots if an ATA write fails part-way
+set on commit, and can rewrite the snapshots if a block write fails part-way
 through. Directory allocation writes its contents before publishing the FAT
 allocation; directory growth, create, rename and delete use transaction-backed
-metadata phases. Rename durably publishes the destination before removing the
-source, while deletion durably removes the directory entry before releasing
+metadata phases. Rename publishes the destination before removing the source,
+while deletion removes the directory entry before releasing
 its cluster chain.
 
 Mount performs a reachability pass beginning at the FAT32 root. It follows all
@@ -255,7 +256,7 @@ another).
 
 ## Graphics
 
-GRUB is asked for a 32-bpp linear framebuffer through a Multiboot2 framebuffer
+Limine is asked for a 32-bpp linear framebuffer through a Multiboot2 framebuffer
 request tag (`arch/x86_64/Boot.asm`). At boot, `mm/Multiboot.c` reads the
 framebuffer info tag — physical address, pitch, dimensions, and the RGB field
 positions — into `GfxFramebuffer`. `GfxInitialize` (`hal/Framebuffer.c`) maps

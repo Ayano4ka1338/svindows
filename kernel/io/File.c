@@ -173,6 +173,36 @@ NTSTATUS IoHandleInputAvailableKernel(HANDLE handle, BOOLEAN *available)
     return STATUS_SUCCESS;
 }
 
+NTSTATUS IoFlushInputHandleKernel(HANDLE handle)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                &object);
+    if (!NT_SUCCESS(status)) return status;
+
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    if (file->Kind == FileKindConsole) {
+        ConFlushInput();
+    } else if (file->Kind == FileKindCharDevice && file->CharOps &&
+               file->CharOps->TryRead) {
+        UINT8 discard[64];
+        while (file->CharOps->TryRead(file->CharContext, discard,
+                                      sizeof(discard)) != 0) {
+            /* Drain only data already buffered by the character device. */
+        }
+    } else if (file->Kind == FileKindPipe && file->Pipe) {
+        UINT64 irq = KiIrqSave();
+        file->Pipe->ReadPosition = file->Pipe->WritePosition;
+        file->Pipe->Count = 0;
+        KiIrqRestore(irq);
+    }
+    /* Disk-backed redirected stdin has no independent input queue to flush;
+     * its file position must remain unchanged. */
+
+    ObDereferenceObject(object);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
                              SIZE_T *written_out)
 {

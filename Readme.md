@@ -33,7 +33,7 @@ Svindows is an experimental x86-64 operating system built from scratch around an
 
 ## Features
 
-- **NT Kernel** — Multiboot2/GRUB boot, long mode, ring 0/3, virtual memory, processes, threads, scheduler, kernel objects and system calls.
+- **NT Kernel** — Limine Multiboot2 boot with a FAT32 `initrd.fat`, long mode, ring 0/3, virtual memory, processes, threads, scheduler, kernel objects and system calls.
 - **Win32** — PE32+ EXE/DLL loading, PEB/TEB, native `Nt*` services, Win32 runtime, console, USER32 and GDI APIs.
 - **DOS** — COM and MZ executables, DOS/BIOS interrupts, partial 386 protected mode and DPMI, virtual VGA, PIC, PIT and keyboard devices.
 - **Linux ABI** — x86-64 ELF, musl interpreter, Linux-style syscalls, `mmap`, `futex`, `poll`/`epoll`, processes and AF_INET sockets.
@@ -45,14 +45,20 @@ Compatibility is experimental and incomplete. DOS/DPMI gameplay, sound, full POS
 
 ## Build & Run
 
-**Requirements:** Linux, GCC/binutils, Clang/LLD, NASM, GNU Make, Python 3, GRUB tools, xorriso, mtools and QEMU.
+**Requirements:** Linux, GCC/binutils, Clang/LLD, NASM, GNU Make, Python 3, xorriso, mtools and QEMU.
 
 ```bash
 git clone https://github.com/Ayano4ka1338/svindows.git
 cd svindows
 
-make             # Build ISO and FAT disk image
+make             # Build Limine ISO and FAT32 initrd module
 make run         # Boot using QEMU serial console
 make run-gui     # Boot graphical QEMU
 make run-net     # Run network smoke test
 make clean       # Remove generated files
+```
+
+Alpine APK packages (Xorg, `feh`, `curl` and Fastfetch) download in parallel
+and are kept in `~/.cache/svindows/alpine-apk` between builds. `make clean` does
+not delete this cache. Tune concurrency with `ALPINE_DOWNLOAD_JOBS=12` (default)
+or select a nearby mirror with `ALPINE_MIRROR=https://.../alpine`.

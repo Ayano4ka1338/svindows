@@ -16,8 +16,11 @@ typedef UINT64 U64;
 #define DOS_REAL_MEMORY_SIZE 0x100000u
 #define MEM_SIZE 0x08000000u /* 128 MiB flat-memory space for DOS extenders */
 #define DOS_DPMI_MAX_BLOCKS 128u
+#define DOS_XMS_CAPACITY (16u * 1024u * 1024u)
+#define DOS_XMS_BASE 0x00110000u /* Above the HMA reserved by XMS. */
+#define DOS_XMS_MAX_HANDLES 64u
 #define DOS_HW_POLL_INTERVAL 128u
-#define DOS_CPU_BATCH_SIZE 256u
+#define DOS_CPU_BATCH_SIZE 4096u
 /* DOS 3.1-3.3 compatibility data used by INT 21h/34h, 52h and 5D06h. */
 #define DOS_SYSTEM_DATA_SEGMENT 0x0600u
 #define DOS_LISTS_OFFSET 0x0022u /* DOS 3.x AH=52h returns ES:BX with BX=0022h. */
@@ -72,6 +75,7 @@ typedef struct _DOS_FILE {
 typedef struct _DOS_BLOCK {
   U16 Segment, Paragraphs;
   BOOLEAN Used;
+  U16 OwnerPsp;
 } DOS_BLOCK;
 
 typedef struct _DOS_DESCRIPTOR {
@@ -87,6 +91,11 @@ typedef struct _DOS_DPMI_BLOCK {
   BOOLEAN Used;
 } DOS_DPMI_BLOCK;
 
+typedef struct _DOS_XMS_BLOCK {
+  U32 Base, Size;
+  BOOLEAN Used, Locked;
+} DOS_XMS_BLOCK;
+
 typedef struct _DOS_TABLE_REGISTER {
   U32 Base;
   U16 Limit;
@@ -96,6 +105,7 @@ typedef struct _DOS_VM {
   U8 *Memory;
   U16 Registers[8], Segments[6], Ip, Flags;
   U32 Registers32[8];
+  U64 MmxRegisters[8];
   U32 Eip, Eflags, Cr0;
   U16 FpuControl, FpuStatus;
   BOOLEAN FpuInitialized; /* host x87 state has been initialized for this DOS thread */
@@ -112,6 +122,10 @@ typedef struct _DOS_VM {
   BOOLEAN DpmiDescriptorUsed[128];
   BOOLEAN DpmiDosDescriptor[128];
   DOS_DPMI_BLOCK DpmiBlocks[DOS_DPMI_MAX_BLOCKS];
+  DOS_XMS_BLOCK XmsBlocks[DOS_XMS_MAX_HANDLES];
+  U32 XmsUsed;
+  U16 XmsA20Global, XmsA20Local;
+  BOOLEAN XmsHmaOwned;
   struct {
     U16 Selector;
     U32 Offset, RegistersOffset;
@@ -124,10 +138,12 @@ typedef struct _DOS_VM {
   DOS_FILE *Files[20];
   DOS_BLOCK Blocks[DOS_MAX_BLOCKS];
   U16 InitialParagraphs;
+  U16 DosAllocationStrategy;
   U16 CurrentPsp; /* DOS current process, switchable by INT 21h/50h. */
   U16 CountryCode;
   U32 ImageSize, ImageHash;
   U16 DosVersion; /* INT 21h/AH=30 compatibility version (AL major, AH minor). */
+  U8 InDosCount; /* DOS-visible SDA byte returned by INT 21h/AH=34h. */
   BOOLEAN Dos4gImage;
   U8 CtrlBreak;
   U8 VideoMode;
@@ -175,6 +191,9 @@ typedef struct _DOS_VM {
   U8 PitControl, PitReadPhase, PitWritePhase, PitLowByte;
   U16 PitReload, PitLatch;
   U8 PitLatched;
+  U16 DmaRegisters[8];
+  U8 DmaPageRegisters[16], DmaFlipFlop, DmaStatus;
+  U8 DmaCommand, DmaMask, DmaMode;
   U32 LastVideoTick, LastTimerTick, DosTimerPhase;
   U32 PortTraceCount;
   U8 UartRegisters[2][8];
@@ -199,11 +218,12 @@ typedef struct _DOS_VM {
   U32 CurrentInstructionIp;
   U8 CurrentOpcode;
   U8 InterruptShadow;
-  U8 HardwarePollCountdown;
+  U32 HardwarePollDeadline;
 } DOS_VM;
 
 static inline DOS_VM *current(void) {
-  return (DOS_VM *)KeGetCurrentThread()->DosContext;
+  PKTHREAD thread = KeGetCurrentThreadFast();
+  return thread ? (DOS_VM *)thread->DosContext : NULL;
 }
 #define mem (current()->Memory)
 #define r (current()->Registers)
@@ -217,19 +237,21 @@ static inline DOS_VM *current(void) {
 #define fault (current()->Fault)
 #define steps (current()->Steps)
 
-static inline U32 addr(U16 s, U16 o) {
-  return (((U32)s << 4) + o) & 0xfffffu;
+static inline U32 addr(U16 s, U32 o) {
+  U32 linear = ((U32)s << 4) + o;
+  return (current()->XmsA20Global || current()->XmsA20Local)
+             ? linear : (linear & 0xfffffu);
 }
 U8 DosVideoReadMemory(DOS_VM *vm, U32 linear);
 void DosVideoWriteMemory(DOS_VM *vm, U32 linear, U8 value);
-static inline U8 rb(U16 s, U16 o) {
+static inline U8 rb(U16 s, U32 o) {
   U32 linear = addr(s, o);
   return linear >= 0xa0000u && linear < 0xb0000u ? DosVideoReadMemory(current(), linear) : mem[linear];
 }
-static inline U16 rw(U16 s, U16 o) {
-  return rb(s, o) | ((U16)rb(s, (U16)(o + 1)) << 8);
+static inline U16 rw(U16 s, U32 o) {
+  return rb(s, o) | ((U16)rb(s, o + 1u) << 8);
 }
-static inline void wb(U16 s, U16 o, U8 v) {
+static inline void wb(U16 s, U32 o, U8 v) {
   U32 linear = addr(s, o);
   DOS_VM *vm = current();
   if (linear >= 0xa0000u && linear < 0xb0000u)
@@ -241,7 +263,7 @@ static inline void wb(U16 s, U16 o, U8 v) {
       vm->VideoDirty = TRUE;
   }
 }
-static inline void ww(U16 s, U16 o, U16 v) {
+static inline void ww(U16 s, U32 o, U16 v) {
   wb(s, o, (U8)v);
   wb(s, (U16)(o + 1), (U8)(v >> 8));
 }
@@ -278,6 +300,7 @@ BOOLEAN DosMouseDispatchCallback(DOS_VM *vm);
 BOOLEAN DosMouseCallbackReturn(DOS_VM *vm);
 void DosInitializeSystemData(DOS_VM *vm, const char *current_directory);
 void DosSyncSystemData(DOS_VM *vm, const char *current_directory);
+void DosUpdateMemoryControlBlocks(DOS_VM *vm);
 void DosUpdateSftEntry(DOS_VM *vm, U16 handle);
 U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width);
 void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width);

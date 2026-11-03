@@ -44,6 +44,11 @@ DOS date, time, and FAT free-space calls for drive C:. `INT 21h/AH=4Bh` can
 run a child `.COM` or DOS MZ `.EXE` image and `AH=4Dh` returns its exit code.
 `INT 21h/AX=3800h` returns the default US country-format table, and
 `INT 21h/AX=4400h` identifies character-device and C: file handles.
+`INT 2Fh/AX=4300h` and `4310h` expose a virtual XMS 3.01 manager for DOS
+programs such as Windows 3.1 startup. Its far-call interface supports A20
+queries/toggles, XMS allocation/free/resize, block moves, locks, handle
+information, and 16/32-bit free-memory queries, backed by a private 16 MiB
+extended-memory arena per DOS VM. HMA allocation and UMBs are not available.
 DOS file paths use the process's current C: directory. `C:NAME` is relative
 to that directory, while `C:\\NAME` starts at the drive root. Unmounted drive
 letters and paths too long for the DOS path buffer are rejected. Opened files
@@ -57,11 +62,11 @@ query, and pixel read/write for the supported CGA graphics modes. CGA modes 04h,
 640x200 monochrome graphics through the Svindows framebuffer. Standard DOS
 streams use the child process's native handles, so pipes and redirection work.
 
-For gameplay performance, build the system with `make CONFIG=release run-gui`.
-The default `CONFIG=debug` compiles the kernel (including the DOS interpreter)
-with `-Og`, while the release configuration uses `-O2`.
+The default build uses `CONFIG=release`, compiling the kernel and DOS
+interpreter with `-O2` for gameplay. Use `make CONFIG=debug` explicitly when
+source-level debugging with `-Og` is needed.
 
-To run a DOS program, put its `.COM` or MZ `.EXE` file on `build/disk.img`
+To run a DOS program, put its `.COM` or MZ `.EXE` file on `build/initrd.fat`
 (or copy it to the mounted C: drive) and enter its name in `cmd.exe`. When
 `user/d/doom/` is present, the build copies the bundled DOS/4G Doom distribution
 and any additional files in that directory to `C:\DOOM`, and adds a root
@@ -75,6 +80,14 @@ MZ, conventional-memory and DPMI host-discovery probes from `C:\TESTS`.
 DPMI transition and the first virtual PC I/O access. This is a useful startup
 smoke test, not proof that the entire game is playable.
 
+The supplied Russian Windows 3.1 files are staged under `C:\WINDOWS2` for
+backward compatibility with the existing payload directory. Start them with
+`C:\>WIN2` or `C:\>WIN3`; both launch standard 286 mode (`WIN.COM /S`) because
+the payload contains `KRNL286.EXE` and does not include the enhanced-mode
+`WIN386.EXE`.
+QEMU currently displays the Windows 3.1 splash screen but does not reach
+Program Manager yet.
+
 The DOS VM also virtualizes the PC I/O instructions `IN`/`OUT` and their
 string forms. Its virtual devices currently cover the VGA DAC and mode-13h
 linear framebuffer (`A000:0000`), CGA mode 04h-06h scanout (`B800:0000`),
@@ -84,7 +97,7 @@ remap the master/slave interrupt vector bases. Mode 13h is presented through
 the Svindows graphics framebuffer. DOS keyboard input is received through an
 independent mirrored event queue; timer and keyboard interrupts are reflected
 to the currently programmed real-mode or DPMI protected-mode IRQ vectors. The
-interpreter samples virtual hardware at 128-instruction boundaries instead of
+interpreter samples virtual hardware at 256-instruction boundaries instead of
 checking the PIT, PIC, and keyboard queue on every guest instruction;
 interrupt-shadow instructions still expire at instruction boundaries. This
 keeps timer and input latency bounded while reducing hot-loop overhead. This
@@ -93,7 +106,7 @@ not a complete PC chipset or VGA implementation.
 
 This remains a partial DOS and 386 protected-mode subset. Paging, privilege
 level stack switching, full exception delivery, many DPMI services, arbitrary
-VGA register semantics, Sound Blaster/MPU-401 audio, EMS/XMS, TSRs, and DOS
+VGA register semantics, Sound Blaster/MPU-401 audio, EMS, TSRs, and DOS
 `EXEC` modes other than `AL=00h` are not implemented. Some protected-mode
 opcodes and extender behaviours may still be unsupported; the bundled Doom
 image is a compatibility target, not yet a guaranteed gameplay smoke test.
@@ -109,8 +122,10 @@ writes are also bulk-stored, and the interpreter no longer invokes the full
 scheduler every 1M guest instructions. The protected decoder and register
 helpers also reuse the DOS VM pointer already obtained by the run loop, avoiding
 repeated current-thread lookups for each protected-mode register operation.
-Hardware polling remains batched at 128 instructions with interrupt-shadow
-handling preserved. These are
+Hardware polling remains batched at 256 instructions with interrupt-shadow
+handling preserved. Framebuffer conversion is capped near Doom's 35-Hz game
+tick rather than repeatedly converting continuously dirty VGA memory at 50 Hz.
+These are
 interpreter optimizations, not native execution: near-native speed still needs
 a separate native 32-bit backend or a dynamic recompiler, neither of which is
 implemented or claimed by this patch.

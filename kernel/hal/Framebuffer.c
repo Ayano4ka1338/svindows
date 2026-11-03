@@ -1,7 +1,7 @@
 /*
  * hal/Framebuffer.c - linear framebuffer graphics and a text console.
  *
- * Draws directly to the GRUB-provided 32-bpp framebuffer: pixels, rectangles,
+ * Draws directly to the bootloader-provided 32-bpp framebuffer: pixels, rectangles,
  * bitmap-font glyphs, and a scrolling text console the kernel log renders into
  * once graphics are up.
  */
@@ -9,10 +9,66 @@
 #include <svindows/Mm.h>
 #include <svindows/Ke.h>
 #include <svindows/Rtl.h>
+#include <svindows/Hal.h>
+#include <svindows/Multiboot2.h>
 
 extern const UINT8 Font9x20[95][20][5];
 
 GFX_FRAMEBUFFER GfxFramebuffer;
+
+static UINT16 vbe_read(UINT16 index)
+{
+    __outword(0x1CE, index);
+    return __inword(0x1CF);
+}
+
+static void vbe_write(UINT16 index, UINT16 value)
+{
+    __outword(0x1CE, index);
+    __outword(0x1CF, value);
+}
+
+BOOLEAN GfxRequestBootMode(UINT64 mbi_phys, UINT32 width, UINT32 height)
+{
+    if (!mbi_phys || width > 0xFFFF || height > 0xFFFF)
+        return FALSE;
+
+    MB_INFO_HEADER *header = (MB_INFO_HEADER *)MmPhysToVirt(mbi_phys);
+    if (header->total_size < sizeof(*header) + sizeof(MB_TAG) ||
+        header->total_size > ~(UINT64)0 - mbi_phys)
+        return FALSE;
+    UINT64 end = mbi_phys + header->total_size;
+    MB_TAG_FRAMEBUFFER *fb = NULL;
+    for (UINT64 at = mbi_phys + sizeof(*header); at + sizeof(MB_TAG) <= end;) {
+        MB_TAG *tag = (MB_TAG *)MmPhysToVirt(at);
+        if (tag->size < sizeof(*tag) || tag->size > end - at) return FALSE;
+        if (tag->type == MB_TAG_TYPE_END) break;
+        if (tag->type == MB_TAG_TYPE_FRAMEBUFFER &&
+            tag->size >= sizeof(MB_TAG_FRAMEBUFFER)) {
+            fb = (MB_TAG_FRAMEBUFFER *)tag;
+            break;
+        }
+        at += (tag->size + 7u) & ~7u;
+    }
+    if (!fb || fb->fb_type != MB_FRAMEBUFFER_TYPE_RGB || vbe_read(0) < 0xB0C4)
+        return FALSE;
+
+    /* Bochs/QEMU VBE DISPI. Limine's Multiboot2 mode request is only a hint;
+     * set the adapter mode directly and update its framebuffer tag as well. */
+    vbe_write(4, 0);
+    vbe_write(1, (UINT16)width);
+    vbe_write(2, (UINT16)height);
+    vbe_write(3, 32);
+    vbe_write(4, 0x41); /* enabled, linear framebuffer */
+    if (vbe_read(1) != width || vbe_read(2) != height || vbe_read(3) != 32)
+        return FALSE;
+
+    fb->width = width;
+    fb->height = height;
+    fb->pitch = width * 4;
+    fb->bpp = 32;
+    return TRUE;
+}
 
 BOOLEAN GfxAvailable(void)
 {

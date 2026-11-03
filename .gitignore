@@ -4,6 +4,7 @@
 *.elf
 *.iso
 *.bin
+!limine-bin/*.bin
 *.d
 
 # Editor / OS cruft

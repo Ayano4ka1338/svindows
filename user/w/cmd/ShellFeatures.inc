@@ -303,6 +303,12 @@ static void execute_batch(const char *path)
         }
         start = end + 1;
     }
+    /* A batch may run a DOS program that temporarily owns the framebuffer or
+     * changes console input modes. Restore the shell console before its next
+     * prompt, just as launch_external does for direct commands. */
+    if (g_native_input_console)
+        SetConsoleInputMode(g_in, g_original_input_mode & 0x0007u);
+    RefreshConsole(g_out);
 }
 
 static void command_if(char *arg)

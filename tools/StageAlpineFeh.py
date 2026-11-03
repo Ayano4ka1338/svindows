@@ -9,27 +9,9 @@ from pathlib import Path
 import shutil
 import tarfile
 import zlib
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from AlpineFetch import fetch_many
 
 LOCK = Path(__file__).with_name("alpine-feh.lock.json")
-BASE_URLS = (
-    "https://dl-cdn.alpinelinux.org/alpine",
-    "https://mirrors.huaweicloud.com/repository/alpine",
-)
-
-
-def fetch(relative: str) -> bytes:
-    preferred = os.environ.get("ALPINE_MIRROR", "").rstrip("/")
-    failures = []
-    for base in dict.fromkeys(([preferred] if preferred else []) + list(BASE_URLS)):
-        url = f"{base}/{relative}"
-        try:
-            with urlopen(url, timeout=45) as response:
-                return response.read()
-        except (HTTPError, URLError, TimeoutError, OSError) as error:
-            failures.append(f"{url}: {error}")
-    raise RuntimeError("Unable to fetch Alpine package data:\n  " + "\n  ".join(failures))
 
 
 def split_apk_members(data: bytes) -> list[bytes]:
@@ -70,9 +52,12 @@ def parse_index(raw: bytes, repository: str, arch: str) -> dict[str, dict]:
 
 def load_indexes(branch: str, arch: str) -> dict[str, dict]:
     packages = {}
-    for repository in ("main", "community"):
-        raw = fetch(f"{branch}/{repository}/{arch}/APKINDEX.tar.gz")
-        for name, record in parse_index(raw, repository, arch).items():
+    indexes = fetch_many(
+        {repository: f"{branch}/{repository}/{arch}/APKINDEX.tar.gz"
+         for repository in ("main", "community")},
+        immutable=False, label="feh index")
+    for repository, index_path in indexes.items():
+        for name, record in parse_index(index_path.read_bytes(), repository, arch).items():
             if name not in packages or repository == "main":
                 packages[name] = record
     return packages
@@ -122,10 +107,8 @@ def resolve_closure(index: dict[str, dict], roots: dict[str, str]) -> list[tuple
     return sorted(selected.items())
 
 
-def download_apk(branch: str, arch: str, name: str, record: dict) -> bytes:
+def package_payload(apk: bytes, name: str, record: dict) -> bytes:
     filename = f"{name}-{record['V']}.apk"
-    relative = f"{branch}/{record['repository']}/{arch}/{filename}"
-    apk = fetch(relative)
     members = split_apk_members(apk)
     checksum = record.get("C", "")
     if not checksum.startswith("Q1"):
@@ -184,6 +167,10 @@ def stage(destination: Path) -> None:
     branch, arch = lock["branch"], lock["architecture"]
     index = load_indexes(branch, arch)
     selected = resolve_closure(index, lock["packages"])
+    apk_paths = fetch_many(
+        {name: f"{branch}/{record['repository']}/{arch}/{name}-{record['V']}.apk"
+         for name, record in selected},
+        immutable=True, label="feh APK")
 
     if destination.exists():
         shutil.rmtree(destination)
@@ -192,7 +179,7 @@ def stage(destination: Path) -> None:
     (destination / "packages").mkdir(parents=True)
 
     for name, record in selected:
-        payload = download_apk(branch, arch, name, record)
+        payload = package_payload(apk_paths[name].read_bytes(), name, record)
         with tarfile.open(fileobj=BytesIO(payload), mode="r:gz") as archive:
             for member in archive:
                 path = member.name.removeprefix("./")

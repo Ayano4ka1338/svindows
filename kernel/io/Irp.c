@@ -1,6 +1,23 @@
-/* Minimal synchronous device/IRP boundary for the existing polled disk. */
+/* Synchronous IRP boundary for the in-memory initrd block device. */
 #include <svindows/Io.h>
 #include <svindows/Rtl.h>
+
+static UINT8 *g_memory_disk;
+static SIZE_T g_memory_disk_size;
+
+BOOLEAN IoDiskSetMemoryImage(void *image, SIZE_T size)
+{
+    if (!image || size < ATA_SECTOR_SIZE || (size % ATA_SECTOR_SIZE))
+        return FALSE;
+    g_memory_disk = (UINT8 *)image;
+    g_memory_disk_size = size;
+    return TRUE;
+}
+
+BOOLEAN IoDiskIsMemoryBacked(void)
+{
+    return g_memory_disk != NULL;
+}
 
 NTSTATUS IoCallDriver(IO_DEVICE_OBJECT *device, IO_IRP *irp)
 {
@@ -43,13 +60,23 @@ static NTSTATUS IopDiskDispatch(IO_DEVICE_OBJECT *device, IO_IRP *irp)
     BOOLEAN ok = FALSE;
     SIZE_T bytes = 0;
     if (stack->MajorFunction == IRP_MJ_FLUSH) {
-        ok = AtaFlushCache();
+        ok = g_memory_disk ? TRUE : AtaFlushCache();
     } else if (stack->SectorCount && stack->Buffer) {
         bytes = (SIZE_T)stack->SectorCount * ATA_SECTOR_SIZE;
-        if (stack->MajorFunction == IRP_MJ_READ)
+        SIZE_T offset = (SIZE_T)stack->Sector * ATA_SECTOR_SIZE;
+        if (g_memory_disk && offset <= g_memory_disk_size &&
+            bytes <= g_memory_disk_size - offset) {
+            if (stack->MajorFunction == IRP_MJ_READ) {
+                memcpy(stack->Buffer, g_memory_disk + offset, bytes);
+                ok = TRUE;
+            } else if (stack->MajorFunction == IRP_MJ_WRITE) {
+                memcpy(g_memory_disk + offset, stack->Buffer, bytes);
+                ok = TRUE;
+            }
+        } else if (!g_memory_disk && stack->MajorFunction == IRP_MJ_READ)
             ok = AtaReadSectors(stack->Sector, stack->SectorCount,
                                 stack->Buffer);
-        else if (stack->MajorFunction == IRP_MJ_WRITE)
+        else if (!g_memory_disk && stack->MajorFunction == IRP_MJ_WRITE)
             ok = AtaWriteSectors(stack->Sector, stack->SectorCount,
                                  stack->Buffer);
     }

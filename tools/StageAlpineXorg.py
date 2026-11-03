@@ -9,77 +9,40 @@ import shutil
 import subprocess
 import sys
 import tarfile
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from AlpineFetch import fetch_many, seed_cache
 
 
 LOCK = Path(__file__).with_name("alpine-xorg.lock.json")
-BASE_URLS = (
-    "https://dl-cdn.alpinelinux.org/alpine",
-    # The CDN drops superseded APK files. This mirror retains older packages,
-    # which is important because alpine-xorg.lock.json pins exact versions and
-    # hashes instead of silently following whatever is newest today.
-    "https://mirrors.huaweicloud.com/repository/alpine",
-)
-
-
-def _package_urls(lock: dict, package: dict, filename: str):
-    relative = (f"{lock['branch']}/{package['repository']}/"
-                f"{lock['architecture']}/{filename}")
-    preferred = os.environ.get("ALPINE_MIRROR", "").rstrip("/")
-    bases = ([preferred] if preferred else []) + list(BASE_URLS)
-    # Preserve order while avoiding a duplicate if ALPINE_MIRROR names one of
-    # the built-in mirrors.
-    return (f"{base}/{relative}" for base in dict.fromkeys(bases) if base)
-
-
-def _download_package(lock: dict, package: dict, filename: str) -> bytes:
-    expected = package["sha256"]
-    failures = []
-    for url in _package_urls(lock, package, filename):
-        try:
-            with urlopen(url, timeout=30) as response:
-                archive = response.read()
-        except HTTPError as error:
-            failures.append(f"{url}: HTTP {error.code} {error.reason}")
-            continue
-        except (URLError, TimeoutError, OSError) as error:
-            failures.append(f"{url}: {error}")
-            continue
-
-        actual = sha256(archive).hexdigest()
-        if actual != expected:
-            failures.append(
-                f"{url}: SHA-256 mismatch (expected {expected}, got {actual})")
-            continue
-        return archive
-
-    details = "\n  ".join(failures) if failures else "no mirrors configured"
-    raise RuntimeError(
-        f"Unable to download verified Alpine package {filename}. Tried:\n  "
-        f"{details}\n"
-        "Set ALPINE_MIRROR to another Alpine mirror or check the network.")
 
 
 def stage(destination: Path) -> None:
     lock = json.loads(LOCK.read_text())
-    cache = destination / "packages"
-    cache.mkdir(parents=True, exist_ok=True)
+    destination.mkdir(parents=True, exist_ok=True)
     root = destination / "root"
     if root.exists():
         shutil.rmtree(root)
     root.mkdir()
 
+    apk_relatives = {
+        name: f"{lock['branch']}/{package['repository']}/"
+              f"{lock['architecture']}/{name}-{package['version']}.apk"
+        for name, package in lock["packages"].items()}
+    # Older builds kept verified Xorg APKs under build/alpine-xorg/packages.
+    # Promote those files so upgrading to the shared cache does not re-download them.
+    old_cache = destination / "packages"
+    for name, package in lock["packages"].items():
+        legacy_apk = old_cache / f"{name}-{package['version']}.apk"
+        if legacy_apk.is_file():
+            if sha256(legacy_apk.read_bytes()).hexdigest() == package["sha256"]:
+                seed_cache(apk_relatives[name], legacy_apk)
+
+    apk_paths = fetch_many(apk_relatives, immutable=True, label="Xorg APK")
+
     for name, package in sorted(lock["packages"].items()):
         filename = f"{name}-{package['version']}.apk"
-        archive_path = cache / filename
-        if archive_path.exists():
-            archive = archive_path.read_bytes()
-            if sha256(archive).hexdigest() != package["sha256"]:
-                raise ValueError(f"Alpine package checksum mismatch in cache: {filename}")
-        else:
-            archive = _download_package(lock, package, filename)
-            archive_path.write_bytes(archive)
+        archive = apk_paths[name].read_bytes()
+        if sha256(archive).hexdigest() != package["sha256"]:
+            raise ValueError(f"Alpine package checksum mismatch: {filename}")
 
         with tarfile.open(fileobj=BytesIO(archive), mode="r:gz") as tar:
             for member in tar:

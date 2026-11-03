@@ -24,6 +24,295 @@ typedef struct __attribute__((packed)) _DOS_MOUSE_STATE {
 } DOS_MOUSE_STATE;
 
 static U16 dos_mouse_clip(U16 value, U16 minimum, U16 maximum);
+static void dos_int_dispatch(U8 n);
+
+static void dos_xms_free_stats(DOS_VM *vm, U32 *total_out, U32 *largest_out) {
+  U32 total = 0, largest = 0, cursor = DOS_XMS_BASE;
+  const U32 limit = DOS_XMS_BASE + DOS_XMS_CAPACITY;
+  while (cursor < limit) {
+    U32 next = limit, occupied_end = cursor;
+    for (U32 i = 0; i < DOS_XMS_MAX_HANDLES; i++) {
+      DOS_XMS_BLOCK *b = &vm->XmsBlocks[i];
+      if (!b->Used || b->Base + b->Size <= cursor) continue;
+      if (b->Base <= cursor) {
+        if (b->Base + b->Size > occupied_end) occupied_end = b->Base + b->Size;
+      } else if (b->Base < next) next = b->Base;
+    }
+    for (U32 i = 0; i < DOS_DPMI_MAX_BLOCKS; i++) {
+      DOS_DPMI_BLOCK *b = &vm->DpmiBlocks[i];
+      if (!b->Used || b->Base + b->Size <= cursor) continue;
+      if (b->Base <= cursor) {
+        if (b->Base + b->Size > occupied_end) occupied_end = b->Base + b->Size;
+      } else if (b->Base < next) next = b->Base;
+    }
+    if (occupied_end > cursor) {
+      cursor = occupied_end > limit ? limit : occupied_end;
+      continue;
+    }
+    U32 gap = next - cursor;
+    total += gap;
+    if (gap > largest) largest = gap;
+    if (next == limit) break;
+    cursor = next;
+  }
+  *total_out = total;
+  *largest_out = largest;
+}
+
+static U32 dos_xms_free_bytes(DOS_VM *vm) {
+  U32 total, largest;
+  dos_xms_free_stats(vm, &total, &largest);
+  return total;
+}
+
+static U32 dos_xms_largest_free(DOS_VM *vm) {
+  U32 total, largest;
+  dos_xms_free_stats(vm, &total, &largest);
+  return largest;
+}
+
+static U8 dos_xms_allocate(DOS_VM *vm, U32 bytes, U16 *handle) {
+  U32 slot, base = DOS_XMS_BASE;
+  const U32 limit = DOS_XMS_BASE + DOS_XMS_CAPACITY;
+  for (slot = 0; slot < DOS_XMS_MAX_HANDLES && vm->XmsBlocks[slot].Used; slot++);
+  if (!bytes) return 0xa0;
+  if (slot == DOS_XMS_MAX_HANDLES) return 0xa1;
+  if (bytes > dos_xms_free_bytes(vm)) return 0xa0;
+  for (;;) {
+    U32 next = limit, end = base;
+    for (U32 i = 0; i < DOS_XMS_MAX_HANDLES; i++) {
+      DOS_XMS_BLOCK *b = &vm->XmsBlocks[i];
+      if (b->Used && b->Base >= base && b->Base < next) {
+        next = b->Base;
+        end = b->Base + b->Size;
+      }
+    }
+    for (U32 i = 0; i < DOS_DPMI_MAX_BLOCKS; i++) {
+      DOS_DPMI_BLOCK *b = &vm->DpmiBlocks[i];
+      if (b->Used && base < b->Base + b->Size && b->Base < base + bytes) {
+        end = b->Base + b->Size;
+        next = base;
+        break;
+      }
+    }
+    if (bytes <= next - base) break;
+    if (next == limit || end <= base) return 0xa0;
+    base = end;
+  }
+  vm->XmsBlocks[slot] = (DOS_XMS_BLOCK){base, bytes, TRUE, FALSE};
+  vm->XmsUsed += bytes;
+  *handle = (U16)(slot + 1u);
+  return 0;
+}
+
+static BOOLEAN dos_xms_range_free(DOS_VM *vm, U32 base, U32 size,
+                                  U32 ignored_slot) {
+  const U32 limit = DOS_XMS_BASE + DOS_XMS_CAPACITY;
+  if (base < DOS_XMS_BASE || base > limit || size > limit - base) return FALSE;
+  for (U32 i = 0; i < DOS_XMS_MAX_HANDLES; i++) {
+    DOS_XMS_BLOCK *b = &vm->XmsBlocks[i];
+    if (i != ignored_slot && b->Used && base < b->Base + b->Size &&
+        b->Base < base + size) return FALSE;
+  }
+  for (U32 i = 0; i < DOS_DPMI_MAX_BLOCKS; i++) {
+    DOS_DPMI_BLOCK *b = &vm->DpmiBlocks[i];
+    if (b->Used && base < b->Base + b->Size && b->Base < base + size)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static U8 dos_xms_resize(DOS_VM *vm, U16 handle, U32 size) {
+  if (!handle || handle > DOS_XMS_MAX_HANDLES ||
+      !vm->XmsBlocks[handle - 1u].Used) return 0xa2;
+  U32 slot = handle - 1u;
+  DOS_XMS_BLOCK *block = &vm->XmsBlocks[slot];
+  if (block->Locked) return 0xabu;
+  if (!size) return 0xa0;
+  U32 old_size = block->Size, old_base = block->Base;
+  U32 base = old_base;
+  if (!dos_xms_range_free(vm, base, size, slot)) {
+    base = DOS_XMS_BASE;
+    for (;;) {
+      U32 next = DOS_XMS_BASE + DOS_XMS_CAPACITY;
+      U32 after = base;
+      for (U32 i = 0; i < DOS_XMS_MAX_HANDLES; i++) {
+        DOS_XMS_BLOCK *b = &vm->XmsBlocks[i];
+        if (i != slot && b->Used && b->Base >= base && b->Base < next) {
+          next = b->Base;
+          after = b->Base + b->Size;
+        }
+      }
+      for (U32 i = 0; i < DOS_DPMI_MAX_BLOCKS; i++) {
+        DOS_DPMI_BLOCK *b = &vm->DpmiBlocks[i];
+        if (b->Used && base < b->Base + b->Size && b->Base < base + size) {
+          next = base;
+          after = b->Base + b->Size;
+          break;
+        }
+      }
+      if (size <= next - base) break;
+      if (next == DOS_XMS_BASE + DOS_XMS_CAPACITY || after <= base)
+        return 0xa0;
+      base = after;
+    }
+    if (!dos_xms_range_free(vm, base, size, slot)) return 0xa0;
+  }
+  if (base != old_base) memmove(vm->Memory + base, vm->Memory + old_base, old_size);
+  block->Base = base;
+  block->Size = size;
+  vm->XmsUsed = vm->XmsUsed - old_size + size;
+  return 0;
+}
+
+static void dos_xms_result(U8 error) {
+  r[AX] = error ? 0 : 1;
+  set8(3, error); /* BL is the XMS error code. */
+}
+
+static void dos_xms_call(DOS_VM *vm) {
+  U8 function = (U8)(r[AX] >> 8);
+  switch (function) {
+  case 0x00: /* Get XMS version. */
+    r[AX] = 0x0300;
+    r[BX] = 0x0301;
+    r[DX] = 1; /* HMA supported. */
+    return;
+  case 0x01: /* Request HMA. */
+    if (r[BX] > 0x1000u || vm->XmsHmaOwned) {
+      dos_xms_result(0x91); return;
+    }
+    vm->XmsHmaOwned = TRUE;
+    dos_xms_result(0); return;
+  case 0x02: /* Release HMA. */
+    if (!vm->XmsHmaOwned) { dos_xms_result(0x93); return; }
+    vm->XmsHmaOwned = FALSE;
+    dos_xms_result(0); return;
+  case 0x03: case 0x05: /* Global/local A20 enable. */
+    if (function == 0x03 && vm->XmsA20Global != 0xffffu)
+      vm->XmsA20Global++;
+    if (function == 0x05 && vm->XmsA20Local != 0xffffu)
+      vm->XmsA20Local++;
+    dos_xms_result(0); return;
+  case 0x04: case 0x06: /* Global/local A20 disable. */
+    if (function == 0x04 && vm->XmsA20Global) vm->XmsA20Global--;
+    if (function == 0x06 && vm->XmsA20Local) vm->XmsA20Local--;
+    dos_xms_result(0); return;
+  case 0x07: /* Query A20 state. */
+    r[AX] = (vm->XmsA20Global || vm->XmsA20Local) ? 1 : 0;
+    set8(3, 0);
+    return;
+  case 0x08: { /* Query free extended memory in KiB. */
+    U32 largest = dos_xms_largest_free(vm) / 1024u;
+    U32 total = dos_xms_free_bytes(vm) / 1024u;
+    r[AX] = (U16)(largest > 0xffffu ? 0xffffu : largest);
+    r[DX] = (U16)(total > 0xffffu ? 0xffffu : total);
+    set8(3, 0);
+    return;
+  }
+  case 0x09: case 0x89: { /* Allocate EMB in KiB or byte units. */
+    U32 bytes = function == 0x09 ? (U32)r[DX] * 1024u : r32[DX];
+    U16 handle = 0;
+    U8 error = dos_xms_allocate(vm, bytes, &handle);
+    if (error) { dos_xms_result(error); return; }
+    r[DX] = handle;
+    r32[DX] = handle;
+    dos_xms_result(0); return;
+  }
+  case 0x0a: { /* Free extended-memory block. */
+    U16 handle = r[DX];
+    if (!handle || handle > DOS_XMS_MAX_HANDLES || !vm->XmsBlocks[handle - 1u].Used) {
+      dos_xms_result(0xa2); return;
+    }
+    DOS_XMS_BLOCK *b = &vm->XmsBlocks[handle - 1u];
+    if (b->Locked) { dos_xms_result(0xab); return; }
+    vm->XmsUsed -= b->Size;
+    memset(b, 0, sizeof(*b));
+    dos_xms_result(0); return;
+  }
+  case 0x0b: { /* Move between conventional and extended memory. */
+    U16 ds = seg[DS], si = r[SI];
+    U32 length = (U32)rw(ds, si) | ((U32)rw(ds, (U16)(si + 2u)) << 16);
+    U16 sh = rw(ds, (U16)(si + 4u));
+    U32 so = (U32)rw(ds, (U16)(si + 6u)) | ((U32)rw(ds, (U16)(si + 8u)) << 16);
+    U16 dh = rw(ds, (U16)(si + 10u));
+    U32 dest = (U32)rw(ds, (U16)(si + 12u)) | ((U32)rw(ds, (U16)(si + 14u)) << 16);
+    U32 sb = 0, db = 0;
+    if (sh) {
+      if (sh > DOS_XMS_MAX_HANDLES || !vm->XmsBlocks[sh - 1u].Used ||
+          so > vm->XmsBlocks[sh - 1u].Size || length > vm->XmsBlocks[sh - 1u].Size - so) {
+        dos_xms_result(0xa7); return;
+      }
+      sb = vm->XmsBlocks[sh - 1u].Base + so;
+    } else sb = (so >> 16) * 16u + (so & 0xffffu);
+    if (dh) {
+      if (dh > DOS_XMS_MAX_HANDLES || !vm->XmsBlocks[dh - 1u].Used ||
+          dest > vm->XmsBlocks[dh - 1u].Size || length > vm->XmsBlocks[dh - 1u].Size - dest) {
+        dos_xms_result(0xa7); return;
+      }
+      db = vm->XmsBlocks[dh - 1u].Base + dest;
+    } else db = (dest >> 16) * 16u + (dest & 0xffffu);
+    if ((!sh && (sb > DOS_REAL_MEMORY_SIZE || length > DOS_REAL_MEMORY_SIZE - sb)) ||
+        (!dh && (db > DOS_REAL_MEMORY_SIZE || length > DOS_REAL_MEMORY_SIZE - db))) {
+      dos_xms_result(0xa7); return;
+    }
+    U8 *src = vm->Memory + sb;
+    U8 *dst = vm->Memory + db;
+    memmove(dst, src, length);
+    dos_xms_result(0); return;
+  }
+  case 0x0c: case 0x0d: { /* Lock/unlock a block. */
+    U16 handle = r[DX];
+    if (!handle || handle > DOS_XMS_MAX_HANDLES || !vm->XmsBlocks[handle - 1u].Used) {
+      dos_xms_result(0xa2); return;
+    }
+    DOS_XMS_BLOCK *b = &vm->XmsBlocks[handle - 1u];
+    b->Locked = function == 0x0cu;
+    if (function == 0x0cu) { r[BX] = (U16)b->Base; r[DX] = (U16)(b->Base >> 16); }
+    dos_xms_result(0); return;
+  }
+  case 0x0e: case 0x8e: { /* Get EMB handle information. */
+    U16 handle = r[DX];
+    if (!handle || handle > DOS_XMS_MAX_HANDLES ||
+        !vm->XmsBlocks[handle - 1u].Used) {
+      dos_xms_result(0xa2); return;
+    }
+    U8 free_handles = 0;
+    for (U32 i = 0; i < DOS_XMS_MAX_HANDLES; i++)
+      if (!vm->XmsBlocks[i].Used) free_handles++;
+    set8(7, vm->XmsBlocks[handle - 1u].Locked ? 1u : 0u); /* BH */
+    U32 bytes = vm->XmsBlocks[handle - 1u].Size;
+    if (function == 0x0e) {
+      set8(3, free_handles); /* BL */
+      r[DX] = (U16)(bytes / 1024u);
+      r32[DX] = (r32[DX] & 0xffff0000u) | r[DX];
+    } else {
+      r[CX] = free_handles;
+      r32[DX] = bytes;
+      r[DX] = (U16)bytes;
+    }
+    r[AX] = 1;
+    return;
+  }
+  case 0x0f: case 0x8f: { /* Resize EMB in KiB or byte units. */
+    U32 bytes = function == 0x0f ? (U32)r[BX] * 1024u : r32[BX];
+    U8 error = dos_xms_resize(vm, r[DX], bytes);
+    dos_xms_result(error);
+    return;
+  }
+  case 0x88: { /* Query any free extended memory, XMS 3.0 byte units. */
+    r32[AX] = dos_xms_largest_free(vm);
+    r32[DX] = dos_xms_free_bytes(vm);
+    r32[CX] = MEM_SIZE - 1u;
+    r[AX] = (U16)r32[AX]; r[BX] = (U16)r32[BX];
+    r[CX] = (U16)r32[CX]; r[DX] = (U16)r32[DX];
+    set8(3, 0);
+    return;
+  }
+  default:
+    dos_xms_result(0x80); return;
+  }
+}
 
 static void dos_mouse_state_transfer(DOS_VM *vm, U16 segment, U16 offset,
                                      BOOLEAN restore) {
@@ -829,8 +1118,9 @@ static U16 dos_exec(void) {
         path[n + j] = extensions[i][j];
       status = FatLoadFile(path, &image, &size, NULL);
     }
-    if (!NT_SUCCESS(status))
+    if (!NT_SUCCESS(status)) {
       return 2;
+    }
   }
   if (!DosIsImage(path, image, size)) {
     ExFreePool(image);
@@ -875,6 +1165,11 @@ static U16 dos_exec(void) {
     return status == STATUS_NO_MEMORY ? 8 : 11;
   DOS_VM *child = (DOS_VM *)context;
   child->ExecDepth = parent->ExecDepth + 1;
+  /* Preserve the explicit SETVER override selected for WIN100.BIN (3.34).
+   * Other EXEC children inherit their parent's compatibility version, which
+   * lets Windows 3.1 startup helpers keep the DOS 3.30 setting. */
+  if (child->DosVersion != 0x2203u)
+    child->DosVersion = parent->DosVersion;
   /* EXEC shares the display hardware and BIOS data with its caller. */
   DosVideoInherit(child, parent);
   memcpy(child->Memory + 0x400u, parent->Memory + 0x400u, 0x100u);
@@ -916,7 +1211,42 @@ static void dos_sync_system_data(void) {
   DosSyncSystemData(current(), cwd);
 }
 
-void dos_int(U8 n) {
+static BOOLEAN dos_terminate_nested_psp(U8 code) {
+  DOS_VM *vm = current();
+  U16 psp = vm->CurrentPsp;
+  if (psp == PSP) return FALSE;
+  U16 parent = rw(psp, 0x16u);
+  if (!parent) return FALSE;
+
+  U16 terminate_offset = rw(psp, 0x0au);
+  U16 terminate_segment = rw(psp, 0x0cu);
+  for (U16 vector = 0x23u; vector <= 0x24u; vector++) {
+    U16 field = (U16)(0x0eu + (vector - 0x23u) * 4u);
+    ww(0, (U16)(vector * 4u), rw(psp, field));
+    ww(0, (U16)(vector * 4u + 2u), rw(psp, (U16)(field + 2u)));
+  }
+  for (U32 i = 0; i < DOS_MAX_BLOCKS; i++) {
+    DOS_BLOCK *block = &vm->Blocks[i];
+    if (block->Used && block->OwnerPsp == psp)
+      block->Used = FALSE;
+  }
+  DosUpdateMemoryControlBlocks(vm);
+
+  vm->LastChildExitCode = code;
+  vm->LastChildTerminationType = 0;
+  vm->ChildStatusAvailable = TRUE;
+  vm->CurrentPsp = parent;
+  vm->DtaSegment = parent;
+  vm->DtaOffset = 0x80u;
+  seg[SS] = rw(parent, 0x30u);
+  r[SP] = rw(parent, 0x2eu);
+  seg[CS] = terminate_segment;
+  ip = terminate_offset;
+  dos_sync_system_data();
+  return TRUE;
+}
+
+static void dos_int_dispatch(U8 n) {
   U8 ah = (U8)(r[AX] >> 8);
   U32 done = 0;
   U16 off = r[DX];
@@ -937,8 +1267,68 @@ void dos_int(U8 n) {
    * Default BIOS chaining targets simply acknowledge/return. */
   if (n == 0x09) { dos_bios_keyboard(); return; }
   if (n == 0x08 || n == 0x1c) return;
+  /* The BIOS overflow vector is an IRET stub when no handler is installed.
+   * INTO is common in DOS startup code, so a null IVT entry must not be
+   * treated as an unsupported host interrupt. */
+  if (n == 0x04) return;
   if (n == 0x28) return; /* DOS idle notification; guest hooks run above. */
+  if (n == 0x15) {
+    /* Report the DOS VM's 16 MiB XMS arena through the BIOS memory probes
+     * used by DOSX and HIMEM-compatible managers.  The arena spans 1 MiB to
+     * 17 MiB: 15 MiB below 16 MiB and sixteen 64 KiB blocks above it. */
+    if (r[AX] == 0xe801u) {
+      r[AX] = r[CX] = 15u * 1024u;
+      r[BX] = r[DX] = 16u;
+      flags &= ~CF;
+      return;
+    }
+    if (ah == 0x88u) {
+      r[AX] = 15u * 1024u;
+      flags &= ~CF;
+      return;
+    }
+  }
   if (n == 0x2f) {
+    switch (r[AX]) {
+    case 0x1600: /* Windows-version query: no Windows host is resident yet. */
+      set8(0, 0x00);
+      seg[ES] = 0;
+      r[BX] = 0;
+      return;
+    case 0x1605: /* Windows task-start broadcast. */
+    case 0x1606: /* Windows task-end broadcast. */
+      return;
+    case 0x160a: /* Windows/DOSX initialization broadcast. */
+      return;
+    case 0x1680: /* DOS idle/yield request. */
+      r[AX] = 0;
+      return;
+    case 0x1686: /* DPMI protected-mode query. */
+      r[AX] = current()->ProtectedMode ? 0 : 1;
+      return;
+    case 0x1687: /* DPMI host installation query is handled below. */
+      break;
+    case 0x4300: /* XMS installation query is handled below. */
+    case 0x4310: /* XMS entry-point query is handled below. */
+      break;
+    default:
+      break;
+    }
+    if (seg[CS] == 0xf000u && ip == 0x0602u) {
+      dos_xms_call(current());
+      return;
+    }
+    if (r[AX] == 0x4300u) { /* XMS installation check. */
+      set8(0, 0x80u);
+      flags &= ~CF;
+      return;
+    }
+    if (r[AX] == 0x4310u) { /* Return XMS entry point in ES:BX. */
+      seg[ES] = 0xf000u;
+      r[BX] = 0x0600u;
+      flags &= ~CF;
+      return;
+    }
     if (r[AX] == 0x1687) {
       KeLog("[dos] INT 2Fh AX=1687 DPMI host discovery\n");
       flags &= ~CF; /* successful multiplex discovery must not leak old CF */
@@ -952,7 +1342,7 @@ void dos_int(U8 n) {
       KeLog("[dos] DPMI host response AX=%04x BX=%04x CX=%04x DX=%04x SI=%04x ES:DI=%04x:%04x\n",
             r[AX], r[BX], r[CX], r[DX], r[SI], seg[ES], r[DI]);
     } else {
-      r[AX] = 0x1680; /* unsupported multiplex function */
+      r[AX] = 0;
     }
     return;
   }
@@ -1003,6 +1393,11 @@ void dos_int(U8 n) {
   if (n == 0x10 && ah == 0x0f) {
     r[AX] = (U16)(0x5000u | current()->VideoMode);
     r[BX] &= 0x00ffu; /* active display page is zero */
+    return;
+  }
+  if (n == 0x10 && r[AX] == 0x6f00u) {
+    /* Video7/VEGA extension probe. No V7 signature means generic VGA. */
+    flags &= ~CF;
     return;
   }
   if (n == 0x10 && ah == 0x10) {
@@ -1172,6 +1567,19 @@ void dos_int(U8 n) {
     flags |= CF;
     return;
   }
+  if (n == 0xe4) {
+    /* Optional third-party monitor hook (e.g. Logitech Modula). Uninstalled
+     * high vectors in a PC BIOS return with registers preserved. */
+    return;
+  }
+  if (n >= 0x40u &&
+      ((rw(0, (U16)(n * 4u)) == DOS_BUILTIN_OFFSET(n) &&
+        rw(0, (U16)(n * 4u + 2u)) == DOS_BUILTIN_SEGMENT) ||
+       (!rw(0, (U16)(n * 4u)) && !rw(0, (U16)(n * 4u + 2u))))) {
+    /* BIOS/DOS leave unclaimed software vectors at/above 40h as IRET stubs
+     * (or null). DOSX and Windows probe optional vectors; preserve registers. */
+    return;
+  }
   if (n != 0x21) {
     KeLog("[dos] unsupported INT %02x AX=%04x BX=%04x CX=%04x DX=%04x at %04x:%04x\n",
           n, r[AX], r[BX], r[CX], r[DX], seg[CS], ip);
@@ -1189,6 +1597,22 @@ void dos_int(U8 n) {
     running = 0;
     exit_code = 0;
     break;
+  case 0x0c: {
+    U8 input_function = get8(0);
+    /* DOS flushes input before dispatching a supported buffered/character
+     * input service; unsupported AL values still leave the input queue
+     * flushed, as on DOS 3.x. */
+    IoFlushInputHandleKernel(standard_handle(0));
+    switch (input_function) {
+    case 0x01: case 0x06: case 0x07: case 0x08: case 0x0a:
+      set8(4, input_function);
+      dos_int_dispatch(0x21);
+      return;
+    default:
+      break;
+    }
+    break;
+  }
   case 0x01:
   case 0x07:
   case 0x08: {
@@ -1707,6 +2131,7 @@ void dos_int(U8 n) {
     for (unsigned i = 0; i < DOS_MAX_BLOCKS; i++)
       if (current()->Blocks[i].Used && current()->Blocks[i].Segment == target) {
         current()->Blocks[i].Used = FALSE;
+        DosUpdateMemoryControlBlocks(current());
         found = TRUE;
         break;
       }
@@ -1738,9 +2163,10 @@ void dos_int(U8 n) {
         U16 available =
             current()->Blocks[i].Paragraphs +
             free_paragraphs_from(target + current()->Blocks[i].Paragraphs);
-        if (wanted && wanted <= available)
+        if (wanted && wanted <= available) {
           current()->Blocks[i].Paragraphs = wanted;
-        else {
+          DosUpdateMemoryControlBlocks(current());
+        } else {
           r[BX] = available;
           r[AX] = 8;
           flags |= CF;
@@ -1753,10 +2179,11 @@ void dos_int(U8 n) {
     }
     break;
   }
-  case 0x4c:
+  case 0x4c: {
     exit_code = get8(0);
-    running = 0;
+    if (!dos_terminate_nested_psp((U8)exit_code)) running = 0;
     break;
+  }
   case 0x4b:
     if (get8(0) != 0) {
       r[AX] = 1;
@@ -1812,13 +2239,16 @@ void dos_int(U8 n) {
   case 0x62:
     r[BX] = current()->CurrentPsp;
     break;
-  case 0x55: { /* Create child PSP in the caller's allocated memory. */
+  case 0x26:
+  case 0x55: { /* Create PSP; AH=55h also switches the current PSP. */
     U16 parent = current()->CurrentPsp, child = r[DX];
     U8 psp[256];
     for (unsigned i = 0; i < sizeof(psp); i++) psp[i] = rb(parent, (U16)i);
     for (unsigned i = 0; i < sizeof(psp); i++) wb(child, (U16)i, psp[i]);
     ww(child, 2, r[SI]);
     ww(child, 0x16u, parent);
+    ww(child, 0x2eu, 0);
+    ww(child, 0x30u, 0);
     ww(child, 0x32u, 20);
     ww(child, 0x34u, 0x18u);
     ww(child, 0x36u, child);
@@ -1827,8 +2257,46 @@ void dos_int(U8 n) {
       ww(child, field, rw(0, (U16)(vector * 4u)));
       ww(child, (U16)(field + 2u), rw(0, (U16)(vector * 4u + 2u)));
     }
-    current()->CurrentPsp = child;
-    dos_sync_system_data();
+    if (ah == 0x55u) {
+      ww(parent, 0x2eu, r[SP]);
+      ww(parent, 0x30u, seg[SS]);
+      for (U32 i = 0; i < DOS_MAX_BLOCKS; i++)
+        if (current()->Blocks[i].Used &&
+            current()->Blocks[i].Segment == child)
+          current()->Blocks[i].OwnerPsp = child;
+      current()->CurrentPsp = child;
+      dos_sync_system_data();
+    }
+    break;
+  }
+  case 0x58: {
+    switch (get8(0)) {
+    case 0x00: /* Get allocation strategy. */
+      r[BX] = current()->DosAllocationStrategy;
+      break;
+    case 0x01: /* Set allocation strategy: first, best or last fit. */
+      if (r[BX] <= 2u)
+        current()->DosAllocationStrategy = r[BX];
+      else {
+        r[AX] = 1;
+        flags |= CF;
+      }
+      break;
+    case 0x02: /* Get UMB link state; there is no UMB arena. */
+      r[BX] = 0;
+      set8(0, 0);
+      break;
+    case 0x03: /* UMB linking is unavailable without an upper-memory arena. */
+      if (r[BX] != 0) {
+        r[AX] = 1;
+        flags |= CF;
+      }
+      break;
+    default:
+      r[AX] = 1;
+      flags |= CF;
+      break;
+    }
     break;
   }
   default:
@@ -1837,5 +2305,20 @@ void dos_int(U8 n) {
     fail("DOSVM: unsupported INT 21h function\r\n");
     break;
   }
+}
+
+void dos_int(U8 n) {
+  DOS_VM *vm = current();
+  if (n != 0x21 || !vm || !vm->Memory) {
+    dos_int_dispatch(n);
+    return;
+  }
+
+  U32 in_dos = ((U32)DOS_SYSTEM_DATA_SEGMENT << 4) + DOS_SDA_OFFSET + 1u;
+  if (vm->InDosCount != 0xffu) vm->InDosCount++;
+  vm->Memory[in_dos] = vm->InDosCount;
+  dos_int_dispatch(n);
+  if (vm->InDosCount) vm->InDosCount--;
+  vm->Memory[in_dos] = vm->InDosCount;
 }
 

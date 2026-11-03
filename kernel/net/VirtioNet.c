@@ -509,6 +509,8 @@ BOOLEAN VirtioNetInitialize(void)
     }
     g_ready = TRUE;
     g_virtio_diagnostic = "legacy VirtIO-net initialized; RX/TX queues active";
+    KeLog("[net] VirtIO-net ready: MAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
+          g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
     virtio_write16(0x10, VIRTIO_RX_QUEUE);
     return TRUE;
 }

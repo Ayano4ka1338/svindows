@@ -239,6 +239,8 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxSetTidAddress(thread, args[0]);
     case 228: /* clock_gettime */
         return LinuxClockGettime(args[0], args[1]);
+    case 229: /* clock_getres */
+        return LinuxClockGetres(args[0], args[1]);
     case 257: /* openat */
         return LinuxOpenAt(process, args[0], args[1], args[2]);
     case 262: /* newfstatat */

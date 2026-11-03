@@ -64,6 +64,24 @@ def dos_memory_test() -> bytes:
     return bytes(code) + ok + b"\0" + bad + b"$"
 
 
+def dos_input_flush_test() -> bytes:
+    # Windows 2.03 calls INT 21h/AX=0C00h during startup. Verify that DOS
+    # flushes pending input and returns normally when AL requests flush-only.
+    code = bytearray(b"\xb8\x00\x0c\xcd\x21")
+    success = len(code)
+    code += b"\xba\x00\x00\xb4\x09\xcd\x21"
+    code += b"\xb8\x00\x4c\xcd\x21"
+    failure = len(code)
+    code += b"\xba\x00\x00\xb4\x09\xcd\x21"
+    code += b"\xb8\x01\x4c\xcd\x21"
+    message_offset = 0x100 + len(code)
+    ok = b"DOS-INP PASS: INT 21h AH=0Ch AL=00h\r\n$"
+    bad = b"DOS-INP FAIL: INT 21h AH=0Ch\r\n$"
+    code[success + 1:success + 3] = message_offset.to_bytes(2, "little")
+    code[failure + 1:failure + 3] = (message_offset + len(ok)).to_bytes(2, "little")
+    return bytes(code) + ok + bad
+
+
 def dpmi_info_test() -> bytes:
     # INT 2Fh AX=1687h is the standard DPMI host discovery call. Validate
     # the 32-bit capability, 386 minimum, DPMI 1.0 version, private data size,
@@ -339,12 +357,13 @@ def build(output: Path) -> None:
         "MEMSMOKE.COM": dos_memory_test(),
         "DPMIINFO.COM": dpmi_info_test(),
         "FCBPARSE.COM": fcb_parse_test(),
+        "INPFLUSH.COM": dos_input_flush_test(),
         "FFGROUP.COM": ff_group_test(),
         "MZSMOKE.EXE": mz_smoke(),
     }
     for name, data in files.items():
         (output / name).write_bytes(data)
-    (output / ".ready").write_text("DOS compatibility probes v3 - FCB and FF group\n", encoding="ascii")
+    (output / ".ready").write_text("DOS compatibility probes v4 - INT 21h/AH=0Ch\n", encoding="ascii")
 
     # DOS command prompt batch script is intended to be invoked from C:\\.
     (output / "DOSCHECK.BAT").write_text(
@@ -354,6 +373,7 @@ def build(output: Path) -> None:
         "C:\\TESTS\\MEMSMOKE.COM\r\n"
         "C:\\TESTS\\DPMIINFO.COM\r\n"
         "C:\\TESTS\\FCBPARSE.COM\r\n"
+        "C:\\TESTS\\INPFLUSH.COM\r\n"
         "C:\\TESTS\\FFGROUP.COM\r\n"
         "C:\\TESTS\\MZSMOKE.EXE\r\n",
         encoding="ascii",
@@ -361,7 +381,7 @@ def build(output: Path) -> None:
 
 
 def verify(output: Path) -> None:
-    expected = {"COMSMOKE.COM", "MEMSMOKE.COM", "DPMIINFO.COM", "FCBPARSE.COM", "FFGROUP.COM", "MZSMOKE.EXE"}
+    expected = {"COMSMOKE.COM", "MEMSMOKE.COM", "DPMIINFO.COM", "FCBPARSE.COM", "INPFLUSH.COM", "FFGROUP.COM", "MZSMOKE.EXE"}
     missing = expected - {p.name for p in output.iterdir()}
     if missing:
         raise RuntimeError("missing test binaries: " + ", ".join(sorted(missing)))
@@ -371,6 +391,8 @@ def verify(output: Path) -> None:
             raise RuntimeError(f"invalid COM test size: {name}")
         if name == "FCBPARSE.COM" and b" C:WIN.COM tail\x00" not in data:
             raise RuntimeError("FCB parse probe is missing its filespec")
+        if name == "INPFLUSH.COM" and b"\xb8\x00\x0c\xcd\x21" not in data:
+            raise RuntimeError("input-flush probe is missing INT 21h/0C00h")
         if name == "FFGROUP.COM":
             for signature in (b"\x66\xff\x36", b"\x66\x8f\x06",
                               b"\x66\xff\x16", b"\x66\xff\x1e",

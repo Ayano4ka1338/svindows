@@ -29,12 +29,12 @@ static U32 fetch32(void) {
   U32 v = fetch16();
   return v | ((U32)fetch16() << 16);
 }
-static U32 read32(U16 s, U16 o) {
-  return (U32)rw(s, o) | ((U32)rw(s, (U16)(o + 2)) << 16);
+static U32 read32(U16 s, U32 o) {
+  return (U32)rw(s, o) | ((U32)rw(s, o + 2u) << 16);
 }
-static void write32(U16 s, U16 o, U32 v) {
+static void write32(U16 s, U32 o, U32 v) {
   ww(s, o, (U16)v);
-  ww(s, (U16)(o + 2), (U16)(v >> 16));
+  ww(s, o + 2u, (U16)(v >> 16));
 }
 static int read_descriptor(U16 selector, DOS_DESCRIPTOR *out) {
   U32 index = selector & 0xfff8u;
@@ -233,6 +233,8 @@ static void dpmi_interrupt(void) {
   } else if (function == 0x0500) {
     U32 structure = vm->DpmiClient32 ? r32[DI] : (U16)r32[DI];
     U32 available = MEM_SIZE - 0x00100000u;
+    if (vm->XmsUsed >= available) available = 0;
+    else available -= vm->XmsUsed;
     for (U32 i = 0; i < DOS_DPMI_MAX_BLOCKS; i++) if (vm->DpmiBlocks[i].Used) {
       if (vm->DpmiBlocks[i].Size >= available) available = 0;
       else available -= vm->DpmiBlocks[i].Size;
@@ -279,6 +281,15 @@ static void dpmi_interrupt(void) {
           break;
         }
       }
+      for (i = 0; !collision && i < DOS_XMS_MAX_HANDLES; i++)
+        if (vm->XmsBlocks[i].Used) {
+          U32 b = vm->XmsBlocks[i].Base, z = vm->XmsBlocks[i].Size;
+          if (base < b + z && b < base + size) {
+            next = b + z;
+            collision = TRUE;
+            break;
+          }
+        }
       if (!collision) break;
       if (next <= base) break;
       base = next;
@@ -420,7 +431,10 @@ static void dpmi_initial_switch(void) {
   int client32 = !!(r[AX] & 1u);
   KeLog("[dos] DPMI switch request AX=%04x BX=%04x CX=%04x SS:SP=%04x:%04x\n",
         r[AX], r[BX], r[CX], seg[SS], sp);
-  if ((r[AX] & ~1u) || (client32 && !(r[BX] & 1u)) ||
+  /* BX is reserved by the initial switch call.  The host's 32-bit capability
+   * is reported in BX by INT 2Fh/1687, but clients (including DOS/16M) pass
+   * BX=0 here when requesting a 32-bit entry through AX=1. */
+  if ((r[AX] & ~1u) ||
       (U32)seg[SS] * 16u + sp + 4u > DOS_REAL_MEMORY_SIZE) {
     return_ip = rw(seg[SS], sp);
     return_cs = rw(seg[SS], (U16)(sp + 2));
@@ -1323,10 +1337,8 @@ static int protected_interrupt(U8 vector, int software, unsigned width) {
   return 1;
 }
 /*
- * Hardware state is polled in small instruction batches instead of on every
- * interpreted instruction. 128 guest instructions are far below a visible
- * input/timer latency, while avoiding a tick read and PIC/keyboard dispatch
- * bookkeeping on every instruction in the hot interpreter loop.
+ * Hardware state is polled at a guest-instruction deadline. Keeping the
+ * deadline avoids a read/decrement/write of a countdown in the CPU hot loop.
  *
  * Interrupt shadows still expire instruction-by-instruction. When the shadow
  * ends, force a poll on the very next instruction boundary.
@@ -1335,14 +1347,12 @@ static __attribute__((always_inline)) inline int dos_hardware_poll_due(DOS_VM *v
   if (vm->InterruptShadow) {
     vm->InterruptShadow--;
     if (!vm->InterruptShadow)
-      vm->HardwarePollCountdown = 0;
+      vm->HardwarePollDeadline = vm->Steps + 1u;
     return 0;
   }
-  if (vm->HardwarePollCountdown) {
-    vm->HardwarePollCountdown--;
+  if ((INT32)(vm->Steps - vm->HardwarePollDeadline) < 0)
     return 0;
-  }
-  vm->HardwarePollCountdown = DOS_HW_POLL_INTERVAL - 1u;
+  vm->HardwarePollDeadline = vm->Steps + DOS_HW_POLL_INTERVAL;
   return 1;
 }
 
@@ -1441,7 +1451,7 @@ static int dos_dispatch_hardware(DOS_VM *vm) {
   return 0;
 }
 
-static void step_protected(DOS_VM *vm) {
+static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   if (vm->Segments[CS] == vm->DpmiHostSelector && vm->Eip == 0x010cu) {
     dpmi_raw_to_real();
     return;
@@ -2539,14 +2549,46 @@ static U32 alu32(unsigned op, U32 a, U32 b) {
 
 typedef struct {
   U8 mod, reg, rm;
-  U16 off, segment;
+  U32 off;
+  U16 segment;
 } MOD;
-static MOD decode(int override) {
+static MOD decode(int override, int address32) {
   MOD m;
   U8 x = fetch8();
   m.mod = x >> 6;
   m.reg = (x >> 3) & 7;
   m.rm = x & 7;
+  if (address32) {
+    if (m.mod == 3) {
+      m.off = 0;
+      m.segment = seg[override >= 0 ? override : DS];
+      return m;
+    }
+    U32 base = 0, index = 0;
+    int has_base = 1, uses_stack = 0;
+    if (m.rm == 4) {
+      U8 sib = fetch8();
+      unsigned scale = sib >> 6, index_reg = (sib >> 3) & 7u;
+      unsigned base_reg = sib & 7u;
+      if (index_reg != 4u) index = r32[index_reg] << scale;
+      if (m.mod == 0 && base_reg == 5u) has_base = 0;
+      else {
+        base = r32[base_reg];
+        uses_stack = base_reg == SP || base_reg == BP;
+      }
+    } else if (m.mod == 0 && m.rm == 5u) {
+      has_base = 0;
+    } else {
+      base = r32[m.rm];
+      uses_stack = m.rm == SP || m.rm == BP;
+    }
+    if (!has_base) base = fetch32();
+    if (m.mod == 1) base += (U32)(INT32)(signed char)fetch8();
+    else if (m.mod == 2) base += fetch32();
+    m.off = base + index;
+    m.segment = seg[override >= 0 ? override : (uses_stack ? SS : DS)];
+    return m;
+  }
   U16 base = 0;
   int uses_bp = 0;
   switch (m.rm) {
@@ -2632,7 +2674,7 @@ static void x87_initialize(DOS_VM *vm) {
 }
 
 static MOD decode_x87(int override, int address32) {
-  if (!address32) return decode(override);
+  if (!address32) return decode(override, 0);
 
   MOD m = {0};
   U8 modrm = fetch8();
@@ -2665,13 +2707,7 @@ static MOD decode_x87(int override, int address32) {
   if (m.mod == 1) base += (U32)(INT32)(INT8)fetch8();
   else if (m.mod == 2) base += fetch32();
   U32 offset = base + index;
-  /* In real mode the effective-address size may be 32 bits, but the segment
-   * limit remains 64 KiB. Do not silently wrap a bad guest offset. */
-  if (offset > 0xffffu) {
-    fail("DOSVM: x87 32-bit effective address exceeds real-mode segment\r\n");
-    return m;
-  }
-  m.off = (U16)offset;
+  m.off = offset;
   m.segment = seg[override >= 0 ? override : (uses_bp ? SS : DS)];
   return m;
 }
@@ -3105,7 +3141,24 @@ static int x87_real(DOS_VM *vm, U8 opcode, int override, int address32,
 
   case 0xdb:
     if (m.mod == 3) {
-      if (m.reg == 4 && m.rm == 2) { /* FNCLEX */
+      if (m.reg <= 3) { /* FCMOVNB/NE/NBE/NU ST0,ST(i). */
+        int move = m.reg == 0 ? !(vm->Flags & CF) :
+                   m.reg == 1 ? !(vm->Flags & ZF) :
+                   m.reg == 2 ? !(vm->Flags & (CF | ZF)) :
+                                !(vm->Flags & 4u);
+        if (move) {
+          switch (m.rm) {
+          case 0: __asm__ volatile("fld %%st(0); fstp %%st(1)" : : : "memory"); break;
+          case 1: __asm__ volatile("fld %%st(1); fstp %%st(1)" : : : "memory"); break;
+          case 2: __asm__ volatile("fld %%st(2); fstp %%st(1)" : : : "memory"); break;
+          case 3: __asm__ volatile("fld %%st(3); fstp %%st(1)" : : : "memory"); break;
+          case 4: __asm__ volatile("fld %%st(4); fstp %%st(1)" : : : "memory"); break;
+          case 5: __asm__ volatile("fld %%st(5); fstp %%st(1)" : : : "memory"); break;
+          case 6: __asm__ volatile("fld %%st(6); fstp %%st(1)" : : : "memory"); break;
+          case 7: __asm__ volatile("fld %%st(7); fstp %%st(1)" : : : "memory"); break;
+          }
+        }
+      } else if (m.reg == 4 && m.rm == 2) { /* FNCLEX */
         __asm__ volatile("fnclex" : : : "memory");
       } else if (m.reg == 4 && m.rm == 3) { /* FNINIT */
         __asm__ volatile("fninit" : : : "memory");
@@ -3219,8 +3272,13 @@ static int x87_real(DOS_VM *vm, U8 opcode, int override, int address32,
         }
         break;
       default:
-        KeLog("[dos] unsupported x87 DD register /%u rm=%u at %04x:%04x\n", m.reg, m.rm, instruction_cs, instruction_ip);
-        fail("DOSVM: unsupported x87 DD register instruction\r\n");
+        /* Reserved register forms raise #UD. DOSX probes these encodings
+         * while selecting an x87-compatible execution path. */
+        if (rw(0, 24u) || rw(0, 26u)) {
+          ip = instruction_ip;
+          dos_int(6);
+          return vm->Running;
+        }
         break;
       }
     } else if (m.reg == 0) {
@@ -3273,13 +3331,31 @@ static int x87_real(DOS_VM *vm, U8 opcode, int override, int address32,
       x87_capture_status(vm);
       ww(m.segment, m.off, vm->FpuStatus);
     } else {
-      KeLog("[dos] unsupported x87 DD /%u mod=%u rm=%u at %04x:%04x\n", m.reg, m.mod, m.rm, instruction_cs, instruction_ip);
-      fail("DOSVM: unsupported x87 DD instruction\r\n");
+      /* Reserved x87 memory forms are ignored by the DOS compatibility FPU.
+       * DOSX uses DD /5 as a probe before choosing its protected-mode path. */
     }
     break;
 
   case 0xdf:
-    if (m.mod == 3 && m.reg == 4 && m.rm == 0) {
+    if (m.mod == 3 && m.reg == 0) { /* FFREEP ST(i): free then pop ST0. */
+      switch (m.rm) {
+      case 0: __asm__ volatile("ffree %%st(0); fstp %%st(0)" : : : "memory"); break;
+      case 1: __asm__ volatile("ffree %%st(1); fstp %%st(0)" : : : "memory"); break;
+      case 2: __asm__ volatile("ffree %%st(2); fstp %%st(0)" : : : "memory"); break;
+      case 3: __asm__ volatile("ffree %%st(3); fstp %%st(0)" : : : "memory"); break;
+      case 4: __asm__ volatile("ffree %%st(4); fstp %%st(0)" : : : "memory"); break;
+      case 5: __asm__ volatile("ffree %%st(5); fstp %%st(0)" : : : "memory"); break;
+      case 6: __asm__ volatile("ffree %%st(6); fstp %%st(0)" : : : "memory"); break;
+      case 7: __asm__ volatile("ffree %%st(7); fstp %%st(0)" : : : "memory"); break;
+      }
+    } else if (m.mod == 3 && m.reg == 1) { /* FXCH ST(i). */
+      switch (m.rm) {
+      case 0: X87_ST_EXCHANGE(0); break; case 1: X87_ST_EXCHANGE(1); break;
+      case 2: X87_ST_EXCHANGE(2); break; case 3: X87_ST_EXCHANGE(3); break;
+      case 4: X87_ST_EXCHANGE(4); break; case 5: X87_ST_EXCHANGE(5); break;
+      case 6: X87_ST_EXCHANGE(6); break; case 7: X87_ST_EXCHANGE(7); break;
+      }
+    } else if (m.mod == 3 && m.reg == 4 && m.rm == 0) {
       x87_capture_status(vm);
       vm->Registers[AX] = vm->FpuStatus;
       vm->Registers32[AX] = (vm->Registers32[AX] & 0xffff0000u) | vm->FpuStatus;
@@ -3315,12 +3391,19 @@ static int x87_real(DOS_VM *vm, U8 opcode, int override, int address32,
         __asm__ volatile("fistps %0" : "=m"(raw16) : : "memory");
         ww(m.segment, m.off, raw16);
       }
-    } else if (m.mod != 3 && (m.reg == 5 || m.reg == 7)) {
-      if (m.reg == 5) {
+    } else if (m.mod != 3 && (m.reg == 4 || m.reg == 5 ||
+                              m.reg == 6 || m.reg == 7)) {
+      if (m.reg == 4) { /* FBLD m80bcd */
+        for (U32 i = 0; i < 10; i++) temp[i] = rb(m.segment, (U16)(m.off + i));
+        __asm__ volatile("fbld %0" : : "m"(*(U8 (*)[10])temp) : "memory");
+      } else if (m.reg == 5) {
         raw64 = 0;
         for (U32 i = 0; i < 8; ++i)
           raw64 |= (U64)rb(m.segment, (U16)(m.off + i)) << (i * 8u);
         __asm__ volatile("fildll %0" : : "m"(raw64) : "memory");
+      } else if (m.reg == 6) { /* FBSTP m80bcd */
+        __asm__ volatile("fbstp %0" : "=m"(*(U8 (*)[10])temp) : : "memory");
+        for (U32 i = 0; i < 10; i++) wb(m.segment, (U16)(m.off + i), temp[i]);
       } else {
         __asm__ volatile("fistpll %0" : "=m"(raw64) : : "memory");
         for (U32 i = 0; i < 8; ++i)
@@ -3445,7 +3528,7 @@ static int condition(unsigned cc) {
 
 static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   if (!vm || !vm->Running) return;
-  if (DosMouseCallbackReturn(vm)) return;
+  if (vm->MouseCallbackActive && DosMouseCallbackReturn(vm)) return;
   if (dos_hardware_poll_due(vm) && dos_dispatch_hardware(vm)) return;
   if ((vm->Steps & 0x3fffu) == 0) {
     UINT32 tick = (UINT32)KeGetTickCount();
@@ -3500,8 +3583,14 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       override = SS;
     else if (op == 0x3e)
       override = DS;
+    else if (op == 0x64)
+      override = FS;
+    else if (op == 0x65)
+      override = GS;
     else if (op == 0xf2 || op == 0xf3)
       rep = op;
+    else if (op == 0xf0)
+      ; /* LOCK is redundant in this single-CPU DOS VM. */
     else if (op == 0x66)
       operand32 = 1;
     else if (op == 0x67)
@@ -3509,10 +3598,6 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     else
       break;
     op = fetch8();
-  }
-  if (address32 && (op < 0xd8 || op > 0xdf)) {
-    fail("DOSVM: 32-bit address-size operations are not implemented\r\n");
-    return;
   }
   if (op >= 0xd8 && op <= 0xdf) {
     (void)x87_real(vm, op, override, address32, operand32, instruction_cs, instruction_ip);
@@ -3607,7 +3692,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   }
   if (op <= 0x3b && (op & 7) <= 3) {
     unsigned operation = op >> 3, wide = op & 1, direction = op & 2;
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (wide && operand32) {
       U32 rm_value = m.mod == 3 ? r32[m.rm] : read32(m.segment, m.off);
       U32 reg_value = r32[m.reg];
@@ -3636,7 +3721,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   }
   if (op >= 0x88 && op <= 0x8b) {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     unsigned wide = op & 1;
     if (wide && operand32) {
       if (op & 2) {
@@ -3661,7 +3746,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   }
   if (op >= 0x80 && op <= 0x83) {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     int wide = op == 0x81 || op == 0x83;
     if (operand32 && wide) {
       U32 value = m.mod == 3 ? r32[m.rm] : read32(m.segment, m.off);
@@ -3682,75 +3767,238 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   }
   if ((op >= 0xa4 && op <= 0xa7) || (op >= 0xaa && op <= 0xaf)) {
-    unsigned wide = op & 1, count = rep ? r[CX] : 1;
-    if (count > 0xffff)
-      count = 0xffff;
+    unsigned width = (op & 1u) ? (operand32 ? 32u : 16u) : 8u;
+    unsigned bytes = width / 8u;
+    U32 count = rep ? (address32 ? r32[CX] : r[CX]) : 1u;
+    U32 si = address32 ? r32[SI] : r[SI];
+    U32 di = address32 ? r32[DI] : r[DI];
     while (count--) {
       U16 source = seg[override >= 0 ? override : DS], dest = seg[ES];
-      U16 a = wide ? rw(source, r[SI]) : rb(source, r[SI]),
-          b = wide ? rw(dest, r[DI]) : rb(dest, r[DI]);
+      U32 a = width == 32u ? read32(source, si) :
+              width == 16u ? rw(source, si) : rb(source, si);
+      U32 b = width == 32u ? read32(dest, di) :
+              width == 16u ? rw(dest, di) : rb(dest, di);
       if (op <= 0xa5) {
-        if (wide)
-          ww(dest, r[DI], a);
+        if (width == 32u)
+          write32(dest, di, a);
+        else if (width == 16u)
+          ww(dest, di, (U16)a);
         else
-          wb(dest, r[DI], (U8)a);
-      } else if (op <= 0xa7)
-        alu(7, a, b, wide ? 16 : 8);
-      else if (op <= 0xab) {
-        if (wide)
-          ww(dest, r[DI], r[AX]);
+          wb(dest, di, (U8)a);
+      } else if (op <= 0xa7) {
+        if (width == 32u) alu32(7, a, b);
+        else (void)alu(7, (U16)a, (U16)b, width);
+      } else if (op <= 0xab) {
+        U32 accumulator = operand32 ? r32[AX] : r[AX];
+        if (width == 32u)
+          write32(dest, di, accumulator);
+        else if (width == 16u)
+          ww(dest, di, r[AX]);
         else
-          wb(dest, r[DI], (U8)r[AX]);
+          wb(dest, di, (U8)r[AX]);
       } else if (op <= 0xad) {
-        if (wide)
-          r[AX] = a;
+        if (width == 32u) { r32[AX] = a; r[AX] = (U16)a; }
+        else if (width == 16u)
+          r[AX] = (U16)a;
         else
           set8(0, (U8)a);
-      } else
-        alu(7, wide ? r[AX] : get8(0), b, wide ? 16 : 8);
-      U16 delta = flags & DF ? (U16) - (wide ? 2 : 1) : (wide ? 2 : 1);
+      } else if (width == 32u)
+        alu32(7, operand32 ? r32[AX] : r[AX], b);
+      else
+        (void)alu(7, width == 16u ? r[AX] : get8(0), (U16)b, width);
+      INT32 delta = flags & DF ? -(INT32)bytes : (INT32)bytes;
       if (op <= 0xa7 || (op <= 0xad && op >= 0xac))
-        r[SI] += delta;
+        si = address32 ? si + (U32)delta : (U16)(si + delta);
       if (op <= 0xab || op >= 0xae)
-        r[DI] += delta;
+        di = address32 ? di + (U32)delta : (U16)(di + delta);
       if (rep) {
-        r[CX]--;
+        if (address32) r32[CX] = count;
+        else r[CX] = (U16)count;
         if ((op == 0xa6 || op == 0xa7 || op == 0xae || op == 0xaf) &&
             ((rep == 0xf3) != !!(flags & ZF)))
           break;
       }
+    }
+    if (address32) {
+      r32[SI] = si; r32[DI] = di;
+      r[SI] = (U16)si; r[DI] = (U16)di;
+      if (rep) r[CX] = (U16)r32[CX];
+    } else {
+      r[SI] = (U16)si; r[DI] = (U16)di;
     }
     return;
   }
   if (op >= 0x6c && op <= 0x6f) {
     unsigned io_width = (op & 1u) ? (operand32 ? 32u : 16u) : 8u;
     unsigned bytes = io_width / 8u;
-    U32 count = rep ? r[CX] : 1u;
+    U32 count = rep ? (address32 ? r32[CX] : r[CX]) : 1u;
+    U32 si = address32 ? r32[SI] : r[SI];
+    U32 di = address32 ? r32[DI] : r[DI];
     U16 port = r[DX];
     if (count > 0xffffu) count = 0xffffu;
     for (U32 i = 0; i < count && running; i++) {
       if (op == 0x6c || op == 0x6d) {
         U32 value = DosPortIn(current(), port, io_width);
-        if (io_width == 8) wb(seg[ES], r[DI], (U8)value);
-        else if (io_width == 16) ww(seg[ES], r[DI], (U16)value);
-        else write32(seg[ES], r[DI], value);
+        if (io_width == 8) wb(seg[ES], di, (U8)value);
+        else if (io_width == 16) ww(seg[ES], di, (U16)value);
+        else write32(seg[ES], di, value);
       } else {
-        U32 value = io_width == 8 ? rb(seg[override >= 0 ? override : DS], r[SI]) :
-                    io_width == 16 ? rw(seg[override >= 0 ? override : DS], r[SI]) :
-                    read32(seg[override >= 0 ? override : DS], r[SI]);
+        U32 value = io_width == 8 ? rb(seg[override >= 0 ? override : DS], si) :
+                    io_width == 16 ? rw(seg[override >= 0 ? override : DS], si) :
+                    read32(seg[override >= 0 ? override : DS], si);
         DosPortOut(current(), port, value, io_width);
       }
       INT16 delta = (flags & DF) ? -(INT16)bytes : (INT16)bytes;
-      if (op == 0x6c || op == 0x6d) r[DI] = (U16)(r[DI] + delta);
-      else r[SI] = (U16)(r[SI] + delta);
+      if (op == 0x6c || op == 0x6d)
+        di = address32 ? di + (U32)delta : (U16)(di + delta);
+      else si = address32 ? si + (U32)delta : (U16)(si + delta);
     }
-    if (rep) r[CX] = 0;
+    if (address32) {
+      r32[SI] = si; r32[DI] = di;
+      r[SI] = (U16)si; r[DI] = (U16)di;
+      if (rep) { r32[CX] = 0; r[CX] = 0; }
+    } else {
+      r[SI] = (U16)si; r[DI] = (U16)di;
+      if (rep) r[CX] = 0;
+    }
     return;
   }
 
   switch (op) {
+  case 0x62: { /* BOUND r16/r32, m16&16/m32&32 */
+    MOD m = decode(override, address32);
+    if (m.mod == 3) {
+      if (rw(0, 24u) || rw(0, 26u)) dos_int(6);
+      return;
+    }
+    if (operand32) {
+      INT32 value = (INT32)r32[m.reg];
+      INT32 lower = (INT32)read32(m.segment, m.off);
+      INT32 upper = (INT32)read32(m.segment, (U16)(m.off + 4u));
+      if (value < lower || value > upper) {
+        if (rw(0, 20u) || rw(0, 22u)) dos_int(5);
+        /* A missing real-mode vector means there is no guest handler for
+         * this CPU exception. Keep the DOS VM alive so early CPU probes can
+         * run before an extender installs its exception vectors. */
+      }
+    } else {
+      INT16 value = (INT16)r[m.reg];
+      INT16 lower = (INT16)rw(m.segment, m.off);
+      INT16 upper = (INT16)rw(m.segment, (U16)(m.off + 2u));
+      if (value < lower || value > upper) {
+        if (rw(0, 20u) || rw(0, 22u)) dos_int(5);
+      }
+    }
+    return;
+  }
+  case 0x63: { /* ARPL r/m16, r16 (DOSX CPU probe). */
+    MOD m = decode(override, address32);
+    U16 destination = read_rm(m, 1);
+    U16 source = r[m.reg];
+    if ((destination & 3u) < (source & 3u)) {
+      destination = (U16)((destination & ~3u) | (source & 3u));
+      write_rm(m, 1, destination);
+      flags |= ZF;
+    } else flags &= ~ZF;
+    return;
+  }
   case 0x0f: {
     U8 extension = fetch8();
+    if (extension == 0x0a) { /* LAR r16/r32, r/m16. */
+      MOD m = decode(override, address32);
+      U16 selector = read_rm(m, 1);
+      DOS_DESCRIPTOR descriptor;
+      if (read_descriptor(selector, &descriptor)) {
+        U32 rights = ((U32)descriptor.Access << 8) |
+                     ((U32)(descriptor.Flags & 0x0fu) << 20);
+        if (operand32) r32[m.reg] = rights;
+        else r[m.reg] = (U16)rights;
+        flags |= ZF;
+      } else {
+        flags &= ~ZF;
+      }
+      return;
+    }
+    if (extension == 0x06) { /* CLTS: no task-switched FPU in this VM. */
+      current()->Cr0 &= ~(1u << 3);
+      return;
+    }
+    if (extension == 0x77) { /* EMMS: the VM does not track MMX tag aliases. */
+      return;
+    }
+    if (extension == 0xdb || extension == 0xdf ||
+        extension == 0xeb || extension == 0xef ||
+        extension == 0x64 || extension == 0x65 || extension == 0x66 ||
+        extension == 0x74 || extension == 0x75 || extension == 0x76 ||
+        extension == 0xec ||
+        extension == 0x6e || extension == 0x6f ||
+        extension == 0x7e || extension == 0x7f) {
+      MOD m = decode(override, address32);
+      U64 source;
+      if (extension == 0x6f || extension == 0x7f) {
+        if (extension == 0x6f)
+          vm->MmxRegisters[m.reg] = m.mod == 3 ? vm->MmxRegisters[m.rm] :
+              ((U64)read32(m.segment, m.off) |
+               ((U64)read32(m.segment, (U16)(m.off + 4u)) << 32));
+        else if (m.mod == 3) vm->MmxRegisters[m.rm] = vm->MmxRegisters[m.reg];
+        else {
+          write32(m.segment, m.off, (U32)vm->MmxRegisters[m.reg]);
+          write32(m.segment, (U16)(m.off + 4u), (U32)(vm->MmxRegisters[m.reg] >> 32));
+        }
+        return;
+      }
+      if (extension == 0x6e || extension == 0x7e) {
+        if (extension == 0x6e)
+          vm->MmxRegisters[m.reg] = m.mod == 3 ? r32[m.rm] : read32(m.segment, m.off);
+        else if (m.mod == 3) {
+          r32[m.rm] = (U32)vm->MmxRegisters[m.reg];
+          r[m.rm] = (U16)r32[m.rm];
+        } else write32(m.segment, m.off, (U32)vm->MmxRegisters[m.reg]);
+        return;
+      }
+      if (m.mod == 3) source = vm->MmxRegisters[m.rm];
+      else {
+        source = (U64)rw(m.segment, m.off) |
+                 ((U64)rw(m.segment, (U16)(m.off + 2u)) << 16) |
+                 ((U64)rw(m.segment, (U16)(m.off + 4u)) << 32) |
+                 ((U64)rw(m.segment, (U16)(m.off + 6u)) << 48);
+      }
+      if (extension == 0xdb) vm->MmxRegisters[m.reg] &= source;      /* PAND */
+      else if (extension == 0xdf) vm->MmxRegisters[m.reg] =
+          ~vm->MmxRegisters[m.reg] & source;                         /* PANDN */
+      else if (extension == 0xeb) vm->MmxRegisters[m.reg] |= source; /* POR */
+      else if (extension == 0xef) vm->MmxRegisters[m.reg] ^= source; /* PXOR */
+      else if (extension == 0xec) { /* PADDSB: signed saturating byte add. */
+        U64 result = 0;
+        for (unsigned lane = 0; lane < 8; lane++) {
+          INT16 sum = (INT8)(vm->MmxRegisters[m.reg] >> (lane * 8u)) +
+                      (INT8)(source >> (lane * 8u));
+          if (sum > 127) sum = 127;
+          if (sum < -128) sum = -128;
+          result |= (U64)(U8)(INT8)sum << (lane * 8u);
+        }
+        vm->MmxRegisters[m.reg] = result;
+      }
+      else {
+        unsigned lane_bits = (extension == 0x64 || extension == 0x74) ? 8u :
+                             (extension == 0x65 || extension == 0x75) ? 16u : 32u;
+        U64 result = 0;
+        for (unsigned shift = 0; shift < 64; shift += lane_bits) {
+          U64 mask = lane_bits == 32u ? 0xffffffffULL : (1ULL << lane_bits) - 1u;
+          U64 left = (vm->MmxRegisters[m.reg] >> shift) & mask;
+          U64 right = (source >> shift) & mask;
+          int equal = left == right;
+          int greater = lane_bits == 8u ? (INT8)left > (INT8)right :
+                        lane_bits == 16u ? (INT16)left > (INT16)right :
+                                           (INT32)left > (INT32)right;
+          int compare_equal = extension >= 0x74u;
+          result |= (compare_equal ? equal : greater ? 1u : 0u)
+                    ? mask << shift : 0;
+        }
+        vm->MmxRegisters[m.reg] = result;
+      }
+      return;
+    }
     if (extension >= 0x80 && extension <= 0x8f) {
       if (operand32) {
         INT32 displacement = (INT32)fetch32();
@@ -3779,17 +4027,30 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       return;
     }
     if (extension == 0x1f) { /* multi-byte NOP */
-      (void)decode(override);
+      (void)decode(override, address32);
+      return;
+    }
+    if (extension >= 0x40 && extension <= 0x4f) { /* CMOVcc r16/r32,r/m */
+      MOD m = decode(override, address32);
+      if (condition(extension & 15u)) {
+        if (operand32) {
+          U32 value = m.mod == 3 ? r32[m.rm] : read32(m.segment, m.off);
+          r32[m.reg] = value;
+          r[m.reg] = (U16)value;
+        } else {
+          r[m.reg] = m.mod == 3 ? r[m.rm] : read_rm(m, 1);
+        }
+      }
       return;
     }
     if (extension >= 0x90 && extension <= 0x9f) { /* SETcc r/m8 */
-      MOD m = decode(override);
+      MOD m = decode(override, address32);
       write_rm(m, 0, (U16)condition(extension & 15));
       return;
     }
     if (extension == 0xb6 || extension == 0xb7 ||
         extension == 0xbe || extension == 0xbf) { /* MOVZX/MOVSX */
-      MOD m = decode(override);
+      MOD m = decode(override, address32);
       unsigned source_width = (extension == 0xb6 || extension == 0xbe) ? 8 : 16;
       U32 value = read_rm(m, source_width == 16);
       if (extension == 0xbe) value = (U32)(INT32)(INT8)value;
@@ -3801,7 +4062,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       return;
     }
     if (extension == 0xaf) { /* two-operand IMUL */
-      MOD m = decode(override);
+      MOD m = decode(override, address32);
       if (operand32) {
         INT64 product = (INT64)(INT32)r32[m.reg] * (INT32)(m.mod == 3
             ? r32[m.rm] : read32(m.segment, m.off));
@@ -3819,6 +4080,33 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       }
       return;
     }
+    if (extension == 0xc0 || extension == 0xc1) { /* XADD r/m,reg */
+      MOD m = decode(override, address32);
+      if (extension == 0xc0) {
+        U8 destination = (U8)read_rm(m, 0);
+        U8 source = get8(m.reg);
+        U8 result = (U8)alu(0, destination, source, 8);
+        write_rm(m, 0, result);
+        set8(m.reg, destination);
+      } else if (operand32) {
+        U32 destination = m.mod == 3 ? r32[m.rm] : read32(m.segment, m.off);
+        U32 source = r32[m.reg];
+        U32 result = alu32(0, destination, source);
+        if (m.mod == 3) {
+          r32[m.rm] = result;
+          r[m.rm] = (U16)result;
+        } else write32(m.segment, m.off, result);
+        r32[m.reg] = destination;
+        r[m.reg] = (U16)destination;
+      } else {
+        U16 destination = read_rm(m, 1);
+        U16 source = r[m.reg];
+        U16 result = alu(0, destination, source, 16);
+        write_rm(m, 1, result);
+        r[m.reg] = destination;
+      }
+      return;
+    }
     if (extension == 0x31) { /* RDTSC: deterministic virtual instruction time */
       U64 ticks = current()->Steps;
       r32[AX] = (U32)ticks;
@@ -3828,7 +4116,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       return;
     }
     if (extension == 0xba) {
-      MOD m = decode(override);
+      MOD m = decode(override, address32);
       unsigned width = operand32 ? 32 : 16;
       U32 value = m.mod == 3 ? (width == 32 ? r32[m.rm] : r[m.rm])
                              : (width == 32 ? read32(m.segment, m.off)
@@ -3851,6 +4139,79 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       }
       return;
     }
+    if (extension == 0xa6 || extension == 0xa7) { /* 386 XBTS / IBTS */
+      MOD m = decode(override, address32);
+      unsigned width = operand32 ? 32u : 16u;
+      unsigned count = r[CX] & 0x1fu;
+      U32 bit_offset = operand32 ? r32[AX] : r[AX];
+      if (count) {
+        U32 value;
+        unsigned shift = bit_offset & (width - 1u);
+        if (m.mod == 3) value = operand32 ? r32[m.rm] : r[m.rm];
+        else {
+          U32 byte_offset = (bit_offset / width) * (width / 8u);
+          value = width == 32 ? read32(m.segment, (U16)(m.off + byte_offset))
+                              : (U32)rw(m.segment, (U16)(m.off + byte_offset)) |
+                                ((U32)rw(m.segment, (U16)(m.off + byte_offset + 2u)) << 16);
+        }
+        U32 mask = count >= width ? (width == 32 ? 0xffffffffu : 0xffffu)
+                                  : ((1u << count) - 1u);
+        if (extension == 0xa6) {
+          U32 result = (shift + count > width && m.mod != 3 && width == 16)
+                         ? ((value >> shift) | (value << (32u - shift)))
+                         : (value >> shift);
+          if (operand32) { r32[m.reg] = result & mask; r[m.reg] = (U16)r32[m.reg]; }
+          else r[m.reg] = (U16)(result & mask);
+        } else {
+          U32 insert = (operand32 ? r32[m.reg] : r[m.reg]) & mask;
+          U32 shifted_mask = mask << shift;
+          value = (value & ~shifted_mask) | (insert << shift);
+          if (m.mod == 3) {
+            if (operand32) { r32[m.rm] = value; r[m.rm] = (U16)value; }
+            else r[m.rm] = (U16)value;
+          } else if (width == 32) write32(m.segment, (U16)(m.off + (bit_offset / width) * 4u), value);
+          else {
+            U16 off = (U16)(m.off + (bit_offset / width) * 2u);
+            ww(m.segment, off, (U16)value);
+            if (shift + count > width) {
+              U32 remaining_mask = mask >> (width - shift);
+              U16 next = rw(m.segment, (U16)(off + 2u));
+              next = (U16)((next & ~remaining_mask) | (insert >> (width - shift)));
+              ww(m.segment, (U16)(off + 2u), next);
+            }
+          }
+        }
+      }
+      return;
+    }
+    if (extension == 0xa3 || extension == 0xab ||
+        extension == 0xb3 || extension == 0xbb) { /* BT/BTS/BTR/BTC r/m,reg */
+      MOD m = decode(override, address32);
+      unsigned width = operand32 ? 32u : 16u;
+      INT32 index = operand32 ? (INT32)r32[m.reg] : (INT16)r[m.reg];
+      INT32 word = 0;
+      unsigned bit = (U32)index & (width - 1u);
+      if (m.mod != 3) {
+        word = index / (INT32)width;
+        if (index < 0 && index % (INT32)width) word--;
+        m.off = (U16)(m.off + word * (INT32)(width / 8u));
+      }
+      U32 value = m.mod == 3 ? (width == 32 ? r32[m.rm] : r[m.rm])
+                             : (width == 32 ? read32(m.segment, m.off)
+                                            : read_rm(m, 1));
+      flags = (flags & ~CF) | ((value & (1u << bit)) ? CF : 0);
+      if (extension != 0xa3) {
+        if (extension == 0xab) value |= 1u << bit;
+        else if (extension == 0xb3) value &= ~(1u << bit);
+        else value ^= 1u << bit;
+        if (m.mod == 3) {
+          if (width == 32) { r32[m.rm] = value; r[m.rm] = (U16)value; }
+          else r[m.rm] = (U16)value;
+        } else if (width == 32) write32(m.segment, m.off, value);
+        else write_rm(m, 1, (U16)value);
+      }
+      return;
+    }
     if (extension == 0xa0 || extension == 0xa1 ||
         extension == 0xa8 || extension == 0xa9) {
       unsigned index = extension < 0xa8 ? FS : GS;
@@ -3859,7 +4220,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       return;
     }
     if (extension == 0x01) {
-      MOD m = decode(override);
+      MOD m = decode(override, address32);
       if (m.mod == 3 && m.reg != 4 && m.reg != 6) {
         fail("DOSVM: invalid descriptor-table operand\r\n");
         return;
@@ -3904,9 +4265,18 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       }
       return;
     }
-    KeLog("[dos] unsupported 0F %02x at %04x:%04x AX=%04x\n",
-          extension, instruction_cs, instruction_ip, r[AX]);
-    fail("DOS: unsupported extended instruction\r\n");
+    /* Unimplemented 0F opcodes fault as #UD on the emulated 386. Give an
+     * installed guest exception handler the original instruction address. */
+    if (rw(0, 24u) || rw(0, 26u)) {
+      ip = instruction_ip;
+      dos_int(6);
+    } else {
+      KeLog("[dos] unsupported 0F %02x rep=%02x modrm=%02x at %04x:%04x AX=%04x BX=%04x CX=%04x DX=%04x DS:SI=%04x:%04x ES:DI=%04x:%04x steps=%08x\n",
+            extension, rep, rb(seg[CS], ip), instruction_cs, instruction_ip,
+            r[AX], r[BX], r[CX], r[DX], seg[DS], r[SI], seg[ES], r[DI],
+            vm->Steps);
+      fail("DOS: unsupported extended instruction\r\n");
+    }
     return;
   }
   case 0x06:
@@ -3968,7 +4338,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   case 0x69:
   case 0x6b: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     INT32 product =
         (INT16)read_rm(m, 1) *
         (op == 0x69 ? (INT16)fetch16() : (INT32)(signed char)fetch8());
@@ -3979,9 +4349,15 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   }
   case 0x8f: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (m.reg) {
-      fail("DOS: invalid POP\r\n");
+      /* 8F /1-/7 are reserved. DOSX probes reserved encodings while
+       * selecting its CPU path; let a guest #UD handler inspect the original
+       * instruction instead of terminating the whole DOS VM. */
+      if (rw(0, 24u) || rw(0, 26u)) {
+        ip = instruction_ip;
+        dos_int(6);
+      }
       return;
     }
     if (operand32) {
@@ -3996,7 +4372,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   }
   case 0x84:
   case 0x85: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (op == 0x85 && operand32) {
       U32 a = m.mod == 3 ? r32[m.rm] : read32(m.segment, m.off);
       alu32(4, a, r32[m.reg]);
@@ -4008,7 +4384,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   }
   case 0x86:
   case 0x87: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (op == 0x87 && operand32) {
       U32 a = m.mod == 3 ? r32[m.rm] : read32(m.segment, m.off);
       U32 b = r32[m.reg];
@@ -4028,9 +4404,13 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   }
   case 0x8c:
   case 0x8e: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (m.reg > 5 || (op == 0x8e && m.reg == CS)) {
-      fail("DOSVM: invalid segment register\r\n");
+      /* Invalid MOV Sreg encodings raise #UD; extenders probe these forms. */
+      if (rw(0, 24u) || rw(0, 26u)) {
+        ip = instruction_ip;
+        dos_int(6);
+      } /* No #UD vector is installed yet; ignore this CPU probe encoding. */
       return;
     }
     if (op == 0x8c)
@@ -4042,7 +4422,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   }
   case 0x8d: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (m.mod == 3) {
       fail("DOSVM: invalid LEA\r\n");
       return;
@@ -4052,8 +4432,12 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   }
   case 0xc4:
   case 0xc5: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (m.mod == 3) {
+      KeLog("[dos] invalid LES/LDS modrm=%02x at %04x:%04x AX=%04x BX=%04x CX=%04x DX=%04x SI=%04x DI=%04x SS:SP=%04x:%04x\n",
+            (U8)((m.mod << 6) | (m.reg << 3) | m.rm), instruction_cs,
+            instruction_ip, r[AX], r[BX], r[CX], r[DX], r[SI], r[DI],
+            seg[SS], r[SP]);
       fail("DOS: invalid far pointer\r\n");
       return;
     }
@@ -4064,7 +4448,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   case 0x90:
     return;
   case 0xdb: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     /* FENI, FDISI, FNCLEX, FNINIT and the legacy FSETPM are control
      * operations with no externally visible state in this no-FPU VM. */
     if (m.mod == 3 && m.reg == 4 && m.rm <= 4)
@@ -4075,7 +4459,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   }
   case 0xdd: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     /* DOS4G uses FNSTSW as an FPU-presence/status probe.  The VM exposes a
      * cleared status word because it does not model a physical x87 unit. */
     if (m.mod != 3 && m.reg == 7) {
@@ -4088,7 +4472,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   }
   case 0xd9: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     U16 control = current()->FpuControl ? current()->FpuControl : 0x037fu;
     if (m.mod != 3 && m.reg == 5) { /* FLDCW m16 */
       current()->FpuControl = rw(m.segment, m.off);
@@ -4234,9 +4618,14 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   }
   case 0xc6:
   case 0xc7: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     if (m.reg) {
-      fail("DOSVM: invalid MOV\r\n");
+      /* C6/C7 reserve ModRM.reg=0; DOS extenders use the invalid form when
+       * probing the processor and expect the #UD handler to decide. */
+      if (rw(0, 24u) || rw(0, 26u)) {
+        ip = instruction_ip;
+        dos_int(6);
+      }
       return;
     }
     if (op == 0xc7 && operand32) {
@@ -4270,7 +4659,18 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     r[BP] = pop();
     return;
   case 0xcd:
-    dos_int(fetch8());
+    {
+      U8 vector = fetch8();
+      /* The default INT 31 vector is our DPMI entry. Once a DOS extender or
+       * client installs its own real-mode handler, preserve normal IVT
+       * dispatch so private INT 31 services reach that handler. */
+      if (vector == 0x31 &&
+          rw(0, 0x31u * 4u) == DOS_BUILTIN_OFFSET(0x31) &&
+          rw(0, 0x31u * 4u + 2u) == DOS_BUILTIN_SEGMENT)
+        dpmi_interrupt();
+      else
+        dos_int(vector);
+    }
     return;
   case 0xcf:
     if (operand32) {
@@ -4293,7 +4693,17 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     }
     return;
   case 0xcc:
-    dos_int(3);
+    /* A DOS program may use INT3 as an optional debugger probe. */
+    if (rw(0, 12) || rw(0, 14)) dos_int(3);
+    return;
+  case 0xce: /* INTO: interrupt on overflow. */
+    if (flags & OF) dos_int(4);
+    return;
+  case 0xf1: /* ICEBP / INT1: deliver a guest debug trap if installed. */
+    if (rw(0, 4u) || rw(0, 6u)) dos_int(1);
+    return;
+  case 0xf4: /* HLT: let the host scheduler advance virtual interrupt time. */
+    if (flags & 0x0200u) KeYield();
     return;
   case 0xe4: case 0xe5: case 0xec: case 0xed: {
     U16 port = (op == 0xe4 || op == 0xe5) ? fetch8() : r[DX];
@@ -4371,20 +4781,47 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   case 0xd1:
   case 0xd2:
   case 0xd3: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     int wide = op & 1;
     U8 count = op & 2 ? get8(1) : 1;
     write_rm(m, wide, shift_value(m.reg, read_rm(m, wide), count, wide));
     return;
   }
+  case 0xd6: /* SALC: undocumented 8086 instruction used by DOSX. */
+    set8(0, (flags & CF) ? 0xffu : 0x00u);
+    return;
   case 0xd7: {
     U16 source = seg[override >= 0 ? override : DS];
     set8(0, rb(source, (U16)(r[BX] + get8(0))));
     return;
   }
+  case 0xd4: /* AAM imm8 */
+  case 0xd5: { /* AAD imm8 */
+    U8 radix = fetch8();
+    U8 al = get8(0);
+    if (op == 0xd4) {
+      if (!radix) {
+        if (rw(0, 0) || rw(0, 2)) dos_int(0);
+        else fail("DOS: divide by zero\r\n");
+        return;
+      }
+      set8(4, (U8)(al / radix));
+      al = (U8)(al % radix);
+      set8(0, al);
+    } else {
+      al = (U8)((U16)get8(4) * radix + al);
+      set8(0, al);
+      set8(4, 0);
+    }
+    flags &= ~(SF | ZF | 4u);
+    if (!al) flags |= ZF;
+    if (al & 0x80u) flags |= SF;
+    if (parity(al)) flags |= 4u;
+    return;
+  }
   case 0xc0:
   case 0xc1: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     int wide = op & 1;
     U8 count = fetch8();
     write_rm(m, wide, shift_value(m.reg, read_rm(m, wide), count, wide));
@@ -4392,11 +4829,14 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   }
   case 0xf6:
   case 0xf7: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     int wide = op & 1;
     U16 v = read_rm(m, wide);
     U32 dividend, quotient;
-    if (m.reg == 0) {
+    /* Several 16-bit programs use the 8086-compatible undocumented /1 alias
+     * of TEST. Treat it like /0 (the immediate TEST operation) instead of
+     * aborting the DOS VM. */
+    if (m.reg == 0 || m.reg == 1) {
       alu(4, v, wide ? fetch16() : fetch8(), wide ? 16 : 8);
       return;
     }
@@ -4431,14 +4871,24 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     }
     if (m.reg == 6 || m.reg == 7) {
       if (!v) {
-        fail("DOS: divide by zero\r\n");
+        if (rw(0, 0) || rw(0, 2)) {
+          ip = instruction_ip;
+          dos_int(0);
+        } else {
+          fail("DOS: divide by zero\r\n");
+        }
         return;
       }
       dividend = wide ? ((U32)r[DX] << 16) | r[AX] : r[AX];
       if (m.reg == 6) {
         quotient = dividend / v;
         if (quotient > (wide ? 0xffffu : 0xffu)) {
-          fail("DOS: divide overflow\r\n");
+          if (rw(0, 0) || rw(0, 2)) {
+            ip = instruction_ip;
+            dos_int(0);
+          } else {
+            fail("DOS: divide overflow\r\n");
+          }
           return;
         }
         if (wide) {
@@ -4450,12 +4900,22 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
         INT32 signed_dividend = wide ? (INT32)dividend : (INT16)dividend;
         INT32 divisor = wide ? (INT16)v : (signed char)v;
         if (signed_dividend == (INT32)0x80000000u && divisor == -1) {
-          fail("DOS: divide overflow\r\n");
+          if (rw(0, 0) || rw(0, 2)) {
+            ip = instruction_ip;
+            dos_int(0);
+          } else {
+            fail("DOS: divide overflow\r\n");
+          }
           return;
         }
         INT32 q = signed_dividend / divisor;
         if (q < (wide ? -32768 : -128) || q > (wide ? 32767 : 127)) {
-          fail("DOS: divide overflow\r\n");
+          if (rw(0, 0) || rw(0, 2)) {
+            ip = instruction_ip;
+            dos_int(0);
+          } else {
+            fail("DOS: divide overflow\r\n");
+          }
           return;
         }
         if (wide) {
@@ -4503,15 +4963,16 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     return;
   case 0xfe:
   case 0xff: {
-    MOD m = decode(override);
+    MOD m = decode(override, address32);
     U16 cf = flags & CF;
 
     /* FE is the byte-sized INC/DEC group and only /0 and /1 are defined. */
     if (op == 0xfe) {
       if (m.reg > 1) {
-        KeLog("[dos] invalid FE group /%u at %04x:%04x modrm=%02x\n",
-              m.reg, instruction_cs, instruction_ip, (U8)((m.mod << 6) | (m.reg << 3) | m.rm));
-        fail("DOSVM: invalid FE group operation\r\n");
+        /* Reserved group selectors raise #UD; DOS extenders install a guest
+         * handler while probing CPU behavior. On older 8086-compatible
+         * clients without one, preserve their historical undefined no-op. */
+        if (rw(0, 24u) || rw(0, 26u)) dos_int(6);
         return;
       }
       U16 value = read_rm(m, 0);
@@ -4556,9 +5017,9 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     case 3: /* far indirect CALL m16:16|32 */
     case 5: { /* far indirect JMP m16:16|32 */
       if (m.mod == 3) {
-        KeLog("[dos] invalid register form FF /%u at %04x:%04x\n",
-              m.reg, instruction_cs, instruction_ip);
-        fail("DOSVM: invalid far indirect FF operand\r\n");
+        /* Invalid FF register encodings raise #UD on x86. DOSX probes these
+         * encodings during CPU detection; dispatch a guest handler if set. */
+        if (rw(0, 24u) || rw(0, 26u)) dos_int(6);
         return;
       }
       U16 target_segment = rw(m.segment, (U16)(m.off + (operand32 ? 4u : 2u)));
@@ -4589,11 +5050,8 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     case 6: /* PUSH r/m16|32 */
       if (operand32) push32(value); else push((U16)value);
       return;
-    default: /* /7 is architecturally reserved. */
-      KeLog("[dos] invalid FF group /%u at %04x:%04x modrm=%02x operand32=%u\n",
-            m.reg, instruction_cs, instruction_ip,
-            (U8)((m.mod << 6) | (m.reg << 3) | m.rm), operand32);
-      fail("DOSVM: invalid FF group operation\r\n");
+    default: /* /7 is reserved and raises #UD. */
+      if (rw(0, 24u) || rw(0, 26u)) dos_int(6);
       return;
     }
   }

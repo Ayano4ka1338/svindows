@@ -1,5 +1,6 @@
 /* DOS image loading and VM lifetime. */
 #include "Internal.h"
+#include <svindows/Console.h>
 
 
 static BOOLEAN dos_command_is_win100_bin(const char *command) {
@@ -19,6 +20,30 @@ static BOOLEAN dos_command_is_win100_bin(const char *command) {
     if (ch != expected[i]) return FALSE;
   }
   return TRUE;
+}
+
+static BOOLEAN dos_command_is_windows31(const char *command) {
+  if (!command) return FALSE;
+  const char *start = command;
+  while (*start == ' ' || *start == '\t') start++;
+  if (*start == '"') start++;
+  const char *end = start;
+  while (*end && *end != '"' && *end != ' ' && *end != '\t') end++;
+  const char *base = start;
+  BOOLEAN windows2 = FALSE;
+  for (const char *p = start; p < end; p++) {
+    if (*p == '\\' || *p == '/') base = p + 1;
+    static const char directory[] = "WINDOWS2";
+    unsigned i;
+    for (i = 0; i < sizeof(directory) - 1u && p + i < end; i++) {
+      char ch = p[i];
+      if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+      if (ch != directory[i]) break;
+    }
+    if (i == sizeof(directory) - 1u) windows2 = TRUE;
+  }
+  (void)base;
+  return windows2;
 }
 
 U32 DosImageHash(const U8 *image, U32 size) {
@@ -51,29 +76,52 @@ U16 free_paragraphs_from(U16 start) {
 U16 dos_alloc(U16 paragraphs) {
   if (!paragraphs)
     return 0;
+  DOS_VM *vm = current();
   unsigned slot = 0;
   while (slot < DOS_MAX_BLOCKS && current()->Blocks[slot].Used)
     slot++;
   if (slot == DOS_MAX_BLOCKS)
     return 0;
-  U16 candidate = PSP + current()->InitialParagraphs;
-  while (candidate < 0xa000) {
-    U16 free = free_paragraphs_from(candidate);
-    if (free >= paragraphs) {
-      current()->Blocks[slot] = (DOS_BLOCK){candidate, paragraphs, TRUE};
-      return candidate;
+  /* Every allocated DOS block has an MCB paragraph immediately before the
+   * returned data segment. Keep allocations beyond the initial PSP's MCB. */
+  U32 start = PSP + current()->InitialParagraphs + 1u;
+  U32 selected = 0, selected_gap = 0xffffffffu;
+  U16 strategy = vm->DosAllocationStrategy;
+  while (start < 0x9fffu) {
+    U32 next = 0x9fffu;
+    DOS_BLOCK *occupied = 0;
+    for (U32 i = 0; i < DOS_MAX_BLOCKS; i++) {
+      DOS_BLOCK *block = &current()->Blocks[i];
+      if (block->Used && block->Segment >= start && block->Segment < next) {
+        next = block->Segment;
+        occupied = block;
+      }
     }
-    if (candidate + free >= 0xa000)
-      break;
-    candidate += free;
-    for (unsigned i = 0; i < DOS_MAX_BLOCKS; i++)
-      if (current()->Blocks[i].Used &&
-          current()->Blocks[i].Segment == candidate) {
-        candidate += current()->Blocks[i].Paragraphs;
+    if (next == start && occupied) {
+      start = next + occupied->Paragraphs + 1u;
+      continue;
+    }
+    U32 gap = next == 0x9fffu ? next - start : next - start - 1u;
+    if (gap >= paragraphs) {
+      if (strategy == 0) {
+        selected = start;
         break;
       }
+      if (strategy == 1 && gap < selected_gap) {
+        selected = start;
+        selected_gap = gap;
+      }
+      if (strategy == 2)
+        selected = start + gap - paragraphs;
+    }
+    if (!occupied) break;
+    start = next + occupied->Paragraphs + 1u;
   }
-  return 0;
+  if (!selected) return 0;
+  current()->Blocks[slot] = (DOS_BLOCK){(U16)selected, paragraphs, TRUE,
+                                        current()->CurrentPsp};
+  DosUpdateMemoryControlBlocks(current());
+  return (U16)selected;
 }
 static int load(const U8 *image, U32 size, const char *tail) {
   if (size < 1)
@@ -116,6 +164,12 @@ static int load(const U8 *image, U32 size, const char *tail) {
     ip = word(hdr + 0x14);
     seg[SS] = load_seg + word(hdr + 0xe);
     r[SP] = word(hdr + 0x10);
+    /* DOS assigns a usable top-of-block stack when an MZ image leaves SS:SP
+     * at zero. Windows 3.1's WSWAP.EXE uses exactly that header convention. */
+    if (seg[SS] == load_seg && r[SP] == 0) {
+      seg[SS] = (U16)(PSP + current()->InitialParagraphs - 2u);
+      r[SP] = 0xfffeu;
+    }
     seg[DS] = seg[ES] = PSP;
   } else {
     current()->InitialParagraphs = 0x9000;
@@ -209,10 +263,11 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   vm->CurrentPsp = PSP;
   vm->ImageSize = (U32)size;
   vm->ImageHash = DosImageHash(image, (U32)size);
-  /* Windows 1.x requires SETVER WIN100.BIN 3.34 under DOS 5+.  Scope
-   * the compatibility version to that image; all other programs still see
-   * DOS 5.00, and AX=3306h continues to expose the true version. */
-  vm->DosVersion = dos_command_is_win100_bin(command) ? 0x2203u : 0x0005u;
+  /* Windows 1.x needs its SETVER 3.34 value; the Windows 3.1 DOS startup
+   * path follows the DOS 3.30 compatibility version used by 16helloos.
+   * Other DOS programs continue to see 5.00; AX=3306h reports true 5.00. */
+  vm->DosVersion = dos_command_is_win100_bin(command) ? 0x2203u :
+                   dos_command_is_windows31(command) ? 0x1e03u : 0x0005u;
   vm->Dos4gImage = DosImageIsDos4g(image, (U32)size);
   vm->FpuControl = 0x037f; /* reset x87 control word */
   vm->VideoMode = 3; /* 80x25 color text mode */
@@ -237,6 +292,11 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   vm->Memory[0x44au] = 80;
   /* A zero-length DPMI state buffer makes the save/restore entry a RETF. */
   vm->Memory[0xf0000u + 0x0108u] = 0xcbu;
+  /* XMS clients far-call this bridge; INT 2Fh dispatches the function and
+   * RETF returns to the caller with its register ABI intact. */
+  vm->Memory[0xf0000u + 0x0600u] = 0xcdu;
+  vm->Memory[0xf0000u + 0x0601u] = 0x2fu;
+  vm->Memory[0xf0000u + 0x0602u] = 0xcbu;
   for (unsigned vector = 0; vector < 256; vector++)
     vm->Memory[0xf0000u + 0x0200u + vector * 2u] = 0xcfu;
   for (unsigned vector = 0; vector < 32; vector++)
@@ -245,13 +305,17 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
    * this as guest code so saved vectors and guest hooks use normal IRET
    * frames, including when Windows chains the original timer handler. */
   static const U8 bios_timer[] = {
-    0x50, 0x1e,                   /* push ax; push ds */
+    0x50, 0x51, 0x52, 0x53,       /* push ax, cx, dx, bx */
+    0x55, 0x56, 0x57, 0x06,       /* push bp, si, di, es */
+    0x1e,                         /* push ds */
     0x31, 0xc0, 0x8e, 0xd8,       /* xor ax,ax; mov ds,ax */
     0xff, 0x06, 0x6c, 0x04,       /* inc word [046Ch] */
     0x75, 0x04,                   /* jnz tick_done */
     0xff, 0x06, 0x6e, 0x04,       /* inc word [046Eh] */
     0xcd, 0x1c,                   /* tick_done: int 1Ch */
-    0x1f, 0x58, 0xcf              /* pop ds; pop ax; iret */
+    0x1f, 0x07, 0x5f, 0x5e,       /* pop ds, es, di, si */
+    0x5d, 0x5b, 0x5a, 0x59,       /* pop bp, bx, dx, cx */
+    0x58, 0xcf                    /* pop ax; iret */
   };
   memcpy(vm->Memory + 0xf1800u, bios_timer, sizeof(bios_timer));
   vm->Memory[0x08u * 4u + 1u] = 0x18u;
@@ -290,6 +354,11 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   DosMouseInitialize(vm);
   int ok = load(image, (U32)size, p);
   if (ok) {
+    for (unsigned vector = 0x22u; vector <= 0x24u; vector++) {
+      U16 field = (U16)(0x0au + (vector - 0x22u) * 4u);
+      ww(PSP, field, rw(0, (U16)(vector * 4u)));
+      ww(PSP, (U16)(field + 2u), rw(0, (U16)(vector * 4u + 2u)));
+    }
     static const U8 prefix[] = {'P','A','T','H','=','C',':','\\',0,0,1,0};
     U32 base = (U32)DOS_ENV_SEGMENT << 4;
     memcpy(vm->Memory + base, prefix, sizeof(prefix));
@@ -327,6 +396,7 @@ void DosDestroyVm(PVOID context) {
   for (unsigned i = 5; i < 20; i++)
     dos_file_release(vm->Files[i]);
   DosVideoStop(vm);
+  ConRedraw();
   ExFreePool(vm->Memory);
   ExFreePool(vm);
 }

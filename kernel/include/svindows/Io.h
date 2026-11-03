@@ -1,7 +1,7 @@
 /*
  * svindows/Io.h - I/O manager (Io): block device + filesystem access.
  *
- * A polled ATA PIO driver for the primary disk and a writable FAT32 layer used
+ * A memory-backed Limine initrd block device and a writable FAT32 layer used
  * by native file objects and the Win32 filesystem facade.
  */
 #ifndef _SVINDOWS_IO_H_
@@ -58,9 +58,11 @@ void IoCompleteRequest(IO_DEVICE_OBJECT *device, IO_IRP *irp,
 BOOLEAN IoDiskReadSectors(UINT32 lba, UINT8 count, void *buffer);
 BOOLEAN IoDiskWriteSectors(UINT32 lba, UINT8 count, const void *buffer);
 BOOLEAN IoDiskFlush(void);
+BOOLEAN IoDiskSetMemoryImage(void *image, SIZE_T size);
+BOOLEAN IoDiskIsMemoryBacked(void);
 
 /* ------------------------------------------------------------------ */
-/* ATA PIO block device (primary bus, master)                         */
+/* ATA PIO fallback block device (primary bus, master)                */
 /* ------------------------------------------------------------------ */
 
 #define ATA_SECTOR_SIZE 512
@@ -180,6 +182,7 @@ NTSTATUS IoReadHandleKernel(HANDLE handle, void *buffer, SIZE_T length,
 NTSTATUS IoTryReadHandleKernel(HANDLE handle, void *buffer, SIZE_T length,
                                SIZE_T *read_out);
 NTSTATUS IoHandleInputAvailableKernel(HANDLE handle, BOOLEAN *available);
+NTSTATUS IoFlushInputHandleKernel(HANDLE handle);
 NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
                              SIZE_T *written_out);
 NTSTATUS IoOpenFileKernel(const char *path, ULONG access, BOOLEAN create,

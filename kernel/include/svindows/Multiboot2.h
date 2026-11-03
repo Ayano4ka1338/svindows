@@ -1,16 +1,16 @@
 /*
  * svindows/Multiboot2.h - the subset of the Multiboot2 information format we parse.
  *
- * GRUB hands the kernel a pointer to a "boot information" block: a header
- * (total_size, reserved) followed by a sequence of 8-byte-aligned tags, ending
- * with a tag of type 0. Only the tags SVINDOWS currently consumes are described.
+ * A Multiboot2 loader hands the kernel a pointer to a "boot information" block:
+ * a header (total_size, reserved) followed by 8-byte-aligned tags, ending with
+ * a tag of type 0. Only the tags SVINDOWS currently consumes are described.
  */
 #ifndef _SVINDOWS_MULTIBOOT2_H_
 #define _SVINDOWS_MULTIBOOT2_H_
 
 #include <nt/Ntdef.h>
 
-#define MULTIBOOT2_MAGIC 0x36D76289u /* value GRUB passes in EAX */
+#define MULTIBOOT2_MAGIC 0x36D76289u /* Multiboot2 bootloader magic */
 
 /* Tag types (kept distinct from the struct names below). */
 #define MB_TAG_TYPE_END           0
@@ -44,6 +44,14 @@ typedef struct PACKED _MB_TAG_BASIC_MEMINFO {
     UINT32 mem_lower; /* KiB below 1 MiB */
     UINT32 mem_upper; /* KiB above 1 MiB */
 } MB_TAG_BASIC_MEMINFO;
+
+typedef struct PACKED _MB_TAG_MODULE {
+    UINT32 type;
+    UINT32 size;
+    UINT32 start;
+    UINT32 end;
+    char command_line[];
+} MB_TAG_MODULE;
 
 typedef struct PACKED _MB_MMAP_ENTRY {
     UINT64 addr;

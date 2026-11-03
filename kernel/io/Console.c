@@ -10,6 +10,8 @@
 #include <svindows/Gfx.h>
 #include <svindows/Hal.h>
 #include <svindows/Ke.h>
+#include <svindows/Ob.h>
+#include <svindows/Ps.h>
 #include <svindows/Rtl.h>
 #include <nt/Ntstatus.h>
 
@@ -39,6 +41,7 @@ typedef struct _CONSOLE_STATE {
     CONSOLE_INPUT_EVENT Input[CONSOLE_INPUT_CAPACITY];
     volatile UINT32 InputHead;
     volatile UINT32 InputTail;
+    POBJECT ForegroundProcess; /* referenced while a console child is active */
 } CONSOLE_STATE;
 
 static CONSOLE_STATE g_console;
@@ -191,6 +194,37 @@ void ConInitialize(void)
 
 void ConQueueInputCharacter(char character)
 {
+    if ((UINT8)character == 3) {
+        POBJECT foreground = NULL;
+        UINT64 flags = KiIrqSave();
+        foreground = g_console.ForegroundProcess;
+        if (foreground) g_console.ForegroundProcess = NULL;
+        KiIrqRestore(flags);
+
+        if (foreground) {
+            PKPROCESS process = PsGetProcessFromObject(foreground);
+            PKTHREAD main_thread = NULL;
+            BOOLEAN terminated = FALSE;
+            if (process) {
+                flags = KiIrqSave();
+                for (PLIST_ENTRY entry = process->ThreadListHead.Flink;
+                     entry != &process->ThreadListHead; entry = entry->Flink) {
+                    PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
+                    if (thread->ProcessMainThread) {
+                        main_thread = thread;
+                        break;
+                    }
+                }
+                if (main_thread)
+                    terminated = NT_SUCCESS(KeTerminateThreadByPointer(
+                        main_thread, STATUS_CONTROL_C_EXIT));
+                KiIrqRestore(flags);
+            }
+            ObDereferenceObject(foreground);
+            if (terminated) return;
+        }
+    }
+
     UINT32 next = (g_console.InputHead + 1) % CONSOLE_INPUT_CAPACITY;
     if (next != g_console.InputTail) {
         CONSOLE_INPUT_EVENT *event = &g_console.Input[g_console.InputHead];
@@ -210,6 +244,16 @@ static char con_pop_input(void)
         g_console.InputTail = (g_console.InputTail + 1) % CONSOLE_INPUT_CAPACITY;
     }
     return character;
+}
+
+void ConFlushInput(void)
+{
+    /* The keyboard worker may enqueue input asynchronously. Disable local
+     * interrupts while moving the consumer to the producer's current head so
+     * no partially published event can survive the flush. */
+    UINT64 irq = KiIrqSave();
+    g_console.InputTail = g_console.InputHead;
+    KiIrqRestore(irq);
 }
 
 SIZE_T ConRead(void *buffer, SIZE_T length)
@@ -310,6 +354,28 @@ NTSTATUS ConControl(UINT32 operation, UINT64 argument1, UINT64 argument2,
         g_console.InputMode = (UINT32)argument1 &
             (CON_INPUT_PROCESSED | CON_INPUT_LINE | CON_INPUT_ECHO);
         break;
+    case ConsoleControlRedraw:
+        ConRedraw();
+        break;
+    case ConsoleControlSetForegroundProcess: {
+        POBJECT replacement = NULL;
+        if (argument1) {
+            status = ObReferenceObjectByHandle((HANDLE)(UINT_PTR)argument1,
+                                               0, NULL, &replacement);
+            if (!NT_SUCCESS(status)) break;
+            if (!PsGetProcessFromObject(replacement)) {
+                ObDereferenceObject(replacement);
+                status = STATUS_INVALID_HANDLE;
+                break;
+            }
+        }
+        UINT64 flags = KiIrqSave();
+        POBJECT previous = g_console.ForegroundProcess;
+        g_console.ForegroundProcess = replacement;
+        KiIrqRestore(flags);
+        if (previous) ObDereferenceObject(previous);
+        break;
+    }
     case ConsoleControlGetScreenInfo: {
         CONSOLE_SCREEN_INFO *info = (CONSOLE_SCREEN_INFO *)(UINT_PTR)argument1;
         info->Width = (INT16)g_console.Width;
@@ -338,6 +404,37 @@ NTSTATUS ConControl(UINT32 operation, UINT64 argument1, UINT64 argument2,
             g_console.CursorX = x; g_console.CursorY = y;
             con_restart_cursor_blink();
         }
+        break;
+    }
+    case ConsoleControlStreamControl: {
+        /* The serial log is also a live terminal stream. Mirror the shell's
+         * line-editor cursor actions there without feeding escape bytes into
+         * the native screen buffer. */
+        const char *sequence = NULL;
+        switch ((UINT32)argument1) {
+        case 1: sequence = "\x1b[s"; break; /* save input-line origin */
+        case 2: sequence = "\x1b[u"; break; /* restore input-line origin */
+        case 3: sequence = "\x1b[J"; break; /* clear stale rendered tail */
+        case 4: {
+            UINT32 count = (UINT32)argument2;
+            if (count) {
+                char digits[10];
+                UINT32 used = 0;
+                do {
+                    digits[used++] = (char)('0' + count % 10u);
+                    count /= 10u;
+                } while (count && used < sizeof(digits));
+                HalSerialPutChar('\x1b');
+                HalSerialPutChar('[');
+                while (used) HalSerialPutChar(digits[--used]);
+                HalSerialPutChar('D'); /* move left to the insertion point */
+            }
+            break;
+        }
+        default: status = STATUS_INVALID_PARAMETER; break;
+        }
+        if (sequence)
+            while (*sequence) HalSerialPutChar(*sequence++);
         break;
     }
     case ConsoleControlGetCursorInfo: {

@@ -2133,10 +2133,11 @@ NTSTATUS FatRenamePath(const char *old_name, const char *new_name)
 
 NTSTATUS IoInitialize(void)
 {
-    /* File/console objects need Ob but not the disk, so set them up regardless. */
+    /* File/console objects need Ob but not the initrd, so set them up regardless. */
     IoInitializeObjects();
 
-    if (!AtaInitialize())
+    /* The boot volume is the Limine initrd, not a separate ATA disk. */
+    if (!IoDiskIsMemoryBacked())
         return STATUS_NO_SUCH_DEVICE;
     return FatMount();
 }

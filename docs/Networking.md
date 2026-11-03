@@ -24,13 +24,15 @@ places the source under `build/lwip/src`. A working network connection on the
 build host is required for the first build unless the staged source is already
 present.
 
-`make run` and `make run-gui` attach QEMU's user-mode network backend to a
-transitional `virtio-net-pci` device. On boot, the kernel starts DHCP and a
-separate connectivity worker. It logs the obtained IPv4 address, netmask and
-gateway, then attempts DNS resolution of `example.com`, a TCP connection to
-port 80, and an HTTP request. The final `[net-test] INTERNET PASS` line means
-all four stages completed. A missing lease, DNS failure, TCP error or invalid
-HTTP response is reported separately; there is no synthetic success path.
+`make run` and `make run-gui` boot the Limine ISO, which carries the writable
+FAT32 system volume as `boot/initrd.fat`; the kernel uses it as a memory-backed
+block device. They attach QEMU's user-mode network backend to a transitional
+`virtio-net-pci` device. On boot, the kernel starts a DHCP client
+and logs the lease address, netmask and gateway. `tools/QemuSmoke.py` verifies
+the real guest path by pinging the QEMU gateway, resolving and pinging
+`example.com`, and sending HTTP and certificate-verified HTTPS requests through `curl`
+command. These checks run inside the guest, over lwIP and VirtIO, not on the
+build host.
 
 ## Current limitations
 
@@ -45,15 +47,18 @@ HTTP response is reported separately; there is no synthetic success path.
   connect, listen/accept4, read/write, sendto/recvfrom, sendmsg/recvmsg,
   getsockname/getpeername, common socket options, nonblocking mode and poll.
   Linux and lwIP `SOL_SOCKET` option numbers are translated at the boundary.
-- Native libc-free `PING.ELF` and `CURL.ELF` are installed into
+- Native libc-free `PING.ELF` and packaged Alpine `curl` are installed into
   `C:\USR\BIN` and `/usr/bin`. `ping` accepts IPv4 literals or DNS names;
-  `curl` supports basic `http://` GET and `-I` requests. DNS reads
-  `/etc/resolv.conf`; the image's default resolver is QEMU user-networking's
-  `10.0.2.3` and can be replaced for another network backend.
-- This is an IPv4 bring-up, not yet full Kyronix parity: IPv6, multiple
-  interfaces, routing configuration, firewall policy, TLS/HTTPS, redirects,
-  and broader tools such as `wget`/`nc` are not implemented. The current
-  physical/network-device path remains the transitional VirtIO-net driver.
+  `curl` supports HTTP and HTTPS with OpenSSL and the staged CA bundle. DNS
+  reads `/etc/resolv.conf`; the image's default resolver is QEMU
+  user-networking's `10.0.2.3` and can be replaced for another network backend.
+- This implementation currently provides IPv4 on one transitional VirtIO-net
+  interface. IPv6, multiple interfaces, routing configuration, firewall
+  policy, and tools such as `wget`/`nc` are not
+  implemented yet.
+- QEMU's default CPU model hides RDRAND. The bundled QEMU configuration uses
+  `-cpu max` to provide the hardware random source OpenSSL needs; on physical
+  CPUs without RDRAND, secure TLS randomness is unavailable.
 - The included end-to-end test uses DHCP, DNS, TCP and HTTP over QEMU user
   networking. It must be run in QEMU to verify actual packet exchange; a
   successful compile does not establish connectivity.
@@ -71,35 +76,36 @@ make run-gui QEMU_NETDEV='user,id=svnet0,ipv6=off' QEMU_EXTRA_ARGS='-net dump,fi
 ```
 
 `QEMU_NETDEV` and `QEMU_NET_DEVICE` must use the same `QEMU_NET_ID`. The
-`run-net` target is an alias for the GUI boot with the kernel's automatic
-DHCP/DNS/TCP/HTTP smoke test; inspect the serial output for `[net-test]`.
+`run-net` boots the system with the same QEMU user-mode NAT network. Run the
+guest commands below to check connectivity. `tools/QemuSmoke.py` runs the
+automated guest-side DHCP, ICMP, DNS, TCP and HTTP check.
 
 ## User-facing tools and Flatpak prerequisites
 
-The image now includes native `ping` and `curl` ELF clients that use the Linux
-syscall ABI and the kernel's `AF_INET` socket bridge. The first `curl` version
-intentionally supports plain HTTP only (`GET` and `-I`); it does not implement
-TLS/HTTPS, certificate verification, redirects, proxy handling, or the full
-upstream curl option set. The initial `ping` supports IPv4 ICMP echo requests
-and DNS names. These utilities are bring-up clients, not substitutes for the
-full upstream projects. From the Svindows shell, try:
+The image includes native `ping` and Alpine `curl` clients that use the Linux
+syscall ABI and the kernel's `AF_INET` socket bridge. `ping` supports IPv4
+ICMP echo requests and DNS names. `curl` supports HTTP and HTTPS with
+certificate verification using the bundled CA file. From the Svindows shell,
+try:
 
 ```sh
 ping 10.0.2.2
 ping -c 4 example.com
 curl -I http://example.com/
 curl http://example.com/
+curl -I https://example.com/
 ```
 
-Run `make network-check` on the build host for the source/ABI checks before
-booting. A successful source check does not replace the QEMU packet test.
+Run `make network-check` for the source/ABI checks. Run
+`python3 tools/QemuSmoke.py` to verify DHCP, ICMP, DNS, TCP, HTTP and
+certificate-verified HTTPS from the guest in QEMU.
 
 This provides the first usable IPv4 networking path for Linux applications,
 but it is not yet full Kyronix parity. IPv6, complete Linux socket corner-case
 compatibility, ancillary-data control messages, advanced multicast/options,
 and additional network tools remain incomplete. Flatpak downloads will require
-HTTPS/TLS with certificate validation, redirect and range handling, alongside
-a compatible userspace runtime, mount/user namespaces, cgroups, seccomp,
+broader HTTP behavior such as redirect and range handling, alongside a
+compatible userspace runtime, mount/user namespaces, cgroups, seccomp,
 bubblewrap and portals. None of those Flatpak sandbox/runtime pieces are
 claimed as implemented by this network bring-up.
 
