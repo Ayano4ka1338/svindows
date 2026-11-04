@@ -37,7 +37,7 @@ extern void KiEnterLinuxCloneUserMode(UINT64 entry, UINT64 stack,
                                       UINT64 flags, const void *registers);
 
 static KPROCESS       g_system_process;
-static KTHREAD        g_idle_threads[KE_MAXIMUM_PROCESSORS];
+static KTHREAD       *g_idle_threads;
 static LIST_ENTRY     g_ready_queue;
 static LIST_ENTRY     g_all_threads;
 static ULONG          g_next_thread_id;
@@ -236,6 +236,12 @@ void KeInitializeScheduler(void)
     UINT32 processor_count = HalGetProcessorCount();
     if (!processor_count || processor_count > KE_MAXIMUM_PROCESSORS)
         processor_count = 1;
+    g_idle_threads = ExAllocatePoolWithTag(NonPagedPool,
+        sizeof(*g_idle_threads) * processor_count, 'dIlK');
+    if (!g_idle_threads)
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "cannot allocate idle thread contexts");
+    memset(g_idle_threads, 0, sizeof(*g_idle_threads) * processor_count);
     for (UINT32 i = 0; i < processor_count; ++i) {
         KTHREAD *idle = &g_idle_threads[i];
         PKPRCB processor = KeGetProcessorBlock(i);

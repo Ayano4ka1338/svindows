@@ -945,6 +945,7 @@ static int dispatch(char *line)
     char *arg = parse_word(p, command);
 
     if (same(command, "cd") || same(command, "chdir")) command_cd(arg);
+    else if (same(command, "type")) command_type(arg);
     else if (same(command, "start")) command_start(arg);
     else if (same(command, "terminal") || same(command, "newterm"))
         command_terminal();

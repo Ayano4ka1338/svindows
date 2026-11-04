@@ -272,6 +272,20 @@ UINT64 LinuxProcRead(PKPROCESS process, LINUX_FD_ENTRY *entry,
     return copied;
 }
 
+NTSTATUS LinuxProcSnapshot(const char *path, char *buffer, SIZE_T capacity,
+                           SIZE_T *length)
+{
+    if (!path || !buffer || !capacity || !length)
+        return STATUS_INVALID_PARAMETER;
+    UINT8 node = LinuxProcPathKind(path);
+    if (node != LINUX_PROC_MEMINFO && node != LINUX_PROC_CPUINFO)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    UINT64 size = proc_contents(NULL, node, buffer, capacity);
+    if (size >= capacity) return STATUS_BUFFER_TOO_SMALL;
+    *length = (SIZE_T)size;
+    return STATUS_SUCCESS;
+}
+
 
 /* Linux x86-64 struct sysinfo. Values are derived from the physical page
  * allocator and the kernel's 100 Hz monotonic clock, not from fixed constants. */

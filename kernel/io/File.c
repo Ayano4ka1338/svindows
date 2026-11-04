@@ -19,6 +19,7 @@
 #include <svindows/Mm.h>
 #include <svindows/Hal.h>
 #include <svindows/Console.h>
+#include <svindows/Linux.h>
 #include <svindows/Rtl.h>
 #include <nt/Ntobject.h>
 
@@ -28,6 +29,7 @@ typedef enum _FILE_KIND {
     FileKindPipe,
     FileKindDirectory,
     FileKindCharDevice,
+    FileKindProc,
 } FILE_KIND;
 
 typedef struct _IO_VNODE {
@@ -67,6 +69,8 @@ typedef struct _FILE_OBJECT {
     UINT64    CharTag;
     void     *CharContext;
     const IO_CHAR_DEVICE_OPS *CharOps;
+    UINT8    *ProcData;
+    SIZE_T    ProcSize;
 } FILE_OBJECT;
 
 static POBJECT_TYPE g_file_type;
@@ -407,6 +411,38 @@ NTSTATUS IoOpenFileKernel(const char *path, ULONG access, BOOLEAN create,
     char name[260];
     if (!IoCanonicalizeDosPathKernel(path, name))
         return STATUS_OBJECT_NAME_INVALID;
+    /* The Linux proc provider also serves its two machine information files
+     * to native callers. Keep the snapshot on the ordinary file object so
+     * Win32 reads and seeks use the same handle semantics as disk files. */
+    UINT8 proc_buffer[8192];
+    SIZE_T proc_length = 0;
+    NTSTATUS proc_status = LinuxProcSnapshot(name, (char *)proc_buffer,
+                                               sizeof(proc_buffer),
+                                               &proc_length);
+    if (NT_SUCCESS(proc_status)) {
+        if (create || truncate) return STATUS_ACCESS_DENIED;
+        POBJECT proc_object;
+        proc_status = ObCreateObject(g_file_type, sizeof(FILE_OBJECT),
+                                     &proc_object);
+        if (!NT_SUCCESS(proc_status)) return proc_status;
+        FILE_OBJECT *proc_file = (FILE_OBJECT *)proc_object;
+        proc_file->Kind = FileKindProc;
+        proc_file->Access = access;
+        proc_file->ProcData = ExAllocatePoolWithTag(NonPagedPool,
+                                                     proc_length ? proc_length : 1,
+                                                     'cPrF');
+        if (!proc_file->ProcData) {
+            ObDereferenceObject(proc_object);
+            return STATUS_NO_MEMORY;
+        }
+        memcpy(proc_file->ProcData, proc_buffer, proc_length);
+        proc_file->ProcSize = proc_length;
+        InitializeListHead(&proc_file->OpenEntry);
+        proc_status = ObCreateHandle(proc_object, GENERIC_ALL, handle_out);
+        ObDereferenceObject(proc_object);
+        return proc_status;
+    }
+    if (proc_status != STATUS_OBJECT_NAME_NOT_FOUND) return proc_status;
     UINT64 irq = KiIrqSave();
     NTSTATUS status = IopCheckShareAccess(name, access,
         FILE_SHARE_READ_LOCAL | FILE_SHARE_WRITE_LOCAL | FILE_SHARE_DELETE_LOCAL);
@@ -666,6 +702,10 @@ static void IopFileDelete(POBJECT object)
         f->CharOps->Close(f->CharContext);
         return;
     }
+    if (f->Kind == FileKindProc) {
+        if (f->ProcData) ExFreePool(f->ProcData);
+        return;
+    }
     IopReleaseVnode(f->Vnode);
     if (disk_backed) {
         NTSTATUS status = FatFlush();
@@ -751,6 +791,43 @@ UINT64 NtCreateFile(UINT64 *a)
         const char *fname = canonical_name;
         ACCESS_MASK desired_access = (ACCESS_MASK)a[1];
         ULONG share_access = (ULONG)a[6];
+
+        UINT8 proc_snapshot[8192];
+        SIZE_T proc_size = 0;
+        NTSTATUS proc_open = LinuxProcSnapshot(fname, (char *)proc_snapshot,
+                                                sizeof(proc_snapshot),
+                                                &proc_size);
+        if (NT_SUCCESS(proc_open)) {
+            if (disposition != FILE_OPEN || (desired_access & 0x40000000u)) {
+                status = STATUS_ACCESS_DENIED;
+                goto create_done;
+            }
+            POBJECT proc_object;
+            status = ObCreateObject(g_file_type, sizeof(FILE_OBJECT),
+                                    &proc_object);
+            if (!NT_SUCCESS(status)) goto create_done;
+            FILE_OBJECT *proc_file = (FILE_OBJECT *)proc_object;
+            proc_file->Kind = FileKindProc;
+            proc_file->Access = desired_access;
+            proc_file->ProcData = ExAllocatePoolWithTag(NonPagedPool,
+                proc_size ? proc_size : 1, 'cPrF');
+            if (!proc_file->ProcData) {
+                ObDereferenceObject(proc_object);
+                status = STATUS_NO_MEMORY;
+                goto create_done;
+            }
+            memcpy(proc_file->ProcData, proc_snapshot, proc_size);
+            proc_file->ProcSize = proc_size;
+            InitializeListHead(&proc_file->OpenEntry);
+            status = ObCreateHandle(proc_object, GENERIC_ALL, &h);
+            ObDereferenceObject(proc_object);
+            if (NT_SUCCESS(status)) info = FILE_OPENED;
+            goto create_done;
+        }
+        if (proc_open != STATUS_OBJECT_NAME_NOT_FOUND) {
+            status = proc_open;
+            goto create_done;
+        }
 
         UINT64 share_flags = KiIrqSave();
         NTSTATUS share_status = IopCheckShareAccess(fname, desired_access,
@@ -901,6 +978,14 @@ UINT64 NtReadFile(UINT64 *a)
     UINT64 n = 0;
     if (f->Kind == FileKindConsole) {
         n = ConRead(buffer, length);
+    } else if (f->Kind == FileKindProc && f->ProcData) {
+        UINT64 position = explicit_offset ? offset : f->Position;
+        if (position < f->ProcSize) {
+            UINT64 available = f->ProcSize - position;
+            n = length < available ? length : available;
+            memcpy(buffer, f->ProcData + position, (SIZE_T)n);
+            if (!explicit_offset) f->Position += (SIZE_T)n;
+        }
     } else if (f->Kind == FileKindCharDevice && f->CharOps) {
         if (f->CharOps->Read)
             n = f->CharOps->Read(f->CharContext, buffer, length);
@@ -961,7 +1046,12 @@ UINT64 NtWriteFile(UINT64 *a)
 
     FILE_OBJECT *f = (FILE_OBJECT *)obj;
     UINT64 n = 0;
-    if (f->Kind == FileKindConsole) {
+    if (f->Kind == FileKindProc) {
+        ObDereferenceObject(obj);
+        iosb->Status = STATUS_ACCESS_DENIED;
+        iosb->Information = 0;
+        return (UINT64)STATUS_ACCESS_DENIED;
+    } else if (f->Kind == FileKindConsole) {
         n = ConWrite(buffer, length);
     } else if (f->Kind == FileKindCharDevice && f->CharOps) {
         if (f->CharOps->Write)

@@ -194,8 +194,16 @@ UINT64 LinuxMkdir(PKPROCESS process, UINT64 path, UINT64 mode)
 
 UINT64 LinuxUnlink(PKPROCESS process, UINT64 path)
 {
+    return LinuxUnlinkAt(process, LINUX_AT_FDCWD, path, 0);
+}
+
+UINT64 LinuxUnlinkAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                     UINT64 flags)
+{
+    const UINT64 AT_REMOVEDIR = 0x200u;
+    if (flags & ~AT_REMOVEDIR) return LinuxError(LINUX_EINVAL);
     char dos_path[260];
-    UINT64 error = LinuxCapturePath(process, path, dos_path);
+    UINT64 error = LinuxCapturePathAt(process, directory_fd, path, dos_path);
     if (error) return error;
     if (LinuxProcPathKind(dos_path) != LINUX_PROC_NONE)
         return LinuxError(LINUX_EROFS);
@@ -206,7 +214,16 @@ UINT64 LinuxUnlink(PKPROCESS process, UINT64 path)
         status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
         return LinuxError(LINUX_ENOENT);
     if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
-    if (entry.Attributes & 0x10u) return LinuxError(LINUX_EISDIR);
+    if (entry.Attributes & 0x10u) {
+        if (!(flags & AT_REMOVEDIR)) return LinuxError(LINUX_EISDIR);
+        status = FatRemoveDirectory(dos_path);
+        if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
+            status == STATUS_OBJECT_PATH_NOT_FOUND ||
+            status == STATUS_NO_SUCH_FILE)
+            return LinuxError(LINUX_ENOENT);
+        return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
+    }
+    if (flags & AT_REMOVEDIR) return LinuxError(LINUX_ENOTDIR);
     status = FatDeleteFile(dos_path);
     return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }
@@ -229,11 +246,20 @@ UINT64 LinuxLink(PKPROCESS process, UINT64 old_path, UINT64 new_path)
 
 UINT64 LinuxRename(PKPROCESS process, UINT64 old_path, UINT64 new_path)
 {
+    return LinuxRenameAt(process, LINUX_AT_FDCWD, old_path,
+                         LINUX_AT_FDCWD, new_path);
+}
+
+UINT64 LinuxRenameAt(PKPROCESS process, UINT64 old_directory_fd,
+                     UINT64 old_path, UINT64 new_directory_fd,
+                     UINT64 new_path)
+{
     char source[260];
-    UINT64 error = LinuxCapturePath(process, old_path, source);
+    UINT64 error = LinuxCapturePathAt(process, old_directory_fd,
+                                      old_path, source);
     if (error) return error;
     char target[260];
-    error = LinuxCapturePath(process, new_path, target);
+    error = LinuxCapturePathAt(process, new_directory_fd, new_path, target);
     if (error) return error;
     if (LinuxProcPathKind(source) != LINUX_PROC_NONE ||
         LinuxProcPathKind(target) != LINUX_PROC_NONE)
@@ -248,10 +274,59 @@ UINT64 LinuxRename(PKPROCESS process, UINT64 old_path, UINT64 new_path)
     return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }
 
-/* FAT cannot store symbolic links. Report the missing operation instead of
- * pretending that a link was created. */
 UINT64 LinuxSymlink(PKPROCESS process, UINT64 target, UINT64 link_path)
 {
-    (void)process; (void)target; (void)link_path;
-    return LinuxError(LINUX_EOPNOTSUPP);
+    return LinuxSymlinkAt(process, target, LINUX_AT_FDCWD, link_path);
+}
+
+/* FAT has no directory-entry type for symbolic links. For APK extraction,
+ * materialize links to existing regular files as byte-for-byte copies. This
+ * keeps loader aliases such as libc.musl-*.so.1 usable; links to directories
+ * and dangling links remain unsupported rather than being misrepresented. */
+UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
+                      UINT64 link_path)
+{
+    char link_dos[260];
+    UINT64 error = LinuxCapturePathAt(process, directory_fd, link_path,
+                                      link_dos);
+    if (error) return error;
+    if (LinuxProcPathKind(link_dos) != LINUX_PROC_NONE)
+        return LinuxError(LINUX_EROFS);
+    FAT_FIND_DATA existing;
+    NTSTATUS status = FatQueryPath(link_dos, &existing);
+    if (NT_SUCCESS(status)) return LinuxError(LINUX_EEXIST);
+    if (status != STATUS_OBJECT_NAME_NOT_FOUND &&
+        status != STATUS_OBJECT_PATH_NOT_FOUND && status != STATUS_NO_SUCH_FILE)
+        return LinuxError(LINUX_EIO);
+
+    char target_dos[260];
+    if (!MmProbeForRead(target, 1)) return LinuxError(LINUX_EFAULT);
+    if (*(const char *)(ULONG_PTR)target == '/') {
+        error = LinuxCapturePath(process, target, target_dos);
+    } else {
+        char parent[260];
+        SIZE_T length = strlen(link_dos);
+        while (length && link_dos[length - 1] != '\\') length--;
+        if (!length) return LinuxError(LINUX_EINVAL);
+        memcpy(parent, link_dos, length);
+        parent[length] = 0;
+        error = linux_capture_path(process, target, parent, target_dos);
+    }
+    if (error) return error;
+    status = FatQueryPath(target_dos, &existing);
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
+        return LinuxError(LINUX_ENOENT);
+    if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
+    if (existing.Attributes & 0x10u) return LinuxError(LINUX_EOPNOTSUPP);
+
+    void *contents = NULL;
+    SIZE_T size = 0;
+    status = FatLoadFile(target_dos, &contents, &size, NULL);
+    if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
+    status = FatStoreFile(link_dos, contents, size, TRUE);
+    ExFreePool(contents);
+    if (status == STATUS_DISK_FULL) return LinuxError(LINUX_ENOSPC);
+    if (status == STATUS_NO_MEMORY) return LinuxError(LINUX_ENOMEM);
+    return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }

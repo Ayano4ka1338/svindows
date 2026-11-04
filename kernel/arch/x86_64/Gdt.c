@@ -9,6 +9,8 @@
  */
 #include <nt/Ntdef.h>
 #include <svindows/Ke.h>
+#include <svindows/Ex.h>
+#include <svindows/Rtl.h>
 
 /*
  * Segment selectors.
@@ -46,9 +48,34 @@ typedef struct PACKED _DTR {
 static UINT64 g_gdt[KE_MAXIMUM_PROCESSORS][7] ALIGNED(16);
 static TSS64  g_tss[KE_MAXIMUM_PROCESSORS] ALIGNED(16);
 
-/* Per-CPU interrupt stacks; until AP teardown exists these are boot-lifetime. */
-static UINT8 g_ist1_stack[KE_MAXIMUM_PROCESSORS][0x4000] ALIGNED(16);
-static UINT8 g_rsp0_stack[KE_MAXIMUM_PROCESSORS][0x4000] ALIGNED(16);
+/* The BSP needs its architectural stacks before the pool is initialized.
+ * AP stacks are allocated only for CPUs firmware actually reports, rather
+ * than reserving two 16 KiB stacks for every possible CPU in the kernel BSS. */
+static UINT8 g_ist1_boot_stack[0x4000] ALIGNED(16);
+static UINT8 g_rsp0_boot_stack[0x4000] ALIGNED(16);
+static UINT8 *g_ist1_stack[KE_MAXIMUM_PROCESSORS] = { g_ist1_boot_stack };
+static UINT8 *g_rsp0_stack[KE_MAXIMUM_PROCESSORS] = { g_rsp0_boot_stack };
+
+static BOOLEAN gdt_ensure_processor_stacks(ULONG processor_number)
+{
+    if (processor_number >= KE_MAXIMUM_PROCESSORS) return FALSE;
+    if (g_ist1_stack[processor_number] && g_rsp0_stack[processor_number])
+        return TRUE;
+    if (processor_number == 0) return FALSE;
+
+    UINT8 *ist = ExAllocatePoolWithTag(NonPagedPool, 0x4000, 'tSIK');
+    if (!ist) return FALSE;
+    UINT8 *rsp = ExAllocatePoolWithTag(NonPagedPool, 0x4000, 'pSRK');
+    if (!rsp) {
+        ExFreePool(ist);
+        return FALSE;
+    }
+    memset(ist, 0, 0x4000);
+    memset(rsp, 0, 0x4000);
+    g_ist1_stack[processor_number] = ist;
+    g_rsp0_stack[processor_number] = rsp;
+    return TRUE;
+}
 
 extern void KiLoadGdtr(const void *gdtr);
 extern void KiLoadTr(UINT16 selector);
@@ -69,6 +96,9 @@ void KeInitializeGdtForProcessor(ULONG processor_number)
 {
     if (processor_number >= KE_MAXIMUM_PROCESSORS)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "invalid GDT processor index");
+    if (!gdt_ensure_processor_stacks(processor_number))
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "cannot allocate processor interrupt stacks");
     UINT64 *gdt = g_gdt[processor_number];
     TSS64 *tss = &g_tss[processor_number];
     gdt[0] = 0;                       /* null */
@@ -80,12 +110,10 @@ void KeInitializeGdtForProcessor(ULONG processor_number)
     /* Point the TSS's stacks at the top of their (downward-growing) buffers. */
     for (int i = 0; i < 7; i++)
         tss->ist[i] = 0;
-    tss->rsp0 = (UINT64)(g_rsp0_stack[processor_number] +
-                         sizeof(g_rsp0_stack[processor_number]));
+    tss->rsp0 = (UINT64)(g_rsp0_stack[processor_number] + 0x4000);
     tss->rsp1 = 0;
     tss->rsp2 = 0;
-    tss->ist[0] = (UINT64)(g_ist1_stack[processor_number] +
-                           sizeof(g_ist1_stack[processor_number]));
+    tss->ist[0] = (UINT64)(g_ist1_stack[processor_number] + 0x4000);
     tss->iomap_base = sizeof(TSS64);   /* no I/O permission bitmap */
 
     gdt_set_tss(gdt, 5, (UINT64)tss,
@@ -104,9 +132,8 @@ void KeInitializeGdt(void)
 
 UINT64 KeGetProcessorBootstrapStackTop(ULONG processor_number)
 {
-    if (processor_number >= KE_MAXIMUM_PROCESSORS) return 0;
-    return (UINT64)(g_rsp0_stack[processor_number] +
-                    sizeof(g_rsp0_stack[processor_number]));
+    if (!gdt_ensure_processor_stacks(processor_number)) return 0;
+    return (UINT64)(g_rsp0_stack[processor_number] + 0x4000);
 }
 
 /* Update the stack the CPU switches to on a ring 3 -> ring 0 transition (e.g. a
