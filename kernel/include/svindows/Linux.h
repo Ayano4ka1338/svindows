@@ -47,5 +47,8 @@ void LinuxThreadBeginWindowsExec(PKTHREAD thread, UINT64 argument);
 void LinuxInputInitialize(void);
 /* True while Xorg or another Linux client has an evdev keyboard open. */
 BOOLEAN LinuxInputKeyboardActive(void);
+/* Snapshot the global read-only procfs files for native file opens. */
+NTSTATUS LinuxProcSnapshot(const char *path, char *buffer, SIZE_T capacity,
+                           SIZE_T *length);
 
 #endif

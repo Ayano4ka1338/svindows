@@ -260,6 +260,8 @@ UINT64 LinuxMmap(PKPROCESS process, const UINT64 args[6])
     UINT32 slot = 0;
     while (slot < LINUX_MAP_REGIONS && context->Regions[slot].Base) slot++;
     if (slot == LINUX_MAP_REGIONS) {
+        KeLog("[lx] mmap region table exhausted (max %u)\n",
+              (unsigned)LINUX_MAP_REGIONS);
         if (file_object) ObDereferenceObject(file_object);
         return LinuxError(LINUX_ENOMEM);
     }
@@ -298,6 +300,67 @@ UINT64 LinuxMmap(PKPROCESS process, const UINT64 args[6])
     if (context->NextMap >= LINUX_MAP_END)
         context->NextMap = LINUX_MAP_START;
     return base;
+}
+
+UINT64 LinuxMremap(PKPROCESS process, const UINT64 args[6])
+{
+    const UINT64 old_address = args[0];
+    const UINT64 old_length = args[1];
+    const UINT64 new_length = args[2];
+    const UINT64 flags = args[3];
+    const UINT64 MAYMOVE = 1u;
+    const UINT64 FIXED = 2u;
+    const UINT64 DONTUNMAP = 4u;
+
+    if (!old_length || !new_length || old_length > LINUX_MAP_MAX_BYTES ||
+        new_length > LINUX_MAP_MAX_BYTES || (old_address & PAGE_MASK) ||
+        (flags & ~(MAYMOVE | FIXED | DONTUNMAP)) ||
+        (flags & (FIXED | DONTUNMAP)))
+        return LinuxError(LINUX_EINVAL);
+    UINT64 old_size = PAGE_ALIGN_UP(old_length);
+    UINT64 new_size = PAGE_ALIGN_UP(new_length);
+    if (new_size > LINUX_MAP_MAX_BYTES)
+        return LinuxError(LINUX_ENOMEM);
+
+    LINUX_MEMORY_CONTEXT *context = &process->LinuxContext->Memory;
+    LINUX_MAP_REGION *region = NULL;
+    for (UINT32 i = 0; i < LINUX_MAP_REGIONS; i++) {
+        if (context->Regions[i].Base == old_address) {
+            region = &context->Regions[i];
+            break;
+        }
+    }
+    if (!region || region->Kind != LINUX_MAP_OWNED ||
+        region->Size != old_size)
+        return LinuxError(LINUX_EINVAL);
+    if (new_size == old_size) return old_address;
+
+    if (new_size < old_size) {
+        UINT64 status = LinuxMunmap(process, old_address + new_size,
+                                    old_size - new_size);
+        return status ? status : old_address;
+    }
+    if (!(flags & MAYMOVE)) return LinuxError(LINUX_ENOMEM);
+
+    UINT64 page_flags = MmGetPageFlags(old_address);
+    UINT64 protection = 1u; /* Linux PROT_READ */
+    if (page_flags & PTE_WRITE) protection |= 2u;
+    if (!(page_flags & PTE_NX)) protection |= 4u;
+    UINT64 mmap_args[6] = {
+        0, new_size, protection, 2u | 0x20u,
+        (UINT64)(INT64)-1, 0
+    };
+    UINT64 new_address = LinuxMmap(process, mmap_args);
+    if ((INT64)new_address < 0) return new_address;
+    memcpy((void *)(ULONG_PTR)new_address,
+           (const void *)(ULONG_PTR)old_address,
+           (SIZE_T)(old_size < new_size ? old_size : new_size));
+    UINT64 status = LinuxMunmap(process, old_address, old_size);
+    if (status) {
+        LinuxMunmap(process, new_address, new_size);
+        return status;
+    }
+    return new_address;
 }
 
 UINT64 LinuxMunmap(PKPROCESS process, UINT64 address, UINT64 length)

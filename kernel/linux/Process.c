@@ -316,6 +316,7 @@ NTSTATUS LinuxLoadExecImage(PKPROCESS process, const void *image, SIZE_T size,
 void LinuxDestroyProcess(PKPROCESS process)
 {
     if (!process->LinuxContext) return;
+    LinuxFlockReleaseProcess(process);
     /* Device-backed user PTEs are aliases, not allocator-owned RAM. The
      * generic address-space destructor frees all remaining user leaves. */
     LINUX_MEMORY_CONTEXT *memory = &process->LinuxContext->Memory;

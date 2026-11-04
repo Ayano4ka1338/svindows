@@ -42,7 +42,9 @@
 #define LINUX_EOPNOTSUPP 95
 #define LINUX_ETIMEDOUT 110
 #define LINUX_MAX_FDS 64u
-#define LINUX_MAP_REGIONS 1024u
+/* apk-tools maps one small region per package-index object while loading the
+ * multi-megabyte Alpine repositories. Keep enough slots for that workload. */
+#define LINUX_MAP_REGIONS 8192u
 #define LINUX_FD_REGULAR 0u
 #define LINUX_FD_FRAMEBUFFER 1u
 #define LINUX_FD_DIRECTORY 2u
@@ -140,6 +142,8 @@ typedef struct _LINUX_PROCESS_CONTEXT {
     struct _LINUX_PTY *ControllingPty;
     UINT32 SessionId;
     UINT32 ProcessGroupId;
+    UINT32 Umask;
+    BOOLEAN UmaskInitialized;
     struct {
         HANDLE ProcessHandle;
         ULONG Pid;
@@ -182,10 +186,20 @@ UINT64 LinuxSelect(PKPROCESS process, UINT64 nfds, UINT64 read_set,
                    BOOLEAN pselect);
 UINT64 LinuxClockGettime(UINT64 clock_id, UINT64 destination);
 UINT64 LinuxClockGetres(UINT64 clock_id, UINT64 destination);
+UINT64 LinuxUtimensAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                      UINT64 times, UINT64 flags);
+UINT64 LinuxFutimesAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                      UINT64 times);
 UINT64 LinuxNanosleep(UINT64 requested, UINT64 remaining);
 UINT64 LinuxUname(UINT64 destination);
 UINT64 LinuxChownPath(PKPROCESS process, UINT64 path, UINT64 uid, UINT64 gid);
 UINT64 LinuxFchown(PKPROCESS process, UINT64 fd, UINT64 uid, UINT64 gid);
+UINT64 LinuxFchownAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                     UINT64 uid, UINT64 gid, UINT64 flags);
+UINT64 LinuxChmodPath(PKPROCESS process, UINT64 path, UINT64 mode);
+UINT64 LinuxChmodAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                    UINT64 mode, UINT64 flags);
+UINT64 LinuxFchmod(PKPROCESS process, UINT64 fd, UINT64 mode);
 UINT64 LinuxArchPrctl(PKTHREAD thread, UINT64 command, UINT64 value);
 UINT64 LinuxClone(PKTHREAD thread, const UINT64 args[6]);
 UINT64 LinuxFork(PKTHREAD parent);
@@ -210,6 +224,8 @@ UINT64 LinuxDup(PKPROCESS process, UINT64 source, UINT64 target,
                 UINT64 flags, BOOLEAN exact, BOOLEAN dup3);
 UINT64 LinuxFcntl(PKPROCESS process, UINT64 fd, UINT64 command,
                   UINT64 argument);
+UINT64 LinuxFlock(PKPROCESS process, UINT64 fd, UINT64 operation);
+void LinuxFlockReleaseProcess(PKPROCESS process);
 UINT64 LinuxSeek(PKPROCESS process, UINT64 fd, INT64 offset, UINT64 whence);
 UINT64 LinuxReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
                       UINT64 buffer, UINT64 length);
@@ -277,9 +293,16 @@ UINT64 LinuxGetcwd(PKPROCESS process, UINT64 buffer, UINT64 size);
 UINT64 LinuxChdir(PKPROCESS process, UINT64 path);
 UINT64 LinuxMkdir(PKPROCESS process, UINT64 path, UINT64 mode);
 UINT64 LinuxUnlink(PKPROCESS process, UINT64 path);
+UINT64 LinuxUnlinkAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                    UINT64 flags);
 UINT64 LinuxLink(PKPROCESS process, UINT64 old_path, UINT64 new_path);
 UINT64 LinuxRename(PKPROCESS process, UINT64 old_path, UINT64 new_path);
+UINT64 LinuxRenameAt(PKPROCESS process, UINT64 old_directory_fd,
+                     UINT64 old_path, UINT64 new_directory_fd,
+                     UINT64 new_path);
 UINT64 LinuxSymlink(PKPROCESS process, UINT64 target, UINT64 link_path);
+UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
+                      UINT64 link_path);
 UINT64 LinuxReadlinkAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
                        UINT64 buffer, UINT64 size);
 UINT64 LinuxGetrlimit(PKPROCESS process, UINT64 resource, UINT64 result);
@@ -294,6 +317,7 @@ UINT64 LinuxStatPath(PKPROCESS process, UINT64 dirfd, UINT64 path,
 NTSTATUS LinuxInitializeMemory(PKPROCESS process, UINT64 image_end);
 UINT64 LinuxBrk(PKPROCESS process, UINT64 requested);
 UINT64 LinuxMmap(PKPROCESS process, const UINT64 args[6]);
+UINT64 LinuxMremap(PKPROCESS process, const UINT64 args[6]);
 UINT64 LinuxMunmap(PKPROCESS process, UINT64 address, UINT64 length);
 UINT64 LinuxMprotect(PKPROCESS process, UINT64 address, UINT64 length,
                      UINT64 protection);

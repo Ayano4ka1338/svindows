@@ -141,6 +141,7 @@ ALPINE_XORG := $(BUILD)/alpine-xorg/.ready
 ALPINE_FASTFETCH := $(BUILD)/alpine-fastfetch/.ready
 ALPINE_CURL := $(BUILD)/alpine-curl/.ready
 ALPINE_FEH := $(BUILD)/alpine-feh/.ready
+ALPINE_APK := $(BUILD)/alpine-apk/.ready
 # Keep each legacy Windows release isolated; their WIN.COM and system modules
 # share names but must never overwrite one another on the FAT image.
 WINDOWS1_FILES := $(sort $(wildcard user/d/windows1/*))
@@ -440,10 +441,13 @@ $(ALPINE_CURL): tools/StageAlpineCurl.py tools/alpine-curl.lock.json tools/Alpin
 $(ALPINE_FEH): tools/StageAlpineFeh.py tools/alpine-feh.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-feh
 
+$(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFetch.py
+	python3 $< $(BUILD)/alpine-apk
+
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows2) $(WINDOWS2_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat other/Logo.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows2) $(WINDOWS2_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat other/Logo.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(INITRD) bs=1M count=128 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
@@ -493,6 +497,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -s -i $(INITRD) $(BUILD)/alpine-xorg/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-curl/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-feh/root/* ::
+	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-apk/root/* ::
 	mcopy -i $(INITRD) $(BUILD)/UNAME.EXE ::USR/BIN/UNAME
 	mcopy -i $(INITRD) $(BUILD)/alpine-fastfetch/usr/bin/fastfetch ::USR/BIN/FASTFETCH
 	mmd -i $(INITRD) ::USR/SHARE/FASTFETCH ::USR/SHARE/HWDATA
@@ -532,6 +537,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	# Linux path /var/log as C:\var\log.
 	mmd -i $(INITRD) ::VAR
 	mmd -i $(INITRD) ::VAR/LOG
+	mmd -i $(INITRD) ::VAR/CACHE ::VAR/CACHE/APK
 	if [ -n "$(IMAGE_PROGRAM)" ]; then mcopy -i $(INITRD) $(IMAGE_PROGRAM) ::$(PROGRAM); fi
 
 	@echo "  INITRD $(INITRD)"

@@ -1,6 +1,7 @@
 /* Linux process identity and the x86-64 UTS ABI. */
 #include "Internal.h"
 #include <svindows/Rtl.h>
+#include <svindows/Io.h>
 
 #define LINUX_UTS_FIELD_SIZE 65u
 
@@ -51,4 +52,59 @@ UINT64 LinuxFchown(PKPROCESS process, UINT64 fd, UINT64 uid, UINT64 gid)
     if (fd >= LINUX_MAX_FDS || !process->LinuxContext->Files[fd].Used)
         return LinuxError(LINUX_EBADF);
     return linux_root_ownership(uid, gid) ? 0 : LinuxError(LINUX_EPERM);
+}
+
+UINT64 LinuxFchownAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                    UINT64 uid, UINT64 gid, UINT64 flags)
+{
+    const UINT64 AT_SYMLINK_NOFOLLOW = 0x100u;
+    const UINT64 AT_EMPTY_PATH = 0x1000u;
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+        return LinuxError(LINUX_EINVAL);
+    if (!linux_root_ownership(uid, gid)) return LinuxError(LINUX_EPERM);
+    if (path && MmProbeForRead(path, 1) &&
+        *(const char *)(ULONG_PTR)path == 0) {
+        if (!(flags & AT_EMPTY_PATH)) return LinuxError(LINUX_ENOENT);
+        return LinuxFchown(process, directory_fd, uid, gid);
+    }
+    char dos_path[260];
+    UINT64 error = LinuxCapturePathAt(process, directory_fd, path, dos_path);
+    if (error) return error;
+    FAT_FIND_DATA info;
+    NTSTATUS status = FatQueryPath(dos_path, &info);
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
+        return LinuxError(LINUX_ENOENT);
+    return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
+}
+
+UINT64 LinuxChmodPath(PKPROCESS process, UINT64 path, UINT64 mode)
+{
+    (void)mode; /* FAT has only a read-only attribute, no Unix mode bits. */
+    return LinuxAccess(process, path, 0);
+}
+
+UINT64 LinuxChmodAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                    UINT64 mode, UINT64 flags)
+{
+    (void)mode;
+    const UINT64 AT_SYMLINK_NOFOLLOW = 0x100u;
+    if (flags & ~AT_SYMLINK_NOFOLLOW) return LinuxError(LINUX_EINVAL);
+    char dos_path[260];
+    UINT64 error = LinuxCapturePathAt(process, directory_fd, path, dos_path);
+    if (error) return error;
+    FAT_FIND_DATA info;
+    NTSTATUS status = FatQueryPath(dos_path, &info);
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
+        return LinuxError(LINUX_ENOENT);
+    return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
+}
+
+UINT64 LinuxFchmod(PKPROCESS process, UINT64 fd, UINT64 mode)
+{
+    (void)mode;
+    if (fd >= LINUX_MAX_FDS || !process->LinuxContext->Files[fd].Used)
+        return LinuxError(LINUX_EBADF);
+    return 0;
 }

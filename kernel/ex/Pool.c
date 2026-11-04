@@ -31,6 +31,7 @@ typedef struct _POOL_NODE {
 #define POOL_ALIGN 16
 #define POOL_MIN_PAYLOAD 16
 #define POOL_GROW_CHUNK  0x10000 /* commit 64 KiB at a time */
+#define POOL_RETAIN_BYTES 0x10000 /* keep the allocator's initial arena */
 #define POOL_MAGIC       0x4C4F4F50u /* 'POOL' */
 #define POOL_GUARD       16          /* guard bytes past every payload */
 #define POOL_GUARD_BYTE  0xAB
@@ -334,6 +335,25 @@ static void ExFreePoolLocked(PVOID p)
             node->next->prev = prev;
         else
             g_tail = prev;
+    }
+
+    /* Return whole pages at the end of the arena when the tail is free.
+     * Keeping every page ever needed made short-lived, memory-heavy programs
+     * permanently reduce the RAM reported by the page allocator. Preserve
+     * the initial chunk so the pool can continue serving small allocations. */
+    POOL_NODE *tail = g_tail;
+    while (tail && tail->free &&
+           (UINT64)tail + POOL_HDR + tail->size == g_heap_end &&
+           g_heap_end >= MM_KERNEL_HEAP_BASE + POOL_RETAIN_BYTES + PAGE_SIZE &&
+           tail->size >= PAGE_SIZE &&
+           (UINT64)tail + POOL_HDR + POOL_MIN_PAYLOAD <= g_heap_end - PAGE_SIZE) {
+        UINT64 page = g_heap_end - PAGE_SIZE;
+        UINT64 physical = MmGetPhysicalAddress(page);
+        if (physical == MM_INVALID_PHYS || !MmUnmapPage(page))
+            break;
+        MmFreePages(physical & ~PAGE_MASK, 1);
+        g_heap_end = page;
+        tail->size -= PAGE_SIZE;
     }
 }
 

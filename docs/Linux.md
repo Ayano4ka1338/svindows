@@ -36,6 +36,17 @@ hard-link semantics.
 
 The native `uname` syscall (63) returns the Linux UTS layout. The interactive `cmd.exe` installs a `UNAME.EXE` PE utility with the standard identity selection flags. `fastfetch` is the actual Alpine Linux v3.22 x86_64 ELF package (2.44.0-r0), staged from its APK together with the `hwdata-pci` data package and launched through the existing musl loader. The build reads the Alpine APKINDEX and verifies the APK data checksum before extracting the executable.
 
+The disk also carries Alpine v3.22's statically linked `apk.static` as
+`/sbin/apk` and `/usr/bin/apk`, plus the signed repository keys and default
+`main`/`community` repository list. `apk --version` works without the musl
+loader; `apk update` uses the existing HTTPS/network stack and stores indexes
+under `/var/cache/apk`. APK package extraction supports FAT timestamps and
+root ownership requests; FAT mode bits are advisory. Since FAT has no symlink
+entry type, links to existing regular files are materialized as file copies.
+`apk add tree` and running the installed `tree` command have been verified in
+QEMU. Packages that need true symlink behavior, hard links, or unsupported
+Linux syscalls can still fail.
+
 Svindows has an initial, native x86-64 Linux ABI path in `kernel/linux/`.
 The kernel recognizes ELF magic during process creation, validates `ET_EXEC`
 and `ET_DYN` images, maps their `PT_LOAD` segments into a private user address
@@ -49,7 +60,7 @@ programs retain their existing ABIs.
 
 The implemented Linux syscalls are `read` (0), `write` (1), `open` (2),
 `close` (3), `stat` (4), `fstat` (5), `lstat` (6), `lseek` (8),
-`mmap` (9), `mprotect` (10), `munmap` (11), `brk` (12), `ioctl` (16,
+`mmap` (9), `mprotect` (10), `munmap` (11), `brk` (12), `mremap` (25), `ioctl` (16,
 fbdev, VT, evdev, and PTY requests), `pread64` (17), `readv` (19),
 `writev` (20), `access` (21), `pipe` (22), `select` (23), `dup` (32),
 `dup2` (33), `nanosleep` (35), `getpid` (39),
@@ -60,19 +71,21 @@ fbdev, VT, evdev, and PTY requests), `pread64` (17), `readv` (19),
 `setsockopt` (54), `getsockopt` (55), `fork` (57), `execve` (59),
 `exit` (60), `wait4` (61), `uname` (63), `fcntl` (72, descriptor and status flags,
 including `F_DUPFD`),
-`getcwd` (79), `chdir` (80), `mkdir` (83), `unlink` (87),
-`readlink` (89, framebuffer sysfs links),
+`flock` (73), `getcwd` (79), `chdir` (80), `mkdir` (83), `unlink` (87),
+`readlink` (89, framebuffer sysfs links), `chmod` (90), `fchmod` (91),
 `chown` (92), `fchown` (93), `lchown` (94),
 `getrlimit` (97, `RLIMIT_NOFILE`),
 `getuid` (102), `getgid` (104), `setuid` (105), `setgid` (106),
 `geteuid` (107), `getegid` (108), `setpgid` (109), `getppid` (110),
 `getpgrp` (111), `setsid` (112), `setresuid` (117), `setresgid` (119),
-`getpgid` (121), `getsid` (124), `arch_prctl` (158), `gettid` (186), `futex` (202,
+`getpgid` (121), `getsid` (124), `umask` (166, advisory on FAT), `arch_prctl` (158), `gettid` (186), `futex` (202,
 wait/wake), `epoll_create` (213), `getdents64` (217),
 `set_tid_address` (218),
 `clock_gettime` (228, realtime and monotonic), `clock_getres` (229),
 `exit_group` (231), `epoll_wait` (232), `epoll_ctl` (233),
-`openat` (257), `newfstatat` (262), `readlinkat` (267), `pselect6` (270),
+`openat` (257), `fchownat` (260), `futimesat` (261), `newfstatat` (262),
+`unlinkat` (263), `renameat` (264), `symlinkat` (266, regular-file copies on FAT),
+`readlinkat` (267), `fchmodat` (268), `pselect6` (270), `utimensat` (280),
 `epoll_pwait` (281, without a signal mask),
 `accept4` (288), `epoll_create1` (291), `dup3` (292), `pipe2` (293),
 and read-only `prlimit64` (302, `RLIMIT_NOFILE`). Unknown calls

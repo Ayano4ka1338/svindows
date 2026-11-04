@@ -62,3 +62,10 @@ Alpine APK packages (Xorg, `feh`, `curl` and Fastfetch) download in parallel
 and are kept in `~/.cache/svindows/alpine-apk` between builds. `make clean` does
 not delete this cache. Tune concurrency with `ALPINE_DOWNLOAD_JOBS=12` (default)
 or select a nearby mirror with `ALPINE_MIRROR=https://.../alpine`.
+
+The disk also includes Alpine's static `apk` client. In the Svindows Linux
+shell, run `apk --version` to check it, or `apk update` to refresh repository
+indexes. The client and Alpine repository keys are staged from the pinned
+v3.22 package; downloaded indexes and package files live on the writable FAT
+drive. Package installation is experimental because FAT and the Linux ABI do
+not yet provide every Unix filesystem feature Alpine packages may require.

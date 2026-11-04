@@ -76,6 +76,8 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
     case 24:  /* sched_yield */
         KeYield();
         return 0;
+    case 25: /* mremap */
+        return LinuxMremap(process, args);
     case 32: /* dup */
         return LinuxDup(process, args[0], 0, 0, FALSE, FALSE);
     case 33: /* dup2 */
@@ -148,6 +150,15 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxUname(args[0]);
     case 72: /* fcntl */
         return LinuxFcntl(process, args[0], args[1], args[2]);
+    case 73: /* flock */
+        return LinuxFlock(process, args[0], args[1]);
+    case 166: { /* umask; mode bits are advisory on the FAT-backed root */
+        UINT32 previous = process->LinuxContext->UmaskInitialized ?
+            process->LinuxContext->Umask : 0022u;
+        process->LinuxContext->Umask = (UINT32)args[0] & 0777u;
+        process->LinuxContext->UmaskInitialized = TRUE;
+        return previous;
+    }
     case 79: /* getcwd */
         return LinuxGetcwd(process, args[0], args[1]);
     case 80: /* chdir */
@@ -160,40 +171,26 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxLink(process, args[0], args[1]);
     case 87: /* unlink */
         return LinuxUnlink(process, args[0]);
-    case 88: /* symlink; FAT has no symbolic links */
+    case 88: /* symlink; regular-file targets are copied on FAT */
         return LinuxSymlink(process, args[0], args[1]);
     case 89: /* readlink */
         return LinuxReadlinkAt(process, (UINT64)(INT64)-100, args[0],
                                args[1], args[2]);
-    case 90: { /* chmod: devpts nodes have kernel-managed permissions */
-        char path[260];
-        UINT64 status = LinuxCapturePath(process, args[0], path);
-        if (status) return status;
-        UINT32 number; BOOLEAN master;
-        if (LinuxPtyPath(path, &number, &master) && !master &&
-            LinuxPtyExists(number)) return 0;
-        return LinuxError(LINUX_ENOSYS);
-    }
+    case 90: /* chmod; mode bits are advisory on FAT */
+        return LinuxChmodPath(process, args[0], args[1]);
     case 91: /* fchmod */
-        if (args[0] < LINUX_MAX_FDS &&
-            process->LinuxContext->Files[args[0]].Used &&
-            process->LinuxContext->Files[args[0]].Kind == LINUX_FD_PTY)
-            return 0;
-        return LinuxError(LINUX_ENOSYS);
-    case 268: { /* fchmodat: devpts permissions are owned by the PTY */
-        char path[260];
-        UINT64 status = LinuxCapturePathAt(process, args[0], args[1], path);
-        if (status) return status;
-        UINT32 number; BOOLEAN master;
-        if (LinuxPtyPath(path, &number, &master) && !master &&
-            LinuxPtyExists(number)) return 0;
-        return LinuxError(LINUX_ENOSYS);
-    }
+        return LinuxFchmod(process, args[0], args[1]);
+    case 268: /* fchmodat; mode bits are advisory on FAT */
+        return LinuxChmodAt(process, args[0], args[1], args[2], args[3]);
     case 92: /* chown */
     case 94: /* lchown; FAT has no symbolic links */
         return LinuxChownPath(process, args[0], args[1], args[2]);
     case 93: /* fchown */
         return LinuxFchown(process, args[0], args[1], args[2]);
+    case 260: /* fchownat */
+        return LinuxFchownAt(process, args[0], args[1], args[2], args[3], args[4]);
+    case 261: /* futimesat */
+        return LinuxFutimesAt(process, args[0], args[1], args[2]);
     case 99: /* sysinfo */
         return LinuxSysinfo(args[0]);
     case 97: /* getrlimit */
@@ -243,10 +240,18 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxClockGetres(args[0], args[1]);
     case 257: /* openat */
         return LinuxOpenAt(process, args[0], args[1], args[2]);
+    case 264: /* renameat */
+        return LinuxRenameAt(process, args[0], args[1], args[2], args[3]);
+    case 266: /* symlinkat; regular-file targets are copied on FAT */
+        return LinuxSymlinkAt(process, args[0], args[1], args[2]);
     case 262: /* newfstatat */
         return LinuxStatPath(process, args[0], args[1], args[2], args[3]);
+    case 263: /* unlinkat */
+        return LinuxUnlinkAt(process, args[0], args[1], args[2]);
     case 267: /* readlinkat */
         return LinuxReadlinkAt(process, args[0], args[1], args[2], args[3]);
+    case 280: /* utimensat */
+        return LinuxUtimensAt(process, args[0], args[1], args[2], args[3]);
     case 270: /* pselect6; masks are inert until signal delivery exists */
         return LinuxSelect(process, args[0], args[1], args[2], args[3],
                            args[4], TRUE);

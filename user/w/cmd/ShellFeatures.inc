@@ -245,6 +245,45 @@ static char *parse_word(char *text, char word[260])
     return skip_spaces(text);
 }
 
+static void command_type(char *arguments)
+{
+    char token[260];
+    char *cursor = skip_spaces(arguments);
+    if (!*cursor) {
+        write_s("The syntax of the command is incorrect.\r\n");
+        g_errorlevel = 1;
+        return;
+    }
+    while (*cursor) {
+        cursor = parse_word(cursor, token);
+        char path[260];
+        if (!normalize_path(token, path)) {
+            write_s("The system cannot find the path specified.\r\n");
+            g_errorlevel = 1;
+            continue;
+        }
+        HANDLE file = CreateFileA(path, 0x80000000u, 1, 0, 3, 0, 0);
+        if (file == INVALID_HANDLE_VALUE) {
+            write_s("The system cannot find the file specified: ");
+            write_s(token);
+            write_s("\r\n");
+            g_errorlevel = 1;
+            continue;
+        }
+        BYTE buffer[512];
+        DWORD count = 0;
+        while (ReadFile(file, buffer, sizeof(buffer), &count, 0) && count) {
+            DWORD written = 0;
+            if (!WriteFile(g_out, buffer, count, &written, 0) ||
+                written != count) {
+                g_errorlevel = 1;
+                break;
+            }
+        }
+        CloseHandle(file);
+    }
+}
+
 static void command_set(char *arg)
 {
     arg = skip_spaces(arg);
