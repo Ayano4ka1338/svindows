@@ -237,6 +237,12 @@ NTSTATUS LinuxPrepareWrite(PKPROCESS process, UINT64 fd);
 UINT64 LinuxCapturePath(PKPROCESS process, UINT64 user, char result[260]);
 UINT64 LinuxCapturePathAt(PKPROCESS process, UINT64 directory_fd,
                           UINT64 user, char result[260]);
+UINT64 LinuxRenameAt2(PKPROCESS process, UINT64 old_directory_fd,
+                      UINT64 old_path, UINT64 new_directory_fd,
+                      UINT64 new_path, UINT64 flags);
+UINT64 LinuxMkdirAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                    UINT64 mode);
+UINT64 LinuxSyncFile(PKPROCESS process, UINT64 fd);
 UINT64 LinuxOpenDirectory(PKPROCESS process, UINT64 slot,
                           const char *path, UINT64 flags);
 UINT8 LinuxProcPathKind(const char *path);

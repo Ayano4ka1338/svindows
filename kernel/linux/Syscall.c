@@ -152,6 +152,9 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxFcntl(process, args[0], args[1], args[2]);
     case 73: /* flock */
         return LinuxFlock(process, args[0], args[1]);
+    case 74: /* fsync */
+    case 75: /* fdatasync; FAT flushes metadata and data together */
+        return LinuxSyncFile(process, args[0]);
     case 166: { /* umask; mode bits are advisory on the FAT-backed root */
         UINT32 previous = process->LinuxContext->UmaskInitialized ?
             process->LinuxContext->Umask : 0022u;
@@ -165,6 +168,8 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxChdir(process, args[0]);
     case 83: /* mkdir */
         return LinuxMkdir(process, args[0], args[1]);
+    case 258: /* mkdirat */
+        return LinuxMkdirAt(process, args[0], args[1], args[2]);
     case 82: /* rename */
         return LinuxRename(process, args[0], args[1]);
     case 86: /* link */
@@ -242,6 +247,9 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxOpenAt(process, args[0], args[1], args[2]);
     case 264: /* renameat */
         return LinuxRenameAt(process, args[0], args[1], args[2], args[3]);
+    case 316: /* renameat2; flags=0 has renameat semantics */
+        return LinuxRenameAt2(process, args[0], args[1], args[2], args[3],
+                              args[4]);
     case 266: /* symlinkat; regular-file targets are copied on FAT */
         return LinuxSymlinkAt(process, args[0], args[1], args[2]);
     case 262: /* newfstatat */

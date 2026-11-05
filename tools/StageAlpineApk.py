@@ -82,6 +82,14 @@ def stage(destination: Path) -> None:
         shutil.rmtree(destination)
     root = destination / "root"
     root.mkdir(parents=True)
+    # apk installs packages into a deliberately small FAT-backed root rather
+    # than a normal Alpine rootfs. Seed the usual top-level destinations so
+    # package extraction and atomic rename have their parents from the start.
+    # Empty directories are included by the recursive root copy into the
+    # initrd, and mkdirat can then create deeper package-specific paths.
+    for directory in ("bin", "etc", "lib", "sbin", "usr/bin",
+                      "usr/lib", "usr/sbin"):
+        (root / directory).mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=BytesIO(apk_payload), mode="r:gz") as archive:
         for member in archive:
             path = member.name.removeprefix("./")

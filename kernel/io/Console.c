@@ -45,6 +45,71 @@ typedef struct _CONSOLE_STATE {
 } CONSOLE_STATE;
 
 static CONSOLE_STATE g_console;
+static void con_fill(UINT32 first, UINT32 count, UINT8 character,
+                     UINT8 attribute, BOOLEAN fill_character,
+                     BOOLEAN fill_attribute);
+static void con_restart_cursor_blink(void);
+
+/* A single process-visible terminal is shared by native and Linux console
+ * handles. Keep the small ANSI parser state across write() boundaries. */
+static UINT8 g_ansi_state;
+static UINT16 g_ansi_parameters[8];
+static UINT8 g_ansi_parameter_count;
+static BOOLEAN g_ansi_have_parameter;
+static UINT32 g_ansi_saved_x, g_ansi_saved_y;
+
+static void con_ansi_csi(UINT8 final)
+{
+    UINT32 p[8] = {0};
+    UINT32 count = g_ansi_parameter_count;
+    if (g_ansi_have_parameter && count < 8) count++;
+    for (UINT32 i = 0; i < count; i++) p[i] = g_ansi_parameters[i];
+    UINT32 n = p[0] ? p[0] : 1;
+    switch (final) {
+    case 'A': g_console.CursorY = n > g_console.CursorY ? 0 : g_console.CursorY - n; break;
+    case 'B': g_console.CursorY = n + g_console.CursorY >= g_console.Height ? g_console.Height - 1 : g_console.CursorY + n; break;
+    case 'C': g_console.CursorX = n + g_console.CursorX >= g_console.Width ? g_console.Width - 1 : g_console.CursorX + n; break;
+    case 'D': g_console.CursorX = n > g_console.CursorX ? 0 : g_console.CursorX - n; break;
+    case 'H': case 'f':
+        g_console.CursorY = p[0] ? p[0] - 1 : 0;
+        g_console.CursorX = p[1] ? p[1] - 1 : 0;
+        if (g_console.CursorY >= g_console.Height) g_console.CursorY = g_console.Height - 1;
+        if (g_console.CursorX >= g_console.Width) g_console.CursorX = g_console.Width - 1;
+        break;
+    case 'J':
+        if (p[0] == 2 || p[0] == 3) con_fill(0, g_console.Width * g_console.Height, ' ', g_console.Attribute, TRUE, TRUE);
+        else if (p[0] == 0) con_fill(g_console.CursorY * g_console.Width + g_console.CursorX,
+                                      g_console.Width * g_console.Height - (g_console.CursorY * g_console.Width + g_console.CursorX), ' ', g_console.Attribute, TRUE, TRUE);
+        else if (p[0] == 1) con_fill(0, g_console.CursorY * g_console.Width + g_console.CursorX + 1, ' ', g_console.Attribute, TRUE, TRUE);
+        if (p[0] == 2 || p[0] == 3) g_console.CursorX = g_console.CursorY = 0;
+        break;
+    case 'K': {
+        UINT32 first = g_console.CursorY * g_console.Width;
+        if (p[0] == 1) con_fill(first, g_console.CursorX + 1, ' ', g_console.Attribute, TRUE, TRUE);
+        else if (p[0] == 2) con_fill(first, g_console.Width, ' ', g_console.Attribute, TRUE, TRUE);
+        else con_fill(first + g_console.CursorX, g_console.Width - g_console.CursorX, ' ', g_console.Attribute, TRUE, TRUE);
+        break;
+    }
+    case 'm':
+        if (!count || (count == 1 && p[0] == 0)) g_console.Attribute = 0x07;
+        for (UINT32 i = 0; i < count; i++) {
+            UINT32 v = p[i];
+            if (v == 0) g_console.Attribute = 0x07;
+            else if (v == 1) g_console.Attribute |= 0x08;
+            else if (v == 22) g_console.Attribute &= 0x07;
+            else if (v >= 30 && v <= 37) g_console.Attribute = (g_console.Attribute & 0xf0) | (UINT8)(v - 30);
+            else if (v >= 90 && v <= 97) g_console.Attribute = (g_console.Attribute & 0xf0) | (UINT8)(v - 90 + 8);
+            else if (v >= 40 && v <= 47) g_console.Attribute = (g_console.Attribute & 0x0f) | (UINT8)((v - 40) << 4);
+            else if (v >= 100 && v <= 107) g_console.Attribute = (g_console.Attribute & 0x0f) | (UINT8)((v - 100 + 8) << 4);
+            else if (v == 39) g_console.Attribute = (g_console.Attribute & 0xf0) | 7;
+            else if (v == 49) g_console.Attribute &= 0x0f;
+        }
+        break;
+    case 's': g_ansi_saved_x = g_console.CursorX; g_ansi_saved_y = g_console.CursorY; break;
+    case 'u': g_console.CursorX = g_ansi_saved_x; g_console.CursorY = g_ansi_saved_y; break;
+    }
+    con_restart_cursor_blink();
+}
 
 static void con_restore_cursor_cell(void)
 {
@@ -304,7 +369,45 @@ SIZE_T ConWrite(const void *buffer, SIZE_T length)
         HalConsoleRenderCell(g_console.CursorX, g_console.CursorY,
                              (char)cell->Character, cell->Attribute);
     }
-    for (SIZE_T i = 0; i < length; i++) con_put_character(characters[i], TRUE);
+    for (SIZE_T i = 0; i < length; i++) {
+        UINT8 ch = (UINT8)characters[i];
+        if (g_ansi_state == 1) {
+            g_ansi_state = ch == '[' ? 2 : 0;
+            if (ch == 'c') {
+                g_console.Attribute = 0x07;
+                g_console.CursorX = g_console.CursorY = 0;
+                con_fill(0, g_console.Width * g_console.Height, ' ', 0x07, TRUE, TRUE);
+            }
+            continue;
+        }
+        if (g_ansi_state == 2) {
+            if (ch >= '0' && ch <= '9') {
+                UINT32 index = g_ansi_parameter_count;
+                if (index < 8) {
+                    g_ansi_parameters[index] = (UINT16)(g_ansi_parameters[index] * 10 + ch - '0');
+                    if (g_ansi_parameters[index] > 999) g_ansi_parameters[index] = 999;
+                    g_ansi_have_parameter = TRUE;
+                }
+            } else if (ch == ';') {
+                if (g_ansi_parameter_count < 7) g_ansi_parameter_count++;
+                g_ansi_have_parameter = FALSE;
+            } else if (ch >= 0x40 && ch <= 0x7e) {
+                con_ansi_csi(ch);
+                g_ansi_state = 0;
+                g_ansi_parameter_count = 0;
+                g_ansi_have_parameter = FALSE;
+                memset(g_ansi_parameters, 0, sizeof(g_ansi_parameters));
+            } else if (ch == 0x1b) {
+                g_ansi_state = 1;
+            }
+            continue;
+        }
+        if (ch == 0x1b) {
+            g_ansi_state = 1;
+            continue;
+        }
+        con_put_character((char)ch, TRUE);
+    }
     con_restart_cursor_blink();
     return length;
 }

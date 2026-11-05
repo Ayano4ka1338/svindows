@@ -85,8 +85,14 @@ backward compatibility with the existing payload directory. Start them with
 `C:\>WIN2` or `C:\>WIN3`; both launch standard 286 mode (`WIN.COM /S`) because
 the payload contains `KRNL286.EXE` and does not include the enhanced-mode
 `WIN386.EXE`.
-QEMU currently displays the Windows 3.1 splash screen but does not reach
-Program Manager yet.
+The DOS environment includes `C:\WINDOWS2\SYSTEM` in `PATH`, which lets
+`WIN.COM` locate `DOSX.EXE`; DOSX's real-mode `0F 00` system-selector probes
+are also modeled. In QEMU, `WIN3` now passes those startup checks and displays
+the Windows 3.1 splash screen, but still does not reach Program Manager.
+
+The DOS CPU currently uses the optimized native C interpreter and batched
+execution loop. A native-code JIT is not present in this source tree; the
+`kernel/dos/Jit.c` file is a disabled stub and is excluded from the build.
 
 The DOS VM also virtualizes the PC I/O instructions `IN`/`OUT` and their
 string forms. Its virtual devices currently cover the VGA DAC and mode-13h
