@@ -1255,6 +1255,9 @@ static void dos_int_dispatch(U8 n) {
   U16 vector_seg = rw(0, (U16)(n * 4u + 2u));
   if ((vector_off || vector_seg) &&
       !(vector_seg == DOS_BUILTIN_SEGMENT && vector_off == DOS_BUILTIN_OFFSET(n))) {
+    if (n == 6)
+      KeLog("[dos] INT 6h target=%04x:%04x from=%04x:%04x SS:SP=%04x:%04x\n",
+            vector_seg, vector_off, seg[CS], ip, seg[SS], r[SP]);
     r[SP] -= 2; ww(seg[SS], r[SP], flags | 2u);
     r[SP] -= 2; ww(seg[SS], r[SP], seg[CS]);
     r[SP] -= 2; ww(seg[SS], r[SP], ip);
@@ -2181,6 +2184,8 @@ static void dos_int_dispatch(U8 n) {
   }
   case 0x4c: {
     exit_code = get8(0);
+    KeLog("[dos] INT 21h/4c exit=%02x at %04x:%04x SS:SP=%04x:%04x\n",
+          (U8)exit_code, seg[CS], ip, seg[SS], r[SP]);
     if (!dos_terminate_nested_psp((U8)exit_code)) running = 0;
     break;
   }

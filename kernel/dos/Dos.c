@@ -323,7 +323,7 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   /* Each BIOS/DOS entry needs its own stable address: extenders save IVT
    * pointers and call them later with DPMI 0301/0302. */
   static const U8 builtin_vectors[] = {
-    0x09, 0x10, 0x15, 0x16, 0x20, 0x21, 0x29, 0x2f, 0x33
+    0x09, 0x10, 0x15, 0x16, 0x20, 0x21, 0x29, 0x2f, 0x31, 0x33
   };
   for (unsigned i = 0; i < sizeof(builtin_vectors); i++) {
     unsigned vector = builtin_vectors[i];
@@ -359,7 +359,14 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
       ww(PSP, field, rw(0, (U16)(vector * 4u)));
       ww(PSP, (U16)(field + 2u), rw(0, (U16)(vector * 4u + 2u)));
     }
-    static const U8 prefix[] = {'P','A','T','H','=','C',':','\\',0,0,1,0};
+    /* Windows 3.1 standard mode locates DOSX.EXE through PATH.  The launcher
+     * runs from C:\\WINDOWS2, while DOSX.EXE is installed in SYSTEM; keep the
+     * drive root searchable too for ordinary DOS programs. */
+    static const U8 prefix[] = {
+      'P','A','T','H','=','C',':','\\',';',
+      'C',':','\\','W','I','N','D','O','W','S','2','\\',
+      'S','Y','S','T','E','M',0,0,1,0
+    };
     U32 base = (U32)DOS_ENV_SEGMENT << 4;
     memcpy(vm->Memory + base, prefix, sizeof(prefix));
     unsigned i = 0;
@@ -417,7 +424,23 @@ U8 run_vm(DOS_VM *vm) {
     /* The timer IRQ enforces the normal kernel-thread quantum.  A periodic
      * cooperative yield is only a long-run safety valve for unusual systems
      * where the timer is masked. The batch size divides this interval. */
-    if (!(vm->Steps & 0xfffffu)) KeYield();
+    if (!(vm->Steps & 0xfffffu)) {
+      U32 trace_linear = (((U32)vm->Segments[CS] << 4) + (vm->ProtectedMode ? vm->Eip : vm->Ip)) & 0xfffffu;
+      KeLog("[dos] progress steps=%08x pm=%u cs=%04x ip=%08x ax=%08x\n",
+            vm->Steps, vm->ProtectedMode, vm->Segments[CS],
+            vm->ProtectedMode ? vm->Eip : vm->Ip,
+            vm->ProtectedMode ? vm->Registers32[0] : vm->Registers[0]);
+      if (!vm->ProtectedMode) {
+        KeLog("[dos] trace ds=%04x es=%04x ss:sp=%04x:%04x si=%04x di=%04x bytes=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+              vm->Segments[DS], vm->Segments[ES], vm->Segments[SS], vm->Registers[SP],
+              vm->Registers[SI], vm->Registers[DI], vm->Memory[trace_linear],
+              vm->Memory[(trace_linear + 1) & 0xfffffu], vm->Memory[(trace_linear + 2) & 0xfffffu],
+              vm->Memory[(trace_linear + 3) & 0xfffffu], vm->Memory[(trace_linear + 4) & 0xfffffu],
+              vm->Memory[(trace_linear + 5) & 0xfffffu], vm->Memory[(trace_linear + 6) & 0xfffffu],
+              vm->Memory[(trace_linear + 7) & 0xfffffu]);
+      }
+      KeYield();
+    }
   }
   return (U8)vm->ExitCode;
 }

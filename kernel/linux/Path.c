@@ -5,6 +5,56 @@
 #include <svindows/Rtl.h>
 
 #define LINUX_AT_FDCWD ((UINT64)(INT64)-100)
+#define LINUX_PENDING_SYMLINK_COUNT 128
+
+typedef struct _LINUX_PENDING_SYMLINK {
+    BOOLEAN Used;
+    char LinkPath[260];
+    char TargetPath[260];
+} LINUX_PENDING_SYMLINK;
+
+/* FAT has no symlink entries. A package can list a symlink before its target,
+ * so retain those links until the target is published by apk's rename. */
+static LINUX_PENDING_SYMLINK g_linux_pending_symlinks[
+    LINUX_PENDING_SYMLINK_COUNT];
+
+static BOOLEAN linux_path_equal(const char *left, const char *right)
+{
+    while (*left && *right) {
+        char a = *left++, b = *right++;
+        if (a >= 'a' && a <= 'z') a -= 'a' - 'A';
+        if (b >= 'a' && b <= 'z') b -= 'a' - 'A';
+        if (a != b) return FALSE;
+    }
+    return *left == *right;
+}
+
+static void linux_materialize_pending_symlinks(const char *target_path)
+{
+    FAT_FIND_DATA info;
+    NTSTATUS status = FatQueryPath(target_path, &info);
+    if (!NT_SUCCESS(status) || (info.Attributes & 0x10u)) return;
+
+    void *contents = NULL;
+    SIZE_T size = 0;
+    status = FatLoadFile(target_path, &contents, &size, NULL);
+    if (!NT_SUCCESS(status)) return;
+    for (UINT32 i = 0; i < LINUX_PENDING_SYMLINK_COUNT; i++) {
+        LINUX_PENDING_SYMLINK *pending = &g_linux_pending_symlinks[i];
+        if (!pending->Used || !linux_path_equal(pending->TargetPath,
+                                                target_path))
+            continue;
+        status = FatStoreFile(pending->LinkPath, contents, size, TRUE);
+        if (NT_SUCCESS(status)) {
+            pending->Used = FALSE;
+        } else {
+            KeLog("[linux-fs] deferred symlink '%s' -> '%s' materialization "
+                  "failed status=0x%08x\n", pending->LinkPath,
+                  pending->TargetPath, (unsigned)status);
+        }
+    }
+    ExFreePool(contents);
+}
 
 static UINT64 linux_capture_path(PKPROCESS process, UINT64 user,
                                  const char *relative_base, char result[260])
@@ -192,6 +242,26 @@ UINT64 LinuxMkdir(PKPROCESS process, UINT64 path, UINT64 mode)
     return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }
 
+UINT64 LinuxMkdirAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
+                    UINT64 mode)
+{
+    (void)mode; /* FAT cannot store Unix permission bits. */
+    char dos_path[260];
+    UINT64 error = LinuxCapturePathAt(process, directory_fd, path, dos_path);
+    if (error) return error;
+    if (LinuxProcPathKind(dos_path) != LINUX_PROC_NONE)
+        return LinuxError(LINUX_EROFS);
+    NTSTATUS status = FatCreateDirectory(dos_path);
+    if (status == STATUS_OBJECT_NAME_COLLISION)
+        return LinuxError(LINUX_EEXIST);
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
+        return LinuxError(LINUX_ENOENT);
+    if (status == STATUS_NO_MEMORY) return LinuxError(LINUX_ENOMEM);
+    if (status == STATUS_DISK_FULL) return LinuxError(LINUX_ENOSPC);
+    return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
+}
+
 UINT64 LinuxUnlink(PKPROCESS process, UINT64 path)
 {
     return LinuxUnlinkAt(process, LINUX_AT_FDCWD, path, 0);
@@ -267,6 +337,17 @@ UINT64 LinuxRenameAt(PKPROCESS process, UINT64 old_directory_fd,
     if (LinuxSocketPathPresent(source) || LinuxFramebufferPath(source))
         return LinuxError(LINUX_EPERM);
     NTSTATUS status = FatRenamePath(source, target);
+    if (NT_SUCCESS(status)) {
+        for (UINT32 i = 0; i < LINUX_PENDING_SYMLINK_COUNT; i++) {
+            LINUX_PENDING_SYMLINK *pending = &g_linux_pending_symlinks[i];
+            if (!pending->Used) continue;
+            if (linux_path_equal(pending->LinkPath, source))
+                memcpy(pending->LinkPath, target, strlen(target) + 1);
+            if (linux_path_equal(pending->TargetPath, source))
+                memcpy(pending->TargetPath, target, strlen(target) + 1);
+        }
+        linux_materialize_pending_symlinks(target);
+    }
     if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
         status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
         return LinuxError(LINUX_ENOENT);
@@ -274,15 +355,45 @@ UINT64 LinuxRenameAt(PKPROCESS process, UINT64 old_directory_fd,
     return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }
 
+/* apk-tools uses RENAME_NOREPLACE when publishing a freshly extracted file.
+ * FAT's rename helper normally replaces a regular destination, so implement
+ * that flag with an existence check and keep rejecting the stronger modes
+ * that this filesystem cannot provide. */
+UINT64 LinuxRenameAt2(PKPROCESS process, UINT64 old_directory_fd,
+                      UINT64 old_path, UINT64 new_directory_fd,
+                      UINT64 new_path, UINT64 flags)
+{
+    const UINT64 RENAME_NOREPLACE = 1u;
+    if (flags & ~RENAME_NOREPLACE)
+        return LinuxError(LINUX_EOPNOTSUPP);
+    if (flags & RENAME_NOREPLACE) {
+        char target[260];
+        UINT64 error = LinuxCapturePathAt(process, new_directory_fd,
+                                          new_path, target);
+        if (error) return error;
+        if (LinuxProcPathKind(target) != LINUX_PROC_NONE)
+            return LinuxError(LINUX_EROFS);
+        FAT_FIND_DATA info;
+        NTSTATUS status = FatQueryPath(target, &info);
+        if (NT_SUCCESS(status)) return LinuxError(LINUX_EEXIST);
+        if (status != STATUS_OBJECT_NAME_NOT_FOUND &&
+            status != STATUS_OBJECT_PATH_NOT_FOUND &&
+            status != STATUS_NO_SUCH_FILE)
+            return LinuxError(LINUX_EIO);
+    }
+    return LinuxRenameAt(process, old_directory_fd, old_path,
+                         new_directory_fd, new_path);
+}
+
 UINT64 LinuxSymlink(PKPROCESS process, UINT64 target, UINT64 link_path)
 {
     return LinuxSymlinkAt(process, target, LINUX_AT_FDCWD, link_path);
 }
 
-/* FAT has no directory-entry type for symbolic links. For APK extraction,
- * materialize links to existing regular files as byte-for-byte copies. This
- * keeps loader aliases such as libc.musl-*.so.1 usable; links to directories
- * and dangling links remain unsupported rather than being misrepresented. */
+/* FAT has no directory-entry type for symbolic links. Materialize links to
+ * existing regular files as copies. When apk lists a link before its target,
+ * create a temporary empty file and finish materializing it when the target
+ * is renamed into place. */
 UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
                       UINT64 link_path)
 {
@@ -315,8 +426,27 @@ UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
     if (error) return error;
     status = FatQueryPath(target_dos, &existing);
     if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
-        status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
-        return LinuxError(LINUX_ENOENT);
+        status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE) {
+        UINT32 slot = 0;
+        while (slot < LINUX_PENDING_SYMLINK_COUNT &&
+               g_linux_pending_symlinks[slot].Used)
+            slot++;
+        if (slot == LINUX_PENDING_SYMLINK_COUNT)
+            return LinuxError(LINUX_ENOSPC);
+        status = FatStoreFile(link_dos, NULL, 0, TRUE);
+        if (!NT_SUCCESS(status)) {
+            if (status == STATUS_DISK_FULL)
+                return LinuxError(LINUX_ENOSPC);
+            if (status == STATUS_NO_MEMORY)
+                return LinuxError(LINUX_ENOMEM);
+            return LinuxError(LINUX_EIO);
+        }
+        LINUX_PENDING_SYMLINK *pending = &g_linux_pending_symlinks[slot];
+        memcpy(pending->LinkPath, link_dos, strlen(link_dos) + 1);
+        memcpy(pending->TargetPath, target_dos, strlen(target_dos) + 1);
+        pending->Used = TRUE;
+        return 0;
+    }
     if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
     if (existing.Attributes & 0x10u) return LinuxError(LINUX_EOPNOTSUPP);
 

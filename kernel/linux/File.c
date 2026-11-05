@@ -112,6 +112,18 @@ NTSTATUS LinuxPrepareWrite(PKPROCESS process, UINT64 fd)
     return IoSeekHandleKernel(process->LinuxContext->Files[fd].Handle, 0, 2, &ignored);
 }
 
+UINT64 LinuxSyncFile(PKPROCESS process, UINT64 fd)
+{
+    if (fd >= LINUX_MAX_FDS || !process->LinuxContext->Files[fd].Used)
+        return LinuxError(LINUX_EBADF);
+    LINUX_FD_ENTRY *entry = &process->LinuxContext->Files[fd];
+    if (entry->Kind == LINUX_FD_SOCKET || entry->Kind == LINUX_FD_PTY ||
+        entry->Kind == LINUX_FD_TTY || entry->Kind == LINUX_FD_EVENT ||
+        entry->Kind == LINUX_FD_FRAMEBUFFER)
+        return LinuxError(LINUX_EINVAL);
+    return NT_SUCCESS(FatFlush()) ? 0 : LinuxError(LINUX_EIO);
+}
+
 static UINT64 linux_file_error(NTSTATUS status)
 {
     if (status == STATUS_OBJECT_NAME_NOT_FOUND ||

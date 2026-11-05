@@ -3009,6 +3009,8 @@ static int x87_real(DOS_VM *vm, U8 opcode, int override, int address32,
         }
         x87_apply_control(vm);
       }
+    } else if (m.reg == 1) {
+      /* DOSBox's FPU_ESC1_EA leaves this reserved memory group inert. */
     } else if (m.reg == 5) {
       vm->FpuControl = rw(m.segment, m.off);
       x87_apply_control(vm);
@@ -3165,6 +3167,29 @@ static int x87_real(DOS_VM *vm, U8 opcode, int override, int address32,
         vm->FpuControl = 0x037fu;
       } else if (m.reg == 4 && (m.rm == 0 || m.rm == 1 || m.rm == 4)) {
         /* FENI, FDISI and FSETPM are obsolete mode controls on 80387+. */
+      } else if (m.reg == 5 || m.reg == 6) {
+        /* FUCOMI/FCOMI ST(0),ST(i): DB E8+i / DB F0+i (Pentium Pro).
+         * These write the integer condition flags directly, unlike FUCOM.
+         * DOSBox's FPU interpreter implements the same status-to-EFLAGS
+         * mapping; use the host x87 and merge only CF, PF and ZF. */
+        U64 host_flags;
+        switch (m.rm) {
+        case 0: __asm__ volatile("fucomi %%st(0), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        case 1: __asm__ volatile("fucomi %%st(1), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        case 2: __asm__ volatile("fucomi %%st(2), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        case 3: __asm__ volatile("fucomi %%st(3), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        case 4: __asm__ volatile("fucomi %%st(4), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        case 5: __asm__ volatile("fucomi %%st(5), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        case 6: __asm__ volatile("fucomi %%st(6), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        default: __asm__ volatile("fucomi %%st(7), %%st(0); pushfq; popq %0" : "=r"(host_flags) : : "cc", "memory"); break;
+        }
+        if (m.reg == 6) {
+          /* FCOMI raises the invalid-operation exception for any NaN. */
+          /* The emulator's default masked-exception mode leaves the same
+           * unordered condition codes as FUCOMI. */
+        }
+        vm->Flags = (vm->Flags & ~(CF | 0x04u | ZF)) |
+                    ((U32)host_flags & (CF | 0x04u | ZF));
       } else {
         KeLog("[dos] unsupported x87 DB /%u rm=%u at %04x:%04x\n",
               m.reg, m.rm, instruction_cs, instruction_ip);
@@ -4249,6 +4274,37 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       fail("DOSVM: invalid 0F 01 group operation\r\n");
       return;
     }
+    if (extension == 0x00) {
+      /* DOSX probes the 386 system-selector instructions before selecting
+       * its protected-mode startup path.  Model the selector-table state
+       * maintained by this VM, including the non-faulting VERR/VERW tests. */
+      MOD m = decode(override, address32);
+      U16 selector = (U16)read_rm(m, 1);
+      if (m.reg == 0) write_rm(m, 1, vm->Ldtr);       /* SLDT */
+      else if (m.reg == 1) write_rm(m, 1, vm->Tr);   /* STR */
+      else if (m.reg == 2) {                         /* LLDT */
+        if (!load_ldt(selector))
+          fail("DOSVM: invalid LDT selector\r\n");
+      } else if (m.reg == 3) {                       /* LTR */
+        DOS_DESCRIPTOR descriptor;
+        if ((selector & 7u) || !read_descriptor(selector, &descriptor) ||
+            ((descriptor.Access & 0x1fu) != 0x01u &&
+             (descriptor.Access & 0x1fu) != 0x09u))
+          fail("DOSVM: invalid task-register selector\r\n");
+        else vm->Tr = selector;
+      } else if (m.reg == 4 || m.reg == 5) {         /* VERR / VERW */
+        DOS_DESCRIPTOR descriptor;
+        int valid = read_descriptor(selector, &descriptor) &&
+                    (descriptor.Access & 0x10u) &&
+                    (m.reg == 4 ? (descriptor.Access & 2u) :
+                     ((descriptor.Access & 8u) &&
+                      (descriptor.Access & 2u)));
+        flags = (flags & ~ZF) | (valid ? ZF : 0);
+      } else {
+        fail("DOSVM: invalid 0F 00 operation\r\n");
+      }
+      return;
+    }
     if (extension == 0x20 || extension == 0x22) {
       U8 modrm = fetch8();
       unsigned cr = (modrm >> 3) & 7, reg = modrm & 7;
@@ -4434,11 +4490,19 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   case 0xc5: {
     MOD m = decode(override, address32);
     if (m.mod == 3) {
-      KeLog("[dos] invalid LES/LDS modrm=%02x at %04x:%04x AX=%04x BX=%04x CX=%04x DX=%04x SI=%04x DI=%04x SS:SP=%04x:%04x\n",
-            (U8)((m.mod << 6) | (m.reg << 3) | m.rm), instruction_cs,
-            instruction_ip, r[AX], r[BX], r[CX], r[DX], r[SI], r[DI],
-            seg[SS], r[SP]);
-      fail("DOS: invalid far pointer\r\n");
+      /* LES/LDS require a memory operand; register forms raise #UD. DOSX
+       * probes the CPU with these encodings, so deliver the guest exception
+       * when a real-mode handler is installed. */
+      if (rw(0, 24u) || rw(0, 26u)) {
+        ip = instruction_ip;
+        dos_int(6);
+      } else {
+        KeLog("[dos] invalid LES/LDS modrm=%02x at %04x:%04x AX=%04x BX=%04x CX=%04x DX=%04x SI=%04x DI=%04x SS:SP=%04x:%04x\n",
+              (U8)((m.mod << 6) | (m.reg << 3) | m.rm), instruction_cs,
+              instruction_ip, r[AX], r[BX], r[CX], r[DX], r[SI], r[DI],
+              seg[SS], r[SP]);
+        fail("DOS: invalid far pointer\r\n");
+      }
       return;
     }
     r[m.reg] = rw(m.segment, m.off);
@@ -4666,9 +4730,11 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
        * dispatch so private INT 31 services reach that handler. */
       if (vector == 0x31 &&
           rw(0, 0x31u * 4u) == DOS_BUILTIN_OFFSET(0x31) &&
-          rw(0, 0x31u * 4u + 2u) == DOS_BUILTIN_SEGMENT)
+          rw(0, 0x31u * 4u + 2u) == DOS_BUILTIN_SEGMENT) {
+        KeLog("[dos] real INT 31h AX=%04x at %04x:%04x SS:SP=%04x:%04x\n",
+              r[AX], seg[CS], ip, seg[SS], r[SP]);
         dpmi_interrupt();
-      else
+      } else
         dos_int(vector);
     }
     return;

@@ -449,7 +449,7 @@ $(DOS_TESTS): tools/BuildDosTests.py
 
 $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows2) $(WINDOWS2_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat other/Logo.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
-	dd if=/dev/zero of=$(INITRD) bs=1M count=128 status=none
+	dd if=/dev/zero of=$(INITRD) bs=1M count=200 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
 	mcopy -i $(INITRD) $(CMD) ::CMD.EXE
 	mcopy -i $(INITRD) $(KERNEL32) ::KERNEL32.DLL
@@ -498,6 +498,13 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-curl/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-feh/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-apk/root/* ::
+	# mcopy -s may omit empty source directories; apk needs these parents when
+	# it atomically renames newly installed package files into /usr/bin and
+	# /usr/lib. Check first because other staged packages may already populate
+	# either directory in the case-insensitive FAT image.
+	for d in USR/BIN USR/LIB; do \
+	    mdir -i $(INITRD) "::$$d" >/dev/null 2>&1 || mmd -i $(INITRD) "::$$d"; \
+	done
 	mcopy -i $(INITRD) $(BUILD)/UNAME.EXE ::USR/BIN/UNAME
 	mcopy -i $(INITRD) $(BUILD)/alpine-fastfetch/usr/bin/fastfetch ::USR/BIN/FASTFETCH
 	mmd -i $(INITRD) ::USR/SHARE/FASTFETCH ::USR/SHARE/HWDATA
@@ -535,9 +542,9 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	# Xorg writes its default log to /var/log/Xorg.0.log; the Alpine package
 	# owns /var/log, so the emulated C: root must provide it. FAT mirrors the
 	# Linux path /var/log as C:\var\log.
-	mmd -i $(INITRD) ::VAR
-	mmd -i $(INITRD) ::VAR/LOG
-	mmd -i $(INITRD) ::VAR/CACHE ::VAR/CACHE/APK
+	for d in VAR VAR/LOG VAR/CACHE VAR/CACHE/APK; do \
+	    mdir -i $(INITRD) "::$$d" >/dev/null 2>&1 || mmd -i $(INITRD) "::$$d"; \
+	done
 	if [ -n "$(IMAGE_PROGRAM)" ]; then mcopy -i $(INITRD) $(IMAGE_PROGRAM) ::$(PROGRAM); fi
 
 	@echo "  INITRD $(INITRD)"
