@@ -41,9 +41,9 @@ int main(int argc, char **argv) {
   assert(dos_command_is_win100_bin("C:\\WINDOWS1\\WIN100.BIN"));
   assert(dos_command_is_win100_bin("\"c:\\windows1\\win100.bin\" /n"));
   assert(!dos_command_is_win100_bin("C:\\WINDOWS1\\WIN.COM"));
-  assert(dos_command_is_win200_bin("C:\\WINDOWS2\\WIN200.BIN"));
-  assert(dos_command_is_win200_bin("\"c:\\windows2\\win200.bin\" /s"));
-  assert(!dos_command_is_win200_bin("C:\\WINDOWS2\\WIN.COM"));
+  assert(dos_command_is_win200_bin("C:\\WINDOWS3\\WIN200.BIN"));
+  assert(dos_command_is_win200_bin("\"c:\\windows3\\win200.bin\" /s"));
+  assert(!dos_command_is_win200_bin("C:\\WINDOWS3\\WIN.COM"));
   assert(!dos_command_is_win200_bin("C:\\WINDOWS1\\WIN100.BIN"));
   assert(!dos_command_is_win100_bin("C:\\DOOM\\DOOM.EXE"));
 
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
       ((U32)win2_image[0x3f] << 24);
   assert(win2_ne_offset + 2 <= (U32)win2_size);
   assert(win2_image[win2_ne_offset] == 'N' && win2_image[win2_ne_offset + 1] == 'E');
-  assert(DosIsImage("C:\\WINDOWS2\\WIN200.BIN", win2_image, (SIZE_T)win2_size));
+  assert(DosIsImage("C:\\WINDOWS3\\WIN200.BIN", win2_image, (SIZE_T)win2_size));
   free(win2_image);
   return 0;
 }
@@ -112,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='sv-dos-exec-') as directory:
     subprocess.run([os.environ.get('HOSTCC', 'cc'), '-std=c11', '-Wall', '-Wextra',
                     '-Werror', str(cfile), '-o', str(exe)], check=True)
     subprocess.run([str(exe), str(root / 'user/d/windows1/WIN100.BIN'),
-                    str(root / 'user/d/windows2/WIN200.BIN')], check=True)
+                    str(root / 'user/d/windows3/WIN200.BIN')], check=True)
 
 interrupt = (root / 'kernel/dos/Interrupt.c').read_text()
 assert 'parent->Dos4gImage && parent->ExecDepth == 0' in interrupt
@@ -126,11 +126,11 @@ win_com = (root / 'user/d/windows1/WIN.COM').read_bytes()
 assert b'\xB8\x00\x4B\xCD\x21' in win_com  # WIN.COM EXECs WIN100.BIN via INT 21h/4B00h
 assert 'r[AX] = current()->DosVersion;' in interrupt
 makefile = (root / 'Makefile').read_text()
-assert 'WINDOWS2_FILES := $(sort $(wildcard user/d/windows2/*))' in makefile
-assert (root / 'user/d/windows2/WIN200.OVL').is_file()
-assert (root / 'user/d/windows2/WIN.COM').is_file()
-assert '::WINDOWS2/' in makefile and 'user/d/win2.bat ::WIN2.BAT' in makefile
-assert (root / 'user/d/win2.bat').read_bytes().startswith(b'@echo off\r\ncd \\windows2\r\n')
+assert 'WINDOWS3_FILES := $(sort $(wildcard user/d/windows3/*))' in makefile
+assert (root / 'user/d/windows3/WIN200.OVL').is_file()
+assert (root / 'user/d/windows3/WIN.COM').is_file()
+assert '::WINDOWS3/' in makefile and 'user/d/win2.bat ::WIN2.BAT' in makefile
+assert (root / 'user/d/win2.bat').read_bytes().startswith(b'@echo off\r\ncd \\windows3\r\n')
 assert 'image[pe + 1] == ' in source or "image[pe + 1] == 'E'" in source
 
 doom = (root / 'user/d/doom/doom.exe').read_bytes()

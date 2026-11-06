@@ -80,12 +80,12 @@ MZ, conventional-memory and DPMI host-discovery probes from `C:\TESTS`.
 DPMI transition and the first virtual PC I/O access. This is a useful startup
 smoke test, not proof that the entire game is playable.
 
-The supplied Russian Windows 3.1 files are staged under `C:\WINDOWS2` for
+The supplied Russian Windows 3.1 files are staged under `C:\WINDOWS3` for
 backward compatibility with the existing payload directory. Start them with
 `C:\>WIN2` or `C:\>WIN3`; both launch standard 286 mode (`WIN.COM /S`) because
 the payload contains `KRNL286.EXE` and does not include the enhanced-mode
 `WIN386.EXE`.
-The DOS environment includes `C:\WINDOWS2\SYSTEM` in `PATH`, which lets
+The DOS environment includes `C:\WINDOWS3\SYSTEM` in `PATH`, which lets
 `WIN.COM` locate `DOSX.EXE`; DOSX's real-mode `0F 00` system-selector probes
 are also modeled. In QEMU, `WIN3` now passes those startup checks and displays
 the Windows 3.1 splash screen, but still does not reach Program Manager.

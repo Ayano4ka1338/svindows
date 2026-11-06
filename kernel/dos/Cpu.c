@@ -1617,7 +1617,8 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   }
   U8 cs_flags = vm->SegmentCache[CS].Flags;
   vm->CurrentInstructionIp = vm->Eip;
-  int operand32 = !!(cs_flags & 4u), address32 = !!(cs_flags & 4u);
+  int default32 = !!(cs_flags & 4u);
+  int operand32 = default32, address32 = default32;
   int segment_override = -1, rep = 0;
   U8 op = (U8)protected_fetch(vm, 1);
   for (unsigned count = 0; count < 15 && vm->Running; count++) {
@@ -1627,8 +1628,10 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
     else if (op == 0x3e) segment_override = DS;
     else if (op == 0x64) segment_override = FS;
     else if (op == 0x65) segment_override = GS;
-    else if (op == 0x66) operand32 = !operand32;
-    else if (op == 0x67) address32 = !address32;
+    /* Repeated size-override prefixes are idempotent. Toggle relative to
+     * the code segment's default size, not relative to the prior prefix. */
+    else if (op == 0x66) operand32 = !default32;
+    else if (op == 0x67) address32 = !default32;
     else if (op == 0xf2 || op == 0xf3) rep = op;
     else if (op == 0xf0) { }
     else break;
@@ -1853,6 +1856,16 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   if (op == 0x99) {
     pm_set_register(vm, DX, width, operand32 ? (vm->Registers32[AX] & 0x80000000u ? 0xffffffffu : 0u)
                                            : (vm->Registers[AX] & 0x8000u ? 0xffffu : 0u));
+    return;
+  }
+  if (op == 0x9e) { /* SAHF */
+    vm->Eflags = (vm->Eflags & ~0xd5u) |
+                 (pm_register(vm, 4, 8) & 0xd5u) | 2u;
+    vm->Flags = (U16)vm->Eflags;
+    return;
+  }
+  if (op == 0x9f) { /* LAHF */
+    pm_set_register(vm, 4, 8, vm->Eflags);
     return;
   }
   /* The DOS4G stub and many 16-bit runtimes issue these legacy x87

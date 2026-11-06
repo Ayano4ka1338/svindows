@@ -1,4 +1,4 @@
 @echo off
-cd \windows2
+cd \windows3
 win.com /s
 cd \
