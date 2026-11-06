@@ -174,7 +174,7 @@ assert 'DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS_NAMES)),$
 assert 'WINDOWS1_FILES := $(sort $(wildcard user/d/windows1/*))' in makefile
 assert 'mcopy -i $(INITRD) $(DOOM_FILES) ::DOOM/' in makefile
 assert 'mcopy -i $(INITRD) $(WINDOWS1_FILES) ::WINDOWS1/' in makefile
-assert 'mcopy -i $(INITRD) $(WINDOWS2_FILES) ::WINDOWS2/' in makefile
+assert 'mcopy -i $(INITRD) $(WINDOWS3_FILES) ::WINDOWS3/' in makefile
 assert 'mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT' in makefile
 assert 'mcopy -i $(INITRD) user/d/win.bat ::WIN.BAT' in makefile
 overlay = (windows_dir / 'WIN100.OVL').read_bytes()
@@ -187,10 +187,10 @@ assert 'r[AX] = current()->DosVersion;' in (root / 'kernel/dos/Interrupt.c').rea
 assert 'r[BX] = 0x0005' in (root / 'kernel/dos/Interrupt.c').read_text()
 assert (root / 'user/d/win.bat').read_bytes().replace(b'\r\n', b'\n').decode().splitlines() == ['@echo off', 'cd \\windows1', 'win.com', 'cd \\']
 assert 'user/d/windows101' not in makefile
-windows2 = root / 'user/d/windows2'
-assert {'WIN.COM', 'WIN200.BIN', 'WIN200.OVL'}.issubset({p.name.upper() for p in windows2.iterdir() if p.is_file()})
-assert not (windows2 / 'CTMOUSE.EXE').exists()
-assert 'CTMOUSE' not in (windows2 / 'AUTOEXEC.BAT').read_text(encoding='ascii').upper()
+windows3 = root / 'user/d/windows3'
+assert {'WIN.COM', 'WIN200.BIN', 'WIN200.OVL'}.issubset({p.name.upper() for p in windows3.iterdir() if p.is_file()})
+assert not (windows3 / 'CTMOUSE.EXE').exists()
+assert 'CTMOUSE' not in (windows3 / 'AUTOEXEC.BAT').read_text(encoding='ascii').upper()
 assert 'CTMOUSE' not in (root / 'user/d/win2.bat').read_text(encoding='ascii').upper()
-assert 'WINDOWS2_FILES := $(sort $(wildcard user/d/windows2/*))' in makefile
+assert 'WINDOWS3_FILES := $(sort $(wildcard user/d/windows3/*))' in makefile
 print('PASS DOS VGA planes, CGA scanline banks, BIOS EGA palette, Windows 1.x/2.x staging, cursor path, and SETVER versions')

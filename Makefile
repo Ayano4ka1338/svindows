@@ -146,10 +146,10 @@ ALPINE_APK := $(BUILD)/alpine-apk/.ready
 # share names but must never overwrite one another on the FAT image.
 WINDOWS1_FILES := $(sort $(wildcard user/d/windows1/*))
 WINDOWS1_NAMES := $(notdir $(WINDOWS1_FILES))
-WINDOWS2_FILES := $(shell find user/d/windows2 -type f -print | sort)
-WINDOWS2_DIRS := $(shell find user/d/windows2 -mindepth 1 -type d -print | sort)
-WINDOWS2_NAMES := $(notdir $(WINDOWS2_FILES))
-WINDOWS_NAMES := $(sort $(WINDOWS1_NAMES) $(WINDOWS2_NAMES))
+WINDOWS3_FILES := $(shell find user/d/windows3 -type f -print | sort)
+WINDOWS3_DIRS := $(shell find user/d/windows3 -mindepth 1 -type d -print | sort)
+WINDOWS3_NAMES := $(notdir $(WINDOWS3_FILES))
+WINDOWS_NAMES := $(sort $(WINDOWS1_NAMES) $(WINDOWS3_NAMES))
 # Filter the Windows names as well, so stale copies cannot leak under C:\DOOM.
 DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS_NAMES)),$(sort $(wildcard user/d/doom/*)))
 LLDLINK    := lld-link
@@ -447,7 +447,7 @@ $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFe
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows2) $(WINDOWS2_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat other/Logo.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows3) $(WINDOWS3_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat other/Logo.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(INITRD) bs=1M count=200 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
@@ -471,15 +471,15 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	if [ -f "$(COMCTL32)" ]; then mcopy -i $(INITRD) $(COMCTL32) ::WINDOWS/SYSTEM32/COMCTL32.DLL; fi
 	mcopy -i $(INITRD) $(COMMAND_BINS) ::
 	# Keep each Windows release together; root batch files are launchers.
-	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS2
+	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS3
 	if [ -n "$(WINDOWS1_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS1_FILES) ::WINDOWS1/; fi
-	for d in $(WINDOWS2_DIRS); do \
-	    rel=$${d#user/d/windows2/}; \
-	    mmd -i $(INITRD) "::WINDOWS2/$$rel"; \
+	for d in $(WINDOWS3_DIRS); do \
+	    rel=$${d#user/d/windows3/}; \
+	    mmd -i $(INITRD) "::WINDOWS3/$$rel"; \
 	done
-	for f in $(WINDOWS2_FILES); do \
-	    rel=$${f#user/d/windows2/}; \
-	    mcopy -i $(INITRD) "$$f" "::WINDOWS2/$$rel"; \
+	for f in $(WINDOWS3_FILES); do \
+	    rel=$${f#user/d/windows3/}; \
+	    mcopy -i $(INITRD) "$$f" "::WINDOWS3/$$rel"; \
 	done
 	mcopy -i $(INITRD) user/d/win.bat ::WIN.BAT
 	mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT
@@ -563,7 +563,7 @@ dos-vm-check:
 	python3 tools/checks/DosMemoryChecks.py
 	python3 tools/checks/DosMultiplexChecks.py
 	python3 tools/checks/DosPspTerminationChecks.py
-	python3 tools/checks/DosExecChecks.py user/d/windows1/WIN100.BIN user/d/windows2/WIN200.BIN
+	python3 tools/checks/DosExecChecks.py user/d/windows1/WIN100.BIN user/d/windows3/WIN200.BIN
 	python3 tools/checks/DosVmChecks.py
 	python3 tools/checks/DosCpuChecks.py
 	python3 tools/checks/DosLoaderChecks.py

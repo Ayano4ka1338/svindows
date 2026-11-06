@@ -30,20 +30,20 @@ static BOOLEAN dos_command_is_windows31(const char *command) {
   const char *end = start;
   while (*end && *end != '"' && *end != ' ' && *end != '\t') end++;
   const char *base = start;
-  BOOLEAN windows2 = FALSE;
+  BOOLEAN windows3 = FALSE;
   for (const char *p = start; p < end; p++) {
     if (*p == '\\' || *p == '/') base = p + 1;
-    static const char directory[] = "WINDOWS2";
+    static const char directory[] = "WINDOWS3";
     unsigned i;
     for (i = 0; i < sizeof(directory) - 1u && p + i < end; i++) {
       char ch = p[i];
       if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
       if (ch != directory[i]) break;
     }
-    if (i == sizeof(directory) - 1u) windows2 = TRUE;
+    if (i == sizeof(directory) - 1u) windows3 = TRUE;
   }
   (void)base;
-  return windows2;
+  return windows3;
 }
 
 U32 DosImageHash(const U8 *image, U32 size) {
@@ -397,12 +397,12 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
       ww(PSP, (U16)(field + 2u), rw(0, (U16)(vector * 4u + 2u)));
     }
     /* Windows 3.1 standard mode locates DOSX.EXE through PATH.  The launcher
-     * runs from C:\\WINDOWS2, while DOSX.EXE is installed in SYSTEM; keep the
+     * runs from C:\\WINDOWS3, while DOSX.EXE is installed in SYSTEM; keep the
      * drive root searchable too for ordinary DOS programs. */
     static const U8 prefix[] =
-      "PATH=C:\\;C:\\WINDOWS2\\SYSTEM\0"
-      "TEMP=C:\\WINDOWS2\0"
-      "TMP=C:\\WINDOWS2\0\0\1";
+      "PATH=C:\\;C:\\WINDOWS3\\SYSTEM\0"
+      "TEMP=C:\\WINDOWS3\0"
+      "TMP=C:\\WINDOWS3\0\0\1";
     U32 base = (U32)DOS_ENV_SEGMENT << 4;
     memcpy(vm->Memory + base, prefix, sizeof(prefix));
     unsigned i = 0;
