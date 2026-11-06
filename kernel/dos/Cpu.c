@@ -15,6 +15,9 @@ static __attribute__((always_inline)) inline int protected_linear(
 static int pm_write(DOS_VM *vm, unsigned s, U32 offset, unsigned width, U32 value);
 static U32 pm_read(DOS_VM *vm, unsigned s, U32 offset, unsigned width);
 static U32 pm_stack_pointer(DOS_VM *vm);
+static void pm_set_stack_pointer(DOS_VM *vm, U32 value);
+static int pm_push(DOS_VM *vm, U32 value, unsigned width);
+static int queue_protected_fault(DOS_VM *vm, U8 vector, U16 error);
 
 static U8 fetch8(void) {
   U8 v = rb(seg[CS], ip);
@@ -36,13 +39,13 @@ static void write32(U16 s, U32 o, U32 v) {
   ww(s, o, (U16)v);
   ww(s, o + 2u, (U16)(v >> 16));
 }
-static int read_descriptor(U16 selector, DOS_DESCRIPTOR *out) {
+static int read_descriptor_impl(U16 selector, DOS_DESCRIPTOR *out, int require_present) {
   U32 index = selector & 0xfff8u;
   if (selector & 4u) {
     U32 slot = index >> 3;
     if (slot < 128 && current()->DpmiDescriptorUsed[slot]) {
       *out = current()->DpmiDescriptors[slot];
-      return out->Valid;
+      return !require_present || out->Valid;
     }
     if (!current()->Ldtr || !current()->LdtCache.Valid)
       return 0;
@@ -64,7 +67,7 @@ static int read_descriptor(U16 selector, DOS_DESCRIPTOR *out) {
       limit = (limit << 12) | 0xfffu;
     out->Limit = limit;
     out->Valid = !!(out->Access & 0x80u);
-    return out->Valid;
+    return !require_present || out->Valid;
   }
   DOS_TABLE_REGISTER *table = &current()->Gdtr;
   if (!table || index > table->Limit || table->Limit - index < 7)
@@ -84,8 +87,26 @@ static int read_descriptor(U16 selector, DOS_DESCRIPTOR *out) {
     limit = (limit << 12) | 0xfffu;
   out->Limit = limit;
   out->Valid = !!(out->Access & 0x80u);
-  return out->Valid;
+  return !require_present || out->Valid;
 }
+static int read_descriptor(U16 selector, DOS_DESCRIPTOR *out) {
+  return read_descriptor_impl(selector, out, 1);
+}
+static int read_descriptor_raw(U16 selector, DOS_DESCRIPTOR *out) {
+  return read_descriptor_impl(selector, out, 0);
+}
+
+static int verify_selector(U16 selector, int write) {
+  DOS_DESCRIPTOR d;
+  if (!(selector & 0xfffcu) || !read_descriptor_raw(selector, &d) || !(d.Access & 0x10u)) return 0;
+  int code = !!(d.Access & 8u);
+  if (write ? (code || !(d.Access & 2u)) : (code && !(d.Access & 2u))) return 0;
+  U8 cpl = current()->ProtectedMode ? current()->Cpl : 0;
+  U8 dpl = (d.Access >> 5) & 3u;
+  if (!(code && (d.Access & 4u)) && (dpl < cpl || dpl < (selector & 3u))) return 0;
+  return 1;
+}
+
 static void dpmi_result(U16 error) {
   DOS_VM *vm = current();
   if (error)
@@ -501,6 +522,7 @@ static void dpmi_initial_switch(void) {
   vm->SegmentCache[ES] = vm->DpmiDescriptors[(selectors[3] & 0xfff8u) >> 3];
   memset(&vm->SegmentCache[FS], 0, sizeof(DOS_DESCRIPTOR));
   memset(&vm->SegmentCache[GS], 0, sizeof(DOS_DESCRIPTOR));
+  vm->Cpl = selectors[0] & 3u;
   vm->ProtectedMode = TRUE;
   vm->DpmiClient32 = (BOOLEAN)client32;
   vm->DpmiHostSelector = selectors[4];
@@ -557,6 +579,7 @@ static void dpmi_raw_to_protected(void) {
   vm->Eflags = (vm->Eflags & 0xffff0000u) | vm->Flags;
   vm->Registers32[SP] = r32[BX];
   vm->Registers[SP] = (U16)r32[BX];
+  vm->Cpl = selectors[0] & 3u;
   vm->ProtectedMode = TRUE;
   vm->Cr0 |= 1u;
 }
@@ -564,6 +587,13 @@ static int load_segment(unsigned index, U16 selector) {
   if (index >= 6)
     return 0;
   DOS_DESCRIPTOR *cache = &current()->SegmentCache[index];
+  if (!(current()->Cr0 & 1u)) {
+    *cache = (DOS_DESCRIPTOR){.Base = (U32)selector << 4, .Limit = 0xffffu,
+      .Access = index == CS ? 0x9bu : 0x93u, .Valid = TRUE};
+    seg[index] = selector;
+    if (index == CS) { current()->ProtectedMode = FALSE; current()->Cpl = 0; }
+    return 1;
+  }
   if (!(selector & 0xfff8u) && !(selector & 4u)) {
     if (index == CS || index == SS)
       return 0;
@@ -578,7 +608,7 @@ static int load_segment(unsigned index, U16 selector) {
   U8 type = descriptor.Access & 0x0fu;
   int executable = !!(type & 8u), readable = !!(type & 2u), writable = !!(type & 2u);
   U8 dpl = (descriptor.Access >> 5) & 3u;
-  U8 cpl = seg[CS] & 3u, rpl = selector & 3u;
+  U8 cpl = current()->Cpl, rpl = selector & 3u;
   if (index == CS) {
     int conforming = executable && !!(type & 4u);
     if (!executable || (conforming ? dpl > cpl : (dpl != cpl || rpl > cpl)))
@@ -610,13 +640,13 @@ static int enter_protected_mode(U32 cr0) {
       vm->SegmentCache[i].Flags = 0;
       vm->SegmentCache[i].Valid = TRUE;
     }
+    vm->Cpl = 0;
     vm->Eip = vm->Ip;
     vm->Eflags = (vm->Eflags & 0xffff0000u) | vm->Flags;
     vm->ProtectedMode = TRUE;
   } else if ((vm->Cr0 & 1u) && !(cr0 & 1u)) {
-    vm->ProtectedMode = FALSE;
-    vm->Ip = (U16)vm->Eip;
-    memset(vm->SegmentCache, 0, sizeof(vm->SegmentCache));
+    /* Keep decoding through the cached CS until the real-mode far jump.
+     * DOSX clears PE before that jump; CS is still a protected selector. */
   }
   vm->Cr0 = cr0;
   return 1;
@@ -650,7 +680,7 @@ static __attribute__((always_inline)) inline int protected_linear(
     *linear = offset;
     return 1;
   }
-  if (type & 4u) {
+  if (!executable && (type & 4u)) {
     U32 lower = d->Limit + 1u;
     U32 upper = (d->Flags & 4u) ? 0xffffffffu : 0xffffu;
     if (offset < lower || last > upper)
@@ -736,6 +766,19 @@ static int dos_string_span(DOS_VM *vm, unsigned segment, U32 cursor,
   return 1;
 }
 
+static int queue_protected_fault(DOS_VM *vm, U8 vector, U16 error) {
+  if (vm->PendingException) return 1;
+  U32 slot = (U32)vector * 8u;
+  if (vm->DpmiHostSelector || slot + 7u > vm->Idtr.Limit ||
+      vm->Idtr.Base > MEM_SIZE - slot - 8u) return 0;
+  U8 access = vm->Memory[vm->Idtr.Base + slot + 5u];
+  if (!(access & 0x80u) || ((access & 15u) != 6u && (access & 15u) != 7u &&
+                           (access & 15u) != 14u && (access & 15u) != 15u)) return 0;
+  vm->PendingException = vector + 1u;
+  vm->PendingExceptionError = error;
+  return 1;
+}
+
 static U8 protected_read8(DOS_VM *vm, unsigned s, U32 o, int execute_access) {
   U32 a;
   if (!protected_linear(vm, s, o, 1, 0, execute_access, &a)) {
@@ -746,6 +789,7 @@ static U8 protected_read8(DOS_VM *vm, unsigned s, U32 o, int execute_access) {
   return vm->Memory[a];
 }
 static __attribute__((always_inline)) inline U32 protected_fetch(DOS_VM *vm, unsigned width) {
+  if (vm->PendingException) return 0;
   U32 linear;
   int code32 = !!(vm->SegmentCache[CS].Flags & 4u);
 
@@ -828,6 +872,7 @@ static __attribute__((always_inline)) inline void pm_set_register(DOS_VM *vm, un
   vm->Registers[low_index] = (U16)vm->Registers32[low_index];
 }
 static U32 pm_read(DOS_VM *vm, unsigned s, U32 offset, unsigned width) {
+  if (vm->PendingException) return 0;
   U32 linear;
   unsigned size = width / 8;
   if (!protected_linear(vm, s, offset, size, 0, 0, &linear)) {
@@ -844,7 +889,8 @@ static U32 pm_read(DOS_VM *vm, unsigned s, U32 offset, unsigned width) {
             vm->Memory[code], vm->Memory[code + 1], vm->Memory[code + 2], vm->Memory[code + 3],
             vm->Memory[code + 4], vm->Memory[code + 5], vm->Memory[code + 6], vm->Memory[code + 7],
             vm->Memory[code + 8], vm->Memory[code + 9], vm->Memory[code + 10], vm->Memory[code + 11]);
-    fail("DOSVM: protected memory read fault\r\n");
+    if (!queue_protected_fault(vm, s == SS ? 12 : 13, 0))
+      fail("DOSVM: protected memory read fault\r\n");
     return 0;
   }
   /* VGA planar reads need the virtual latches/plane selection.  In the
@@ -852,7 +898,7 @@ static U32 pm_read(DOS_VM *vm, unsigned s, U32 offset, unsigned width) {
    * and ordinary unaligned loads are both correct and much cheaper. */
   if (linear + size <= 0xa0000u || linear >= 0xb0000u ||
       (linear >= 0xa0000u && linear + size <= 0xb0000u &&
-       !(vm->VideoMode == 0x13u && !(vm->VgaSequencer[4] & 8u)))) {
+       vm->VideoMode == 0x13u && (vm->VgaSequencer[4] & 8u))) {
     U32 value = 0;
     value = dos_guest_load(vm->Memory + linear, size);
     return value;
@@ -867,6 +913,7 @@ static U32 pm_read(DOS_VM *vm, unsigned s, U32 offset, unsigned width) {
   return value;
 }
 static int pm_write(DOS_VM *vm, unsigned s, U32 offset, unsigned width, U32 value) {
+  if (vm->PendingException) return 0;
   U32 linear;
   unsigned size = width / 8;
   if (!protected_linear(vm, s, offset, size, 1, 0, &linear)) {
@@ -875,7 +922,8 @@ static int pm_write(DOS_VM *vm, unsigned s, U32 offset, unsigned width, U32 valu
           vm->Segments[CS], vm->Eip, vm->CurrentOpcode,
           vm->CurrentInstructionIp, vm->Segments[s], offset, width,
           d->Base, d->Limit, d->Access, d->Flags, value);
-    fail("DOSVM: protected memory write fault\r\n");
+    if (!queue_protected_fault(vm, s == SS ? 12 : 13, 0))
+      fail("DOSVM: protected memory write fault\r\n");
     return 0;
   }
   if (linear + size <= 0xa0000u || linear >= 0xb0000u) {
@@ -902,6 +950,14 @@ static int pm_write(DOS_VM *vm, unsigned s, U32 offset, unsigned width, U32 valu
   }
   return 1;
 }
+static void pm_xlat(DOS_VM *vm, unsigned segment, int address32) {
+  U32 offset = (address32 ? vm->Registers32[BX] : vm->Registers[BX]) +
+               (U8)vm->Registers[AX];
+  if (!address32) offset = (U16)offset;
+  U32 value = pm_read(vm, segment, offset, 8);
+  if (vm->Running && !vm->PendingException) pm_set_register(vm, AX, 8, value);
+}
+
 static U16 dpmi_copy_descriptor(U16 function) {
   DOS_VM *vm = current();
   U16 selector = (U16)r32[BX];
@@ -1141,12 +1197,27 @@ static inline int pm_write_rm(DOS_VM *vm, PM_MOD m, unsigned width, U32 value) {
   return pm_write(vm, m.segment, m.offset, width, value);
 }
 static int pm_load_segment(DOS_VM *vm, unsigned index, U16 selector) {
+  if (vm->PendingException) return 0;
   if (!load_segment(index, selector)) {
+    U32 debug_base = selector & 4u ? vm->LdtCache.Base : vm->Gdtr.Base;
+    U32 at = debug_base + (selector & 0xfff8u);
+    KeLog("[gdt] base=%08x limit=%04x desc=%08x %08x\n", debug_base, selector & 4u ? vm->LdtCache.Limit : vm->Gdtr.Limit,
+      at < MEM_SIZE-8 ? *(U32 *)(vm->Memory+at) : 0,
+      at < MEM_SIZE-8 ? *(U32 *)(vm->Memory+at+4) : 0);
     KeLog("[dos] protected segment load failed CS=%04x EIP=%08x op=%02x at %08x register=%u selector=%04x SP=%08x\n",
           vm->Segments[CS], vm->Eip, vm->CurrentOpcode,
           vm->CurrentInstructionIp, index, selector,
           pm_stack_pointer(vm));
-    fail("DOSVM: protected segment selector fault\r\n");
+    U8 vector = 13;
+    U32 table_base = selector & 4u ? vm->LdtCache.Base : vm->Gdtr.Base;
+    U32 table_limit = selector & 4u ? vm->LdtCache.Limit : vm->Gdtr.Limit;
+    U32 slot = selector & 0xfff8u;
+    if (slot && slot + 7u <= table_limit && table_base <= MEM_SIZE - slot - 8u) {
+      U8 access = vm->Memory[table_base + slot + 5u];
+      if ((access & 0x90u) == 0x10u) vector = index == SS ? 12 : 11;
+    }
+    if (!queue_protected_fault(vm, vector, selector & 0xfffcu))
+      fail("DOSVM: protected segment selector fault\r\n");
     return 0;
   }
   if (index == SS) {
@@ -1246,6 +1317,7 @@ static void pm_set_stack_pointer(DOS_VM *vm, U32 value) {
 }
 static int pm_push(DOS_VM *vm, U32 value, unsigned width) {
   U32 sp = pm_stack_pointer(vm) - width / 8;
+  if (!(vm->SegmentCache[SS].Flags & 4u)) sp = (U16)sp;
   pm_set_stack_pointer(vm, sp);
   return pm_write(vm, SS, sp, width, value);
 }
@@ -1259,15 +1331,68 @@ static U32 pm_pop(DOS_VM *vm, unsigned width) {
 static void pm_set_near_ip(DOS_VM *vm, U32 target, unsigned width) {
   vm->Eip = width == 16 ? (U16)target : target;
 }
+static int pm_far_call(DOS_VM *vm, U16 selector, U32 target, unsigned width) {
+  DOS_DESCRIPTOR gate;
+  if (read_descriptor(selector, &gate) && !(gate.Access & 0x10u) &&
+      ((gate.Access & 15u) == 4u || (gate.Access & 15u) == 12u)) {
+    U8 gate_dpl = (gate.Access >> 5) & 3u;
+    U32 table = selector & 4u ? vm->LdtCache.Base : vm->Gdtr.Base;
+    U32 at = table + (selector & 0xfff8u);
+    if (at > MEM_SIZE - 8 || gate_dpl < vm->Cpl || gate_dpl < (selector & 3u)) {
+      fail("DOSVM: call gate access fault\r\n"); return 0;
+    }
+    const U8 *g = vm->Memory + at;
+    unsigned gw = (gate.Access & 15u) == 4u ? 16u : 32u;
+    U16 code_sel = word(g + 2);
+    U32 code_ip = word(g) | (gw == 32u ? (U32)word(g + 6) << 16 : 0);
+    DOS_DESCRIPTOR code;
+    if (!read_descriptor(code_sel, &code) || (code.Access & 0x18u) != 0x18u ||
+        code_ip > code.Limit) { fail("DOSVM: invalid call gate target\r\n"); return 0; }
+    U8 level = (code.Access >> 5) & 3u;
+    if (level > vm->Cpl) { fail("DOSVM: call gate privilege fault\r\n"); return 0; }
+    U16 old_cs = vm->Segments[CS]; U32 old_ip = vm->Eip;
+    if (!(code.Access & 4u) && level < vm->Cpl) {
+      DOS_DESCRIPTOR tss, stack;
+      U32 args[31], count = g[4] & 31u;
+      U16 old_ss = vm->Segments[SS]; U32 old_sp = pm_stack_pointer(vm);
+      if (!read_descriptor(vm->Tr, &tss)) { fail("DOSVM: call gate needs TSS\r\n"); return 0; }
+      int t32 = (tss.Access & 8u) != 0;
+      U32 slot = t32 ? 4u + level * 8u : 2u + level * 4u;
+      if (slot + (t32 ? 6u : 4u) > tss.Limit + 1u || tss.Base > MEM_SIZE - slot - 6u) {
+        fail("DOSVM: call gate TSS limit\r\n"); return 0;
+      }
+      const U8 *t = vm->Memory + tss.Base + slot;
+      U32 new_sp = word(t) | (t32 ? (U32)word(t + 2) << 16 : 0);
+      U16 new_ss = word(t + (t32 ? 4u : 2u));
+      if (!read_descriptor(new_ss, &stack) || (stack.Access & 0x1au) != 0x12u ||
+          ((stack.Access >> 5) & 3u) != level || (new_ss & 3u) != level) {
+        fail("DOSVM: invalid call gate stack\r\n"); return 0;
+      }
+      for (U32 i = 0; i < count; i++) args[i] = pm_read(vm, SS, old_sp + i * (gw / 8u), gw);
+      vm->Cpl = level; vm->Segments[SS] = new_ss; vm->SegmentCache[SS] = stack;
+      pm_set_stack_pointer(vm, new_sp);
+      if (!pm_push(vm, old_ss, gw) || !pm_push(vm, old_sp, gw)) return 0;
+      for (U32 i = count; i; i--) if (!pm_push(vm, args[i - 1], gw)) return 0;
+    }
+    if (!pm_push(vm, old_cs, gw) || !pm_push(vm, old_ip, gw)) return 0;
+    vm->Segments[CS] = (code_sel & ~3u) | vm->Cpl;
+    vm->SegmentCache[CS] = code; vm->Eip = code_ip;
+    return 1;
+  }
+  if (!pm_push(vm, vm->Segments[CS], width) || !pm_push(vm, vm->Eip, width)) return 0;
+  if (!pm_load_segment(vm, CS, selector)) return 0;
+  vm->Eip = target; return 1;
+}
+
 static int protected_interrupt(U8 vector, int software, unsigned width) {
   DOS_VM *vm = current();
-  if (vector == 0x31 && software) {
+  if (vector == 0x31 && software && vm->DpmiHostSelector) {
     dpmi_interrupt();
     return 1;
   }
   /* Route the INT 33h reset/install check to the emulated DOS mouse driver
    * when the protected-mode client has no replacement vector. */
-  if (software && vector == 0x33 && !vm->DpmiPmVectorSelector[vector]) {
+  if (software && vector == 0x33 && vm->DpmiHostSelector && !vm->DpmiPmVectorSelector[vector]) {
     U16 function = (U16)r32[AX];
     if (function == 0 || function == 0x21) {
       DosMouseInitialize(vm);
@@ -1311,7 +1436,7 @@ static int protected_interrupt(U8 vector, int software, unsigned width) {
     fail("DOSVM: invalid protected interrupt gate\r\n");
     return 0;
   }
-  if (software && (seg[CS] & 3u) > dpl) {
+  if (software && (current()->Cpl) > dpl) {
     fail("DOSVM: protected interrupt privilege fault\r\n");
     return 0;
   }
@@ -1319,10 +1444,35 @@ static int protected_interrupt(U8 vector, int software, unsigned width) {
   U32 target = (U32)gate[0] | ((U32)gate[1] << 8);
   if (type == 0x0eu || type == 0x0fu)
     target |= (U32)gate[6] << 16 | (U32)gate[7] << 24;
-  if ((selector & 3u) != (seg[CS] & 3u)) {
-    fail("DOSVM: interrupt privilege stack switching requires a TSS\r\n");
-    return 0;
+  width = (type == 0x06u || type == 0x07u) ? 16u : 32u;
+  DOS_DESCRIPTOR code;
+  if (!read_descriptor(selector, &code) || (code.Access & 0x18u) != 0x18u) {
+    fail("DOSVM: invalid interrupt code selector\r\n"); return 0;
   }
+  U8 level = (code.Access >> 5) & 3u;
+  if (!(code.Access & 4u) && level < vm->Cpl) {
+    DOS_DESCRIPTOR tss, stack;
+    if (!read_descriptor(vm->Tr, &tss)) { fail("DOSVM: interrupt needs TSS\r\n"); return 0; }
+    int t32 = (tss.Access & 8u) != 0;
+    U32 slot = t32 ? 4u + level * 8u : 2u + level * 4u;
+    if (slot + (t32 ? 6u : 4u) > tss.Limit + 1u || tss.Base > MEM_SIZE - slot - 6u) {
+      fail("DOSVM: interrupt TSS limit\r\n"); return 0;
+    }
+    const U8 *t = mem + tss.Base + slot;
+    U32 new_sp = word(t) | (t32 ? (U32)word(t + 2) << 16 : 0);
+    U16 new_ss = word(t + (t32 ? 4u : 2u));
+    if (!read_descriptor(new_ss, &stack) || (stack.Access & 0x1au) != 0x12u ||
+        ((stack.Access >> 5) & 3u) != level || (new_ss & 3u) != level) {
+      fail("DOSVM: invalid interrupt stack\r\n"); return 0;
+    }
+    U16 old_ss = seg[SS]; U32 old_sp = pm_stack_pointer(vm);
+    vm->Cpl = level; seg[SS] = new_ss; vm->SegmentCache[SS] = stack;
+    pm_set_stack_pointer(vm, new_sp);
+    if (!pm_push(vm, old_ss, width) || !pm_push(vm, old_sp, width)) return 0;
+  } else if (!(code.Access & 4u) && level != vm->Cpl) {
+    fail("DOSVM: invalid interrupt privilege level\r\n"); return 0;
+  }
+  selector = (selector & ~3u) | vm->Cpl;
   U32 old_flags = vm->Eflags;
   U16 old_cs = seg[CS];
   U32 old_ip = vm->Eip;
@@ -1380,6 +1530,15 @@ static int dos_timer_irq_due(DOS_VM *vm) {
   return 1;
 }
 
+static int pm_irq_installed(DOS_VM *vm, U8 vector) {
+  if (vm->DpmiPmVectorSelector[vector]) return 1;
+  U32 slot = (U32)vector * 8u;
+  if (vm->DpmiHostSelector || slot + 7u > vm->Idtr.Limit || vm->Idtr.Base > MEM_SIZE - slot - 8u) return 0;
+  U8 access = vm->Memory[vm->Idtr.Base + slot + 5u];
+  U8 type = access & 15u;
+  return (access & 0x80u) && (type == 6 || type == 7 || type == 14 || type == 15);
+}
+
 static int dos_dispatch_hardware(DOS_VM *vm) {
   if (!vm) return 0;
   dos_timer_update(vm);
@@ -1394,11 +1553,11 @@ static int dos_dispatch_hardware(DOS_VM *vm) {
   U8 serial2_vector = (U8)(vm->PicMasterVectorBase + 3u);
   U8 serial_vector = (U8)(vm->PicMasterVectorBase + 4u);
   if (vm->ProtectedMode) {
-    if (vm->DpmiPmVectorSelector[timer_vector] &&
+    if (pm_irq_installed(vm, timer_vector) &&
         !(vm->PicMasterMask & 0x01u) && dos_timer_irq_due(vm))
       return protected_interrupt(timer_vector, 0,
                                  vm->DpmiClient32 ? 32u : 16u);
-    if (vm->DpmiPmVectorSelector[keyboard_vector] &&
+    if (pm_irq_installed(vm, keyboard_vector) &&
         !(vm->PicMasterMask & 0x02u) && !vm->KeyboardDataReady) {
       UINT32 event;
       while (KbdReadMirroredInputEvent(&event)) {
@@ -1410,11 +1569,11 @@ static int dos_dispatch_hardware(DOS_VM *vm) {
                                    vm->DpmiClient32 ? 32u : 16u);
       }
     }
-    if (vm->DpmiPmVectorSelector[serial2_vector] &&
+    if (pm_irq_installed(vm, serial2_vector) &&
         !(vm->PicMasterMask & 0x08u) && DosSerialMouseIrqPending(vm, 0))
       return protected_interrupt(serial2_vector, 0,
                                  vm->DpmiClient32 ? 32u : 16u);
-    if (vm->DpmiPmVectorSelector[serial_vector] &&
+    if (pm_irq_installed(vm, serial_vector) &&
         !(vm->PicMasterMask & 0x10u) && DosSerialMouseIrqPending(vm, 1))
       return protected_interrupt(serial_vector, 0,
                                  vm->DpmiClient32 ? 32u : 16u);
@@ -1769,6 +1928,10 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
     vm->Flags = (U16)vm->Eflags;
     return;
   }
+  if (op == 0xd7) {
+    pm_xlat(vm, segment_override >= 0 ? (unsigned)segment_override : DS, address32);
+    return;
+  }
   if (op >= 0xa0 && op <= 0xa3) {
     U32 offset = protected_fetch(vm, address32 ? 4 : 2);
     unsigned w = (op & 1u) ? width : 8;
@@ -1888,7 +2051,10 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
     if ((op <= 0x3b && !(op & 1u)) || op == 0x84 || op == 0x86 ||
         op == 0x88 || op == 0x8a || op == 0x80 || op == 0x82 || op == 0xc6)
       w = 8;
-    U32 a = pm_read_rm(vm, m, w), b = pm_register(vm, m.reg, w), result;
+    U32 a = (op == 0x89 || op == 0x88 || op == 0xc6 || op == 0xc7)
+              ? 0 : pm_read_rm(vm, m, w);
+    if (!vm->Running) return;
+    U32 b = pm_register(vm, m.reg, w), result;
     if (op == 0x89 || op == 0x88) pm_write_rm(vm, m, w, b);
     else if (op == 0x8b || op == 0x8a) pm_set_register(vm, m.reg, w, a);
     else if (op == 0x86 || op == 0x87) {
@@ -2013,15 +2179,23 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   if (op == 0xcb || op == 0xca) {
     U32 target = pm_pop(vm, width);
     U16 selector = (U16)pm_pop(vm, width);
-    if (op == 0xca) pm_set_stack_pointer(vm, pm_stack_pointer(vm) + (U16)protected_fetch(vm, 2));
-    if (pm_load_segment(vm, CS, selector)) vm->Eip = target;
+    U16 discard = op == 0xca ? (U16)protected_fetch(vm, 2) : 0;
+    pm_set_stack_pointer(vm, pm_stack_pointer(vm) + discard);
+    if ((selector & 3u) > vm->Cpl) {
+      U32 new_sp = pm_pop(vm, width);
+      U16 new_ss = (U16)pm_pop(vm, width);
+      vm->Cpl = selector & 3u;
+      if (!pm_load_segment(vm, CS, selector) || !pm_load_segment(vm, SS, new_ss)) return;
+      pm_set_stack_pointer(vm, new_sp + discard);
+      vm->Eip = target;
+    } else if (pm_load_segment(vm, CS, selector)) vm->Eip = target;
     return;
   }
   if (op == 0xcf) {
     U32 target = pm_pop(vm, width);
     U16 selector = (U16)pm_pop(vm, width);
     U32 new_flags = pm_pop(vm, width);
-    U8 old_cpl = vm->Segments[CS] & 3u, new_cpl = selector & 3u;
+    U8 old_cpl = vm->Cpl, new_cpl = selector & 3u;
     U32 new_sp = 0;
     U16 new_ss = 0;
     /* IRET to an outer privilege level has a five-field frame. DOS extenders
@@ -2053,6 +2227,7 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
         fail("DOSVM: invalid protected IRET stack selector\r\n");
         return;
       }
+      vm->Cpl = new_cpl;
       vm->Segments[CS] = selector; vm->SegmentCache[CS] = code;
       vm->Segments[SS] = new_ss; vm->SegmentCache[SS] = stack;
       pm_set_stack_pointer(vm, new_sp);
@@ -2067,9 +2242,7 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   if (op == 0x9a) {
     U32 target = protected_fetch(vm, width / 8);
     U16 selector = (U16)protected_fetch(vm, 2);
-    if (pm_push(vm, vm->Segments[CS], width) && pm_push(vm, vm->Eip, width) &&
-        pm_load_segment(vm, CS, selector))
-      vm->Eip = target;
+    pm_far_call(vm, selector, target, width);
     return;
   }
   if (op == 0xff) {
@@ -2085,10 +2258,8 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
       vm->Eip = value;
     } else if ((m.reg == 3 || m.reg == 5) && !m.is_reg) {
       U16 selector = (U16)pm_read(vm, m.segment, m.offset + width / 8, 16);
-      if (m.reg == 3 &&
-          (!pm_push(vm, vm->Segments[CS], width) || !pm_push(vm, vm->Eip, width)))
-        return;
-      if (pm_load_segment(vm, CS, selector)) vm->Eip = value;
+      if (m.reg == 3) pm_far_call(vm, selector, value, width);
+      else if (pm_load_segment(vm, CS, selector)) vm->Eip = value;
     } else if (m.reg == 6)
       pm_push(vm, value, width);
     else
@@ -2151,10 +2322,11 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
       PM_MOD m = pm_decode(vm, segment_override, address32);
       U16 selector = (U16)pm_read_rm(vm, m, 16);
       DOS_DESCRIPTOR descriptor;
-      U8 cpl = vm->Segments[CS] & 3u, rpl = selector & 3u;
-      if (read_descriptor(selector, &descriptor) &&
+      U8 cpl = vm->Cpl, rpl = selector & 3u;
+      if (read_descriptor_raw(selector, &descriptor) &&
           (descriptor.Access & 0x10u) &&
-          ((descriptor.Access >> 5) & 3u) >= (cpl > rpl ? cpl : rpl)) {
+          (((descriptor.Access & 12u) == 12u) ||
+           ((descriptor.Access >> 5) & 3u) >= (cpl > rpl ? cpl : rpl))) {
         U32 result = second == 0x02
                      ? ((U32)descriptor.Access << 8) |
                        ((U32)(descriptor.Flags & 0x0fu) << 20)
@@ -2331,7 +2503,7 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
     }
     if (second == 0x01) {
       PM_MOD m = pm_decode(vm, segment_override, address32);
-      if ((vm->Segments[CS] & 3u) && m.reg >= 2) {
+      if ((vm->Cpl) && m.reg >= 2) {
         fail("DOSVM: privileged descriptor instruction fault\r\n"); return;
       }
       if (m.reg == 0 || m.reg == 1) {
@@ -2345,6 +2517,7 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
         DOS_TABLE_REGISTER *tr = m.reg == 2 ? &vm->Gdtr : &vm->Idtr;
         tr->Limit = (U16)pm_read(vm, m.segment, m.offset, 16);
         tr->Base = pm_read(vm, m.segment, m.offset + 2, 32);
+        if (width == 16) tr->Base &= 0x00ffffffu;
       } else if (m.reg == 4) {
         pm_write_rm(vm, m, 16, (U16)vm->Cr0);
       } else if (m.reg == 6) {
@@ -2358,12 +2531,12 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
       if (m.reg == 0) pm_write_rm(vm, m, 16, vm->Ldtr);
       else if (m.reg == 1) pm_write_rm(vm, m, 16, vm->Tr);
       else if (m.reg == 2) {
-        if (vm->Segments[CS] & 3u) { fail("DOSVM: privileged LLDT fault\r\n"); return; }
+        if (vm->Cpl) { fail("DOSVM: privileged LLDT fault\r\n"); return; }
         if (!load_ldt((U16)pm_read_rm(vm, m, 16)))
           fail("DOSVM: invalid LDT selector\r\n");
       }
       else if (m.reg == 3) {
-        if (vm->Segments[CS] & 3u) { fail("DOSVM: privileged LTR fault\r\n"); return; }
+        if (vm->Cpl) { fail("DOSVM: privileged LTR fault\r\n"); return; }
         U16 selector = (U16)pm_read_rm(vm, m, 16);
         DOS_DESCRIPTOR d;
         if ((selector & 7u) || !read_descriptor(selector, &d) ||
@@ -2373,10 +2546,7 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
       }
       else if (m.reg == 4 || m.reg == 5) {
         U16 selector = (U16)pm_read_rm(vm, m, 16);
-        DOS_DESCRIPTOR d;
-        int valid = read_descriptor(selector, &d) && (d.Access & 0x10u) &&
-                    (m.reg == 4 ? (d.Access & 2u) :
-                     ((d.Access & 8u) && (d.Access & 2u)));
+        int valid = verify_selector(selector, m.reg == 5);
         if (m.reg == 4) vm->Eflags = (vm->Eflags & ~ZF) | (valid ? ZF : 0);
         else vm->Eflags = (vm->Eflags & ~ZF) | (valid ? ZF : 0);
         vm->Flags = (U16)vm->Eflags;
@@ -2387,7 +2557,7 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
     if (second == 0x20 || second == 0x22) {
       U8 modrm = (U8)protected_fetch(vm, 1);
       unsigned cr = (modrm >> 3) & 7, reg = modrm & 7;
-      if ((modrm >> 6) != 3 || cr != 0 || (vm->Segments[CS] & 3u)) {
+      if ((modrm >> 6) != 3 || cr != 0 || (vm->Cpl)) {
         fail("DOSVM: invalid control-register operation\r\n"); return;
       }
       if (second == 0x20) pm_set_register(vm, reg, 32, vm->Cr0);
@@ -2396,7 +2566,8 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
     }
     KeLog("[dos] unsupported protected 0F %02x at CS=%04x EIP=%08x\n",
           second, vm->Segments[CS], vm->Eip - 2u);
-    fail("DOSVM: unsupported protected extended instruction\r\n");
+    if (!queue_protected_fault(vm, 6, 0))
+      fail("DOSVM: unsupported protected extended instruction\r\n");
     return;
   }
   if (op == 0xcd || op == 0xcc || op == 0xce) {
@@ -3454,8 +3625,11 @@ static int x87_real(DOS_VM *vm, U8 opcode, int override, int address32,
 #undef X87_ST_EXCHANGE
 
 void fail(const char *s) {
-  if (!fault)
+  if (current()->PendingException) return;
+  if (!fault) {
+    KeLog("[dos] fault %04x:%08x ss:sp=%04x:%08x %s", seg[CS], current()->CurrentInstructionIp, seg[SS], current()->ProtectedMode ? pm_stack_pointer(current()) : r[SP], s);
     say(s);
+  }
   fault = 1;
   running = 0;
   exit_code = 255;
@@ -3563,7 +3737,37 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     }
   }
   if (vm->ProtectedMode) {
+    U16 saved_regs[8], saved_segments[6];
+    U32 saved_regs32[8]; DOS_DESCRIPTOR saved_cache[6];
+    memcpy(saved_regs, vm->Registers, sizeof(saved_regs));
+    memcpy(saved_regs32, vm->Registers32, sizeof(saved_regs32));
+    memcpy(saved_segments, vm->Segments, sizeof(saved_segments));
+    memcpy(saved_cache, vm->SegmentCache, sizeof(saved_cache));
+    U32 saved_ip = vm->Eip, saved_flags = vm->Eflags;
+    U8 saved_cpl = vm->Cpl;
     step_protected(vm);
+    if (vm->PendingException) {
+      U8 vector = vm->PendingException - 1u;
+      U16 error = vm->PendingExceptionError;
+      vm->PendingException = 0;
+      memcpy(vm->Registers, saved_regs, sizeof(saved_regs));
+      memcpy(vm->Registers32, saved_regs32, sizeof(saved_regs32));
+      memcpy(vm->Segments, saved_segments, sizeof(saved_segments));
+      memcpy(vm->SegmentCache, saved_cache, sizeof(saved_cache));
+      vm->Eip = saved_ip; vm->Eflags = saved_flags; vm->Flags = (U16)saved_flags; vm->Cpl = saved_cpl;
+      U8 access = vm->Memory[vm->Idtr.Base + (U32)vector * 8u + 5u];
+      unsigned frame_width = access & 8u ? 32u : 16u;
+      KeLog("[dos] guest exception %u error=%04x at %04x:%08x\n",vector,error,seg[CS],saved_ip);
+      int has_error = vector == 8 || (vector >= 10 && vector <= 14) || vector == 17;
+      if (!protected_interrupt(vector, 0, frame_width) ||
+          (has_error && !pm_push(vm, error, frame_width))) {
+        vm->PendingException = 0; fail("DOSVM: exception delivery failed\r\n");
+      }
+    }
+    if (!vm->ProtectedMode) {
+      vm->Ip = (U16)vm->Eip;
+      vm->Flags = (U16)vm->Eflags;
+    }
     return;
   }
   int override = -1, rep = 0, operand32 = 0, address32 = 0;
@@ -3578,10 +3782,11 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     U16 cs = rw(0, (U16)(vector * 4u + 2u));
     ww(0, (U16)(vector * 4u), 0);
     ww(0, (U16)(vector * 4u + 2u), 0);
+    U16 bridge_cs = seg[CS], bridge_ip = ip;
     dos_int(vector);
     ww(0, (U16)(vector * 4u), off);
     ww(0, (U16)(vector * 4u + 2u), cs);
-    if (running) {
+    if (running && seg[CS] == bridge_cs && ip == bridge_ip) {
       U16 return_ip = pop(), return_cs = pop(), return_flags = pop();
       ip = return_ip; seg[CS] = return_cs;
       flags = (flags & 0x0cd5u) | (return_flags & ~0x0cd5u) | 2u;
@@ -4260,6 +4465,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
           DOS_TABLE_REGISTER *tr = m.reg == 2 ? &current()->Gdtr : &current()->Idtr;
           tr->Limit = rw(m.segment, m.off);
           tr->Base = read32(m.segment, (U16)(m.off + 2));
+          if (!operand32) tr->Base &= 0x00ffffffu;
         } else if (m.reg == 4) {
           write_rm(m, 1, (U16)current()->Cr0);
         } else if (m.reg == 6) {
@@ -4293,12 +4499,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
           fail("DOSVM: invalid task-register selector\r\n");
         else vm->Tr = selector;
       } else if (m.reg == 4 || m.reg == 5) {         /* VERR / VERW */
-        DOS_DESCRIPTOR descriptor;
-        int valid = read_descriptor(selector, &descriptor) &&
-                    (descriptor.Access & 0x10u) &&
-                    (m.reg == 4 ? (descriptor.Access & 2u) :
-                     ((descriptor.Access & 8u) &&
-                      (descriptor.Access & 2u)));
+        int valid = verify_selector(selector, m.reg == 5);
         flags = (flags & ~ZF) | (valid ? ZF : 0);
       } else {
         fail("DOSVM: invalid 0F 00 operation\r\n");
@@ -4752,9 +4953,12 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       current()->Eflags = (new_flags & 0x003f7fd7u) | 2u;
       flags = (U16)current()->Eflags;
     } else {
-      ip = pop();
-      seg[CS] = pop();
-      flags = (pop() & 0x7fffu) | 0x0002u;
+      U16 return_ip = pop();
+      U16 return_cs = pop();
+      U16 return_flags = pop();
+      ip = return_ip;
+      seg[CS] = return_cs;
+      flags = (return_flags & 0x7fffu) | 0x0002u;
       current()->Eflags = (current()->Eflags & 0xffff0000u) | flags;
     }
     return;
@@ -5143,7 +5347,13 @@ U32 DosCpuRunBatch(DOS_VM *vm, U32 max_steps) {
   U32 executed = 0;
   while (executed < max_steps && vm->Running) {
     vm->Steps++;
+    U16 previous_cs = vm->Segments[CS];
+    U32 previous_ip = vm->ProtectedMode ? vm->Eip : vm->Ip;
+    U32 previous_linear = (vm->ProtectedMode ? vm->SegmentCache[CS].Base : ((U32)previous_cs << 4)) + previous_ip;
     step_vm_body(vm);
+    if (previous_cs && !vm->Segments[CS]) {
+      KeLog("[nullcs] from=%04x:%08x bytes=%08x %08x pm=%u ss:sp=%04x:%04x\n",previous_cs,previous_ip,*(U32 *)(vm->Memory+previous_linear),*(U32 *)(vm->Memory+previous_linear+4),vm->ProtectedMode,vm->Segments[SS],vm->Registers[SP]);
+    }
     executed++;
   }
   return executed;

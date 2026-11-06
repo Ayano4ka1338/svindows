@@ -4,6 +4,49 @@
 #include <svindows/Hal.h>
 #include "Internal.h"
 
+/* BIOS OEM font tables use the same licensed glyph atlas as the console. */
+void DosVideoInitializeFonts(DOS_VM *vm) {
+    if (vm->BiosFontsReady) return;
+    static const U16 extended[128] = {
+      0x00c7,0x00fc,0x00e9,0x00e2,0x00e4,0x00e0,0x00e5,0x00e7,0x00ea,0x00eb,0x00e8,0x00ef,0x00ee,0x00ec,0x00c4,0x00c5,
+      0x00c9,0x00e6,0x00c6,0x00f4,0x00f6,0x00f2,0x00fb,0x00f9,0x00ff,0x00d6,0x00dc,0x00a2,0x00a3,0x00a5,0x20a7,0x0192,
+      0x00e1,0x00ed,0x00f3,0x00fa,0x00f1,0x00d1,0x00aa,0x00ba,0x00bf,0x2310,0x00ac,0x00bd,0x00bc,0x00a1,0x00ab,0x00bb,
+      0x2591,0x2592,0x2593,0x2502,0x2524,0x2561,0x2562,0x2556,0x2555,0x2563,0x2551,0x2557,0x255d,0x255c,0x255b,0x2510,
+      0x2514,0x2534,0x252c,0x251c,0x2500,0x253c,0x255e,0x255f,0x255a,0x2554,0x2569,0x2566,0x2560,0x2550,0x256c,0x2567,
+      0x2568,0x2564,0x2565,0x2559,0x2558,0x2552,0x2553,0x256b,0x256a,0x2518,0x250c,0x2588,0x2584,0x258c,0x2590,0x2580,
+      0x03b1,0x00df,0x0393,0x03c0,0x03a3,0x03c3,0x00b5,0x03c4,0x03a6,0x0398,0x03a9,0x03b4,0x221e,0x03c6,0x03b5,0x2229,
+      0x2261,0x00b1,0x2265,0x2264,0x2320,0x2321,0x00f7,0x2248,0x00b0,0x2219,0x00b7,0x221a,0x207f,0x00b2,0x25a0,0x00a0
+    };
+    static const unsigned heights[] = {16,14,8};
+    for (unsigned table = 0; table < 3; table++) {
+      unsigned height = heights[table];
+      for (unsigned ch = 0; ch < 256; ch++) {
+        U32 cp = ch < 128 ? ch : extended[ch - 128];
+        const GFX_FONT_GLYPH *g = GfxUiGlyph(cp);
+        if (!g) g = GfxUiGlyph('?');
+        for (unsigned row = 0; row < height; row++) {
+          U8 bits = 0;
+          if (g && ch >= 32) {
+            int y = (int)(row * SvUiFontUiFace.LineHeight / height) -
+                    (SvUiFontUiFace.Ascent - g->BearingY);
+            for (unsigned x = 0; x < 8; x++) {
+              int sx = (int)(x * g->Advance / 8u) - g->BearingX;
+              if (sx >= 0 && sx < g->Width && y >= 0 && y < g->Height &&
+                  SvUiFontUiFace.Pixels[g->Offset + y * g->Width + sx] >= 128)
+                bits |= 0x80u >> x;
+            }
+          }
+          vm->Memory[0xc0000u + table * 0x1000u + ch * height + row] = bits;
+        }
+      }
+    }
+    vm->Memory[0x1f * 4] = 0; vm->Memory[0x1f * 4 + 1] = 0x24;
+    vm->Memory[0x1f * 4 + 2] = 0; vm->Memory[0x1f * 4 + 3] = 0xc0;
+    vm->Memory[0x43 * 4] = vm->Memory[0x43 * 4 + 1] = 0;
+    vm->Memory[0x43 * 4 + 2] = 0; vm->Memory[0x43 * 4 + 3] = 0xc0;
+    vm->BiosFontsReady = TRUE;
+}
+
 #define VGA_MEMORY_BASE 0x000a0000u
 #define VGA_MODE13_SIZE (320u * 200u)
 
@@ -17,6 +60,14 @@ static UINT32 dos_vga_color(DOS_VM *vm, U8 index)
     green = (U8)((green << 2) | (green >> 4));
     blue = (U8)((blue << 2) | (blue >> 4));
     return GfxColor(red, green, blue);
+}
+
+static UINT32 dos_vga_attribute_color(DOS_VM *vm, U8 pixel) {
+    U8 index = vm->VgaAttribute[pixel & 15u] & 0x3fu;
+    U8 select = vm->VgaAttribute[0x14];
+    if (vm->VgaAttribute[0x10] & 0x80u) index = (index & 15u) | ((select & 3u) << 4);
+    index |= (select & 12u) << 4;
+    return dos_vga_color(vm, index & vm->VgaDacMask);
 }
 
 static UINT32 dos_ega_color(U8 value)
@@ -194,6 +245,13 @@ void DosVideoSetMode(DOS_VM *vm, U8 mode)
         vm->VgaAttributeIndex = 0;
         vm->VgaAttributeDataPhase = FALSE;
         if (vm->VideoMode >= 0x0du) {
+            vm->VgaAttribute[0x10] = 1; vm->VgaAttribute[0x14] = 0;
+            vm->VgaDacMask = 0xff;
+            for (U32 i = 0; i < 64; i++) {
+                vm->VgaDac[i * 3] = ((i & 4u) ? 42u : 0u) + ((i & 32u) ? 21u : 0u);
+                vm->VgaDac[i * 3 + 1] = ((i & 2u) ? 42u : 0u) + ((i & 16u) ? 21u : 0u);
+                vm->VgaDac[i * 3 + 2] = ((i & 1u) ? 42u : 0u) + ((i & 8u) ? 21u : 0u);
+            }
             memset(vm->VgaPlanes, 0, sizeof(vm->VgaPlanes));
             memset(vm->VgaLatches, 0, sizeof(vm->VgaLatches));
             memset(vm->VgaGraphics, 0, sizeof(vm->VgaGraphics));
@@ -276,6 +334,9 @@ static void dos_video_draw_mouse_cursor(DOS_VM *vm, U32 left, U32 top,
         (!vm->SerialMouseActive && vm->MouseDisabled) ||
         !GfxFramebuffer.Base)
         return;
+    /* Windows 3.1 draws its own cursor through MOUSE.DRV/GDI.  Compositing
+     * the DOS mouse driver's cursor as well leaves a second pointer behind. */
+    if (vm->DosVersion == 0x1e03u) return;
 
     /* Windows 1.x uses its own serial driver rather than INT 33h.  Its guest
      * coordinates are updated asynchronously from COM1 packets, so draw the
@@ -423,7 +484,7 @@ void DosVideoPresent(DOS_VM *vm)
         U32 left = 0, top = 0;
         U32 start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
         U32 colors[16];
-        for (unsigned i = 0; i < 16; i++) colors[i] = dos_ega_color(vm->VgaAttribute[i]);
+        for (unsigned i = 0; i < 16; i++) colors[i] = dos_vga_attribute_color(vm, (U8)i);
         for (U32 y = 0; y < height; y++) {
             U32 source_y = y * sh / height;
             for (U32 x = 0; x < width; x++) {
@@ -796,8 +857,10 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
             vm->VgaAttributeIndex = byte & 0x1fu;
             vm->VgaAttributeDataPhase = TRUE;
         } else {
-            if (vm->VgaAttributeIndex < sizeof(vm->VgaAttribute))
+            if (vm->VgaAttributeIndex < sizeof(vm->VgaAttribute)) {
                 vm->VgaAttribute[vm->VgaAttributeIndex] = byte;
+                vm->VideoDirty = TRUE;
+            }
             vm->VgaAttributeDataPhase = FALSE;
         }
         break;
