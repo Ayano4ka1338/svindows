@@ -75,14 +75,13 @@ static U8 dos_xms_allocate(DOS_VM *vm, U32 bytes, U16 *handle) {
   U32 slot, base = DOS_XMS_BASE;
   const U32 limit = DOS_XMS_BASE + DOS_XMS_CAPACITY;
   for (slot = 0; slot < DOS_XMS_MAX_HANDLES && vm->XmsBlocks[slot].Used; slot++);
-  if (!bytes) return 0xa0;
   if (slot == DOS_XMS_MAX_HANDLES) return 0xa1;
   if (bytes > dos_xms_free_bytes(vm)) return 0xa0;
   for (;;) {
     U32 next = limit, end = base;
     for (U32 i = 0; i < DOS_XMS_MAX_HANDLES; i++) {
       DOS_XMS_BLOCK *b = &vm->XmsBlocks[i];
-      if (b->Used && b->Base >= base && b->Base < next) {
+      if (b->Used && b->Size && b->Base >= base && b->Base < next) {
         next = b->Base;
         end = b->Base + b->Size;
       }
@@ -128,7 +127,6 @@ static U8 dos_xms_resize(DOS_VM *vm, U16 handle, U32 size) {
   U32 slot = handle - 1u;
   DOS_XMS_BLOCK *block = &vm->XmsBlocks[slot];
   if (block->Locked) return 0xabu;
-  if (!size) return 0xa0;
   U32 old_size = block->Size, old_base = block->Base;
   U32 base = old_base;
   if (!dos_xms_range_free(vm, base, size, slot)) {
@@ -138,7 +136,7 @@ static U8 dos_xms_resize(DOS_VM *vm, U16 handle, U32 size) {
       U32 after = base;
       for (U32 i = 0; i < DOS_XMS_MAX_HANDLES; i++) {
         DOS_XMS_BLOCK *b = &vm->XmsBlocks[i];
-        if (i != slot && b->Used && b->Base >= base && b->Base < next) {
+        if (i != slot && b->Used && b->Size && b->Base >= base && b->Base < next) {
           next = b->Base;
           after = b->Base + b->Size;
         }
@@ -179,7 +177,7 @@ static void dos_xms_call(DOS_VM *vm) {
     r[DX] = 1; /* HMA supported. */
     return;
   case 0x01: /* Request HMA. */
-    if (r[BX] > 0x1000u || vm->XmsHmaOwned) {
+    if (vm->XmsHmaOwned) {
       dos_xms_result(0x91); return;
     }
     vm->XmsHmaOwned = TRUE;
@@ -1094,6 +1092,115 @@ static DOS_DATE_TIME dos_now(void) {
   return result;
 }
 
+/* Load-only EXEC keeps DOSX in the caller's address space. */
+static U16 dos_exec_shared(BOOLEAN execute) {
+  char path[260];
+  if (!guest_path(seg[DS], r[DX], path)) return 3;
+  void *image = NULL;
+  SIZE_T size = 0;
+  if (!NT_SUCCESS(FatLoadFile(path, &image, &size, NULL))) return 2;
+  U8 *h = image;
+  if (size < 28 || h[0] != 'M' || h[1] != 'Z') { ExFreePool(image); return 11; }
+  U32 length = (U32)word(h + 4) * 512u;
+  if (word(h + 2)) length -= 512u - word(h + 2);
+  U32 header = (U32)word(h + 8) * 16u;
+  if (length > size || header < 28 || header > length ||
+      (U32)word(h + 24) + (U32)word(h + 6) * 4u > header) {
+    ExFreePool(image); return 11;
+  }
+  U32 bytes = length - header;
+  U32 image_paras = (bytes + 15u) / 16u;
+  U32 minimum = 16u + image_paras + word(h + 10);
+  if (word(h + 12) < word(h + 10)) { ExFreePool(image); return 11; }
+  BOOLEAN high = !word(h + 10) && !word(h + 12);
+  for (U32 i = 0; i < word(h + 6); i++) {
+    U8 *rel = h + word(h + 24) + i * 4u;
+    U32 pos = (U32)word(rel + 2) * 16u + word(rel);
+    if (pos + 2 > (high ? image_paras * 16u : minimum * 16u - 256u)) { ExFreePool(image); return 11; }
+  }
+  U16 block = r[BX], bs = seg[ES];
+  U16 source_env = rw(bs, block);
+  if (!source_env) source_env = rw(current()->CurrentPsp, 0x2c);
+  U8 environment[DOS_ENV_SIZE];
+  U32 env_bytes = 0;
+  if (source_env) {
+    while (env_bytes + 1u < DOS_ENV_SIZE) {
+      environment[env_bytes] = rb(source_env, (U16)env_bytes);
+      if (env_bytes && !environment[env_bytes] && !environment[env_bytes - 1u]) { env_bytes++; break; }
+      env_bytes++;
+    }
+  } else { environment[0] = environment[1] = 0; env_bytes = 2; }
+  U32 path_size = 0; while (path[path_size]) path_size++;
+  if (env_bytes + 2u + path_size + 1u > DOS_ENV_SIZE) { ExFreePool(image); return 10; }
+  environment[env_bytes++] = 1; environment[env_bytes++] = 0;
+  for (U32 i = 0; i <= path_size; i++) environment[env_bytes++] = (U8)path[i];
+  U16 env = dos_alloc((U16)((env_bytes + 15u) / 16u));
+  if (!env) { ExFreePool(image); return 8; }
+  U32 available = dos_largest_free();
+  U32 paras = high ? available : 16u + image_paras + word(h + 12);
+  if (paras > available) paras = available;
+  U16 psp = minimum <= available ? dos_alloc((U16)paras) : 0;
+  if (!psp) {
+    for (U32 i = 0; i < DOS_MAX_BLOCKS; i++)
+      if (current()->Blocks[i].Used && current()->Blocks[i].Segment == env) current()->Blocks[i].Used = FALSE;
+    DosUpdateMemoryControlBlocks(current());
+    ExFreePool(image); return 8;
+  }
+  memcpy(mem + ((U32)env << 4), environment, env_bytes);
+  KeLog("[load] psp=%04x paras=%04x cs=%04x ip=%04x\n",psp,paras,psp+16+word(h+22),word(h+20));
+  U16 base = high ? (U32)psp + paras - image_paras : psp + 16u;
+  memcpy(mem + ((U32)base << 4), h + header, bytes);
+  for (U32 i = 0; i < word(h + 6); i++) {
+    U8 *rel = h + word(h + 24) + i * 4u;
+    U32 pos = (U32)word(rel + 2) * 16u + word(rel);
+    U32 linear = ((U32)base << 4) + pos;
+    U16 relocated = word(mem + linear) + base;
+    mem[linear] = (U8)relocated;
+    mem[linear + 1] = (U8)(relocated >> 8);
+  }
+  memcpy(mem + ((U32)psp << 4), mem + ((U32)current()->CurrentPsp << 4), 256);
+  /* The inherited inline JFT moves with its PSP. */
+  if (rw(psp, 0x34) == 0x18) ww(psp, 0x36, psp);
+  ww(psp, 2, psp + (U16)paras);
+  ww(psp, 0x16, current()->CurrentPsp);
+  ww(psp, 0x2c, env);
+  for (U32 i = 0; i < DOS_MAX_BLOCKS; i++)
+    if (current()->Blocks[i].Used && (current()->Blocks[i].Segment == psp || current()->Blocks[i].Segment == env))
+      current()->Blocks[i].OwnerPsp = psp;
+  DosUpdateMemoryControlBlocks(current());
+  U16 ts = rw(bs, block + 4), to = rw(bs, block + 2);
+  U8 n = rb(ts, to); if (n > 126) n = 126;
+  for (U16 i = 0; i < n + 2u; i++) wb(psp, 0x80u + i, rb(ts, to + i));
+  U16 entry_sp = word(h + 0x10), entry_ss = base + word(h + 0x0e);
+  U16 entry_ip = word(h + 0x14), entry_cs = base + word(h + 0x16);
+  if (execute) {
+    U16 parent = current()->CurrentPsp;
+    U16 return_ip = ip, return_cs = seg[CS], return_sp = r[SP];
+    if (return_cs == DOS_BUILTIN_SEGMENT && return_ip == DOS_BUILTIN_OFFSET(0x21)) {
+      return_ip = rw(seg[SS], return_sp);
+      return_cs = rw(seg[SS], (U16)(return_sp + 2u));
+      return_sp += 6u;
+    }
+    ww(parent, 0x2e, return_sp); ww(parent, 0x30, seg[SS]);
+    ww(psp, 0x0a, return_ip); ww(psp, 0x0c, return_cs);
+    for (U32 i = 0; i < DOS_MAX_BLOCKS; i++)
+      if (current()->Blocks[i].Used && current()->Blocks[i].Segment == psp)
+        current()->Blocks[i].OwnerPsp = psp;
+    DosUpdateMemoryControlBlocks(current());
+    seg[CS] = entry_cs; ip = entry_ip;
+    seg[SS] = entry_ss; r[SP] = entry_sp;
+    seg[DS] = seg[ES] = psp;
+  }
+  ww(bs, block + 0x0e, word(h + 0x10));
+  ww(bs, block + 0x10, base + word(h + 0x0e));
+  ww(bs, block + 0x12, word(h + 0x14));
+  ww(bs, block + 0x14, base + word(h + 0x16));
+  current()->CurrentPsp = psp;
+  current()->DtaSegment = psp; current()->DtaOffset = 0x80;
+  ExFreePool(image);
+  return 0;
+}
+
 static U16 dos_exec(void) {
   DOS_VM *parent = current();
   if (parent->ExecDepth >= 4)
@@ -1250,6 +1357,12 @@ static void dos_int_dispatch(U8 n) {
   U8 ah = (U8)(r[AX] >> 8);
   U32 done = 0;
   U16 off = r[DX];
+  /* The XMS far-call bridge is a resident driver entry, independent of
+   * application hooks on the multiplex interrupt used to implement it. */
+  if (n == 0x2f && seg[CS] == 0xf000u && ip == 0x0607u) {
+    dos_xms_call(current());
+    return;
+  }
   /* A non-null IVT entry is a guest-installed real-mode handler. */
   U16 vector_off = rw(0, (U16)(n * 4u));
   U16 vector_seg = rw(0, (U16)(n * 4u + 2u));
@@ -1269,7 +1382,7 @@ static void dos_int_dispatch(U8 n) {
   /* Timer/keyboard IRQ bookkeeping is maintained by the virtual PIT/8042.
    * Default BIOS chaining targets simply acknowledge/return. */
   if (n == 0x09) { dos_bios_keyboard(); return; }
-  if (n == 0x08 || n == 0x1c) return;
+  if (n == 0x08 || n == 0x1c || n == 0x28) return;
   /* The BIOS overflow vector is an IRET stub when no handler is installed.
    * INTO is common in DOS startup code, so a null IVT entry must not be
    * treated as an unsupported host interrupt. */
@@ -1317,10 +1430,6 @@ static void dos_int_dispatch(U8 n) {
     default:
       break;
     }
-    if (seg[CS] == 0xf000u && ip == 0x0602u) {
-      dos_xms_call(current());
-      return;
-    }
     if (r[AX] == 0x4300u) { /* XMS installation check. */
       set8(0, 0x80u);
       flags &= ~CF;
@@ -1350,6 +1459,7 @@ static void dos_int_dispatch(U8 n) {
     return;
   }
   if (n == 0x20) {
+    KeLog("[dos] INT20 terminate psp=%04x from=%04x:%04x ss:sp=%04x:%04x ax=%04x\n",current()->CurrentPsp,seg[CS],ip,seg[SS],r[SP],r[AX]);
     running = 0;
     exit_code = 0;
     return;
@@ -1401,6 +1511,16 @@ static void dos_int_dispatch(U8 n) {
   if (n == 0x10 && r[AX] == 0x6f00u) {
     /* Video7/VEGA extension probe. No V7 signature means generic VGA. */
     flags &= ~CF;
+    return;
+  }
+  if (n == 0x10 && r[AX] == 0x1130u) {
+    DosVideoInitializeFonts(current());
+    U8 which = get8(7);
+    U16 offset = which == 2 ? 0x1000 : (which == 3 || which == 4) ? 0x2000 : 0;
+    if (which == 4) offset += 128u * 8u;
+    seg[ES] = 0xc000; r[BP] = offset;
+    r[CX] = which == 2 ? 14 : (which == 3 || which == 4) ? 8 : 16;
+    set8(2, current()->Memory[0x484] ? current()->Memory[0x484] : 24);
     return;
   }
   if (n == 0x10 && ah == 0x10) {
@@ -1540,6 +1660,26 @@ static void dos_int_dispatch(U8 n) {
     r[AX] = 640;
     return;
   }
+  if (n == 0x1a) {
+    if (ah == 0) {
+      r[CX] = rw(0x40, 0x6e); r[DX] = rw(0x40, 0x6c);
+      set8(0, rb(0x40, 0x70)); wb(0x40, 0x70, 0); flags &= ~CF;
+    } else if (ah == 2 || ah == 4) {
+      DOS_DATE_TIME now = dos_now();
+      U8 a = ah == 2 ? now.Hour : now.Year / 100;
+      U8 b = ah == 2 ? now.Minute : now.Year % 100;
+      U8 c = ah == 2 ? now.Second : now.Month;
+      U8 d = ah == 2 ? 0 : now.Day;
+      r[CX] = (U16)(((a / 10u) * 16u + a % 10u) << 8) | ((b / 10u) * 16u + b % 10u);
+      r[DX] = (U16)(((c / 10u) * 16u + c % 10u) << 8) | ((d / 10u) * 16u + d % 10u);
+      flags &= ~CF;
+    } else { set8(4, 0x86); flags |= CF; }
+    return;
+  }
+  if (n == 0x16 && r[AX] == 0x6f00u) {
+    /* HP Vectra EX-BIOS installation probe: no vendor BIOS installed. */
+    return;
+  }
   if (n == 0x16 && (ah == 0x01 || ah == 0x11)) {
     U16 head = rw(0x40u, 0x1au);
     if (head == rw(0x40u, 0x1cu)) flags |= ZF;
@@ -1597,6 +1737,7 @@ static void dos_int_dispatch(U8 n) {
     set8(0, dos_find_fcb(seg[DS], off, ah == 0x11) ? 0 : 0xffu);
     break;
   case 0x00:
+    KeLog("[dos] AH00 terminate psp=%04x from=%04x:%04x ss:sp=%04x:%04x ax=%04x\n",current()->CurrentPsp,seg[CS],ip,seg[SS],r[SP],r[AX]);
     running = 0;
     exit_code = 0;
     break;
@@ -1779,10 +1920,31 @@ static void dos_int_dispatch(U8 n) {
     set8(0, now.Weekday);
     break;
   }
+  case 0xdc: /* Windows' DOS environment probe; absent on ordinary DOS. */
+    set8(0, 0);
+    break;
+  case 0x2b: /* Set date, including DESQview's invalid-date detection probe. */
+    /* The VM uses the host clock; reject changes with DOS's documented AL
+     * result instead of terminating DOSX during environment detection. */
+    set8(0, 0xff);
+    break;
   case 0x2c: {
     DOS_DATE_TIME now = dos_now();
     r[CX] = ((U16)now.Hour << 8) | now.Minute;
     r[DX] = ((U16)now.Second << 8) | now.Hundredths;
+    break;
+  }
+  case 0x1b:
+  case 0x1c: { /* Allocation information and pointer to the media byte. */
+    U8 drive = ah == 0x1b ? 0 : (U8)r[DX];
+    U32 sectors, free_count, bytes, total;
+    if ((drive != 0 && drive != 3) ||
+        !NT_SUCCESS(FatQueryDiskSpace(&sectors, &free_count, &bytes, &total))) {
+      set8(0, 0xff); break;
+    }
+    set8(0, (U8)sectors); r[CX] = (U16)bytes;
+    r[DX] = (U16)(total > 0xffffu ? 0xffffu : total);
+    seg[DS] = DOS_SYSTEM_DATA_SEGMENT; r[BX] = DOS_DPB_OFFSET + 0x16u;
     break;
   }
   case 0x36: {
@@ -1862,7 +2024,12 @@ static void dos_int_dispatch(U8 n) {
   case 0x44: {
     /* IOCTL 4400h: identify a handle as a character device or a C: file. */
     U16 handle = r[BX];
-    if (get8(0) != 0) {
+    if (get8(0) == 1) {
+      U16 error = dos_exec_shared(FALSE);
+      KeLog("[exec] load-only error=%u\n",error);
+      r[AX] = error;
+      if (error) flags |= CF;
+    } else if (get8(0) != 0) {
       r[AX] = 1;
       flags |= CF;
     } else if (handle < 3) {
@@ -2104,6 +2271,7 @@ static void dos_int_dispatch(U8 n) {
   }
   case 0x48: {
     U16 wanted = r[BX], block = dos_alloc(wanted);
+    KeLog("[alloc] owner=%04x size=%04x -> %04x\n",current()->CurrentPsp,wanted,block);
     if (!block) {
       U16 best = 0;
       U16 start = PSP + current()->InitialParagraphs;
@@ -2146,6 +2314,7 @@ static void dos_int_dispatch(U8 n) {
   }
   case 0x4a: {
     U16 target = seg[ES], wanted = r[BX];
+    KeLog("[resize] owner=%04x block=%04x size=%04x\n",current()->CurrentPsp,target,wanted);
     if (target == PSP) {
       if (wanted >= 0x10 &&
           wanted <=
@@ -2190,11 +2359,17 @@ static void dos_int_dispatch(U8 n) {
     break;
   }
   case 0x4b:
-    if (get8(0) != 0) {
+    KeLog("[exec] al=%u from=%04x:%04x initial=%04x\n", get8(0),seg[CS],ip,current()->InitialParagraphs);
+    if (get8(0) == 1) {
+      U16 error = dos_exec_shared(FALSE);
+      KeLog("[exec] load-only error=%u\n",error);
+      r[AX] = error;
+      if (error) flags |= CF;
+    } else if (get8(0) != 0) {
       r[AX] = 1;
       flags |= CF;
     } else {
-      U16 error = dos_exec();
+      U16 error = current()->DosVersion == 0x1e03u ? dos_exec_shared(TRUE) : dos_exec();
       if (error) {
         r[AX] = error;
         flags |= CF;

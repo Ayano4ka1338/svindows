@@ -43,12 +43,14 @@ int main(void) {
   U16 a, b;
   test_vm.InitialParagraphs = 0x0100;
   test_vm.CurrentPsp = PSP;
+  assert(dos_largest_free() == 0x8efe);
   /* First-fit allocations begin after, not on top of, the free MCB. */
   a = dos_alloc(0x20);
   assert(a == 0x1101);
   b = dos_alloc(0x20);
   assert(b == 0x1122);
   assert(refresh_count == 2);
+  assert(dos_largest_free() == 0x8ebc);
   assert(free_paragraphs_from((U16)(b + 0x20 + 1)) > 0);
 
   /* Best-fit selects the smallest available gap that satisfies the request. */

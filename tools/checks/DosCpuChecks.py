@@ -124,6 +124,7 @@ mem_source = source[mem_start:mem_end]
 rm_start = source.index('/* Short inline path for the overwhelmingly common DOS/4GW operand:')
 rm_end = source.index('static int pm_load_segment(', rm_start)
 rm_source = source[rm_start:rm_end]
+irq_source = source[source.index('static int pm_irq_installed('):source.index('static int dos_dispatch_hardware(')]
 fast_prelude = r'''
 #include <stdint.h>
 #include <assert.h>
@@ -140,6 +141,7 @@ typedef uint64_t U64;
 #define DS 3
 #define AX 0
 #define CX 1
+#define BX 3
 #define SI 6
 #define DI 7
 #define TRUE 1
@@ -154,7 +156,9 @@ typedef struct {
   DOS_DESCRIPTOR SegmentCache[6];
   U16 Segments[6], Registers[8];
   U32 Registers32[8], Eip, Eflags, CurrentInstructionIp;
-  U8 CurrentOpcode, Running, VideoMode, VgaSequencer[5];
+  U8 CurrentOpcode, Running, VideoMode, VgaSequencer[5], PendingException;
+  U16 PendingExceptionError, DpmiHostSelector, DpmiPmVectorSelector[256];
+  struct { U32 Base, Limit; } Idtr;
   int VideoDirty;
   U8 *Memory;
 } DOS_VM;
@@ -269,13 +273,38 @@ int main(void) {
   arena[0xa0010] = 0xaa; arena[0xa0011] = 0xbb;
   assert(pm_read_rm(&cpu, (PM_MOD){0,0,0,0,DS,0xa0010}, 16) == 0xbbaau);
   assert(video_reads == 2);
+  cpu.Registers[BX] = 0xff80; cpu.Registers[AX] = 0x12f0;
+  cpu.Registers32[AX] = 0x12f0; cpu.Eflags = 0x246;
+  arena[0x70] = 0xab;
+  pm_xlat(&cpu, DS, 0);
+  assert(cpu.Registers[AX] == 0x12ab && cpu.Eflags == 0x246);
+  cpu.Registers32[BX] = 0x10000; cpu.Registers[AX] = 0x34ff; cpu.Registers32[AX] = 0x34ff;
+  arena[0x100ff] = 0xcd; pm_xlat(&cpu, DS, 1);
+  assert(cpu.Registers[AX] == 0x34cd && cpu.Eflags == 0x246);
+  /* A real guest IDT receives a queued #GP; the faulting instruction must
+   * stop touching memory before the main loop builds the exception frame. */
+  cpu.Idtr.Base = 0x1000; cpu.Idtr.Limit = 0x7ff;
+  arena[0x1000 + 13 * 8 + 5] = 0xe6;
+  cpu.SegmentCache[DS].Valid = 0; cpu.Running = 1;
+  assert(pm_read(&cpu, DS, 0, 16) == 0);
+  assert(cpu.PendingException == 14 && cpu.Running);
+  assert(!pm_write_rm(&cpu, (PM_MOD){0,0,0,0,DS,0}, 16, 0x1234));
+  U32 old_ip = cpu.Eip;
+  assert(protected_fetch(&cpu, 1) == 0 && cpu.Eip == old_ip);
+  assert(!pm_irq_installed(&cpu, 8));
+  arena[0x1000 + 8 * 8 + 5] = 0xe6;
+  assert(pm_irq_installed(&cpu, 8));
+  cpu.DpmiHostSelector = 0x20;
+  assert(!pm_irq_installed(&cpu, 8));
+  cpu.DpmiPmVectorSelector[8] = 0x28;
+  assert(pm_irq_installed(&cpu, 8));
   return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='sv-dos-fastpath-') as directory:
     cfile = Path(directory) / 'fastpath.c'
     exe = Path(directory) / 'fastpath'
-    cfile.write_text(fast_prelude + linear_source + '\n' + reg_source + '\n' + mem_source + '\n' + rm_source + '\n' + fast_checks)
+    cfile.write_text(fast_prelude + linear_source + '\n' + reg_source + '\n' + mem_source + '\n' + rm_source + '\n' + irq_source + '\n' + fast_checks)
     subprocess.run([os.environ.get('HOSTCC', 'cc'), '-std=gnu11', '-Wall', '-Wextra',
                     '-Werror', str(cfile), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

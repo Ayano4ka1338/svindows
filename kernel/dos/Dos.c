@@ -73,6 +73,25 @@ U16 free_paragraphs_from(U16 start) {
       end = current()->Blocks[i].Segment;
   return end > start ? end - start : 0;
 }
+U16 dos_largest_free(void) {
+  U32 start = PSP + current()->InitialParagraphs + 1u, best = 0;
+  while (start < 0x9fffu) {
+    U32 next = 0x9fffu;
+    DOS_BLOCK *occupied = 0;
+    for (U32 i = 0; i < DOS_MAX_BLOCKS; i++) {
+      DOS_BLOCK *b = &current()->Blocks[i];
+      if (b->Used && b->Segment >= start && b->Segment < next) { next = b->Segment; occupied = b; }
+    }
+    if (next > start) {
+      U32 gap = next - start - (occupied ? 1u : 0u);
+      if (gap > best) best = gap;
+    }
+    if (!occupied) break;
+    start = next + occupied->Paragraphs + 1u;
+  }
+  return (U16)best;
+}
+
 U16 dos_alloc(U16 paragraphs) {
   if (!paragraphs)
     return 0;
@@ -205,6 +224,9 @@ static int load(const U8 *image, U32 size, const char *tail) {
   wb(PSP, 0x52, 0xcb);
   for (unsigned i = 0; i < 20; i++)
     wb(PSP, (U16)(0x18 + i), i < 3 ? (U8)i : 0xff);
+  ww(PSP, 0x32, 20);
+  ww(PSP, 0x34, 0x18);
+  ww(PSP, 0x36, PSP);
   ww(PSP, 0x2c, 0);
   wb(PSP, 0x80, 0);
   unsigned n = 0;
@@ -267,7 +289,9 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
    * path follows the DOS 3.30 compatibility version used by 16helloos.
    * Other DOS programs continue to see 5.00; AX=3306h reports true 5.00. */
   vm->DosVersion = dos_command_is_win100_bin(command) ? 0x2203u :
-                   dos_command_is_windows31(command) ? 0x1e03u : 0x0005u;
+                   (dos_command_is_windows31(command) ||
+                    (KeGetCurrentThread()->Process && dos_command_is_windows31(
+                      KeGetCurrentThread()->Process->CurrentDirectory))) ? 0x1e03u : 0x0005u;
   vm->Dos4gImage = DosImageIsDos4g(image, (U32)size);
   vm->FpuControl = 0x037f; /* reset x87 control word */
   vm->VideoMode = 3; /* 80x25 color text mode */
@@ -294,13 +318,26 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   vm->Memory[0xf0000u + 0x0108u] = 0xcbu;
   /* XMS clients far-call this bridge; INT 2Fh dispatches the function and
    * RETF returns to the caller with its register ABI intact. */
-  vm->Memory[0xf0000u + 0x0600u] = 0xcdu;
-  vm->Memory[0xf0000u + 0x0601u] = 0x2fu;
-  vm->Memory[0xf0000u + 0x0602u] = 0xcbu;
+  /* XMS specifies a hookable five-byte entry. WSWAP patches this prologue
+   * to virtualize extended memory while the parent is swapped out. */
+  static const U8 xms_entry[] = {0xeb, 0x03, 0x90, 0x90, 0x90, 0xcd, 0x2f, 0xcb};
+  memcpy(vm->Memory + 0xf0600u, xms_entry, sizeof(xms_entry));
   for (unsigned vector = 0; vector < 256; vector++)
     vm->Memory[0xf0000u + 0x0200u + vector * 2u] = 0xcfu;
   for (unsigned vector = 0; vector < 32; vector++)
     vm->Memory[0xf0000u + 0x0400u + vector * 2u] = 0xcfu;
+  /* Unclaimed hardware IRQs have chainable BIOS IRET entries. */
+  for (unsigned vector = 0x0a; vector <= 0x0f; vector++) {
+    U16 offset = 0x0200u + vector * 2u;
+    vm->Memory[vector * 4u] = (U8)offset;
+    vm->Memory[vector * 4u + 1u] = (U8)(offset >> 8);
+    vm->Memory[vector * 4u + 3u] = 0xf0u;
+  }
+  /* BIOS user timer hook is an IRET even before a TSR installs a handler.
+   * WSWAP saves and chains this vector without checking for a null pointer. */
+  vm->Memory[0x1cu * 4u] = 0x38u;
+  vm->Memory[0x1cu * 4u + 1u] = 0x02u;
+  vm->Memory[0x1cu * 4u + 3u] = 0xf0u;
   /* Default IRQ0 advances the BIOS tick counter and chains INT 1Ch. Keep
    * this as guest code so saved vectors and guest hooks use normal IRET
    * frames, including when Windows chains the original timer handler. */
@@ -323,7 +360,7 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   /* Each BIOS/DOS entry needs its own stable address: extenders save IVT
    * pointers and call them later with DPMI 0301/0302. */
   static const U8 builtin_vectors[] = {
-    0x09, 0x10, 0x15, 0x16, 0x20, 0x21, 0x29, 0x2f, 0x31, 0x33
+    0x09, 0x10, 0x11, 0x12, 0x15, 0x16, 0x1a, 0x20, 0x21, 0x28, 0x29, 0x2f, 0x31, 0x33
   };
   for (unsigned i = 0; i < sizeof(builtin_vectors); i++) {
     unsigned vector = builtin_vectors[i];
@@ -362,11 +399,10 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
     /* Windows 3.1 standard mode locates DOSX.EXE through PATH.  The launcher
      * runs from C:\\WINDOWS2, while DOSX.EXE is installed in SYSTEM; keep the
      * drive root searchable too for ordinary DOS programs. */
-    static const U8 prefix[] = {
-      'P','A','T','H','=','C',':','\\',';',
-      'C',':','\\','W','I','N','D','O','W','S','2','\\',
-      'S','Y','S','T','E','M',0,0,1,0
-    };
+    static const U8 prefix[] =
+      "PATH=C:\\;C:\\WINDOWS2\\SYSTEM\0"
+      "TEMP=C:\\WINDOWS2\0"
+      "TMP=C:\\WINDOWS2\0\0\1";
     U32 base = (U32)DOS_ENV_SEGMENT << 4;
     memcpy(vm->Memory + base, prefix, sizeof(prefix));
     unsigned i = 0;

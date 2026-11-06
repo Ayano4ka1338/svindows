@@ -135,6 +135,9 @@ typedef struct _DOS_VM {
   U32 DpmiNextLinear;
   BOOLEAN DpmiClient32;
   BOOLEAN ProtectedMode;
+  U8 PendingException;
+  U16 PendingExceptionError;
+  U8 Cpl; /* Real-to-protected entry starts at ring zero regardless of CS bits. */
   DOS_FILE *Files[20];
   DOS_BLOCK Blocks[DOS_MAX_BLOCKS];
   U16 InitialParagraphs;
@@ -203,6 +206,7 @@ typedef struct _DOS_VM {
   U8 SerialMouseButtons;
   U8 SerialMouseUart;
   BOOLEAN SerialMouseActive;
+  BOOLEAN BiosFontsReady;
   BOOLEAN VideoActive;
   BOOLEAN VideoDirty;
   BOOLEAN KeyboardMirrorActive;
@@ -280,6 +284,7 @@ static inline U16 word(const U8 *p) {
 
 U16 free_paragraphs_from(U16 start);
 U16 dos_alloc(U16 paragraphs);
+U16 dos_largest_free(void);
 void dos_file_release(DOS_FILE *file);
 BOOLEAN guest_path(U16 s, U16 o, char out[260]);
 HANDLE standard_handle(U16 slot);
@@ -309,6 +314,7 @@ void DosVideoInherit(DOS_VM *destination, const DOS_VM *source);
 void DosVideoSetPaletteRegister(DOS_VM *vm, U8 index, U8 value);
 U8 DosVideoGetPaletteRegister(DOS_VM *vm, U8 index);
 void DosVideoWritePixel(DOS_VM *vm, U16 x, U16 y, U8 color);
+void DosVideoInitializeFonts(DOS_VM *vm);
 U8 DosVideoReadPixel(DOS_VM *vm, U16 x, U16 y);
 void DosVideoPresent(DOS_VM *vm);
 void DosVideoStop(DOS_VM *vm);
