@@ -207,6 +207,8 @@ typedef struct _DOS_VM {
   U8 SerialMouseUart;
   BOOLEAN SerialMouseActive;
   BOOLEAN BiosFontsReady;
+  void *XDisplay;
+  BOOLEAN XSession;
   BOOLEAN VideoActive;
   BOOLEAN VideoDirty;
   BOOLEAN KeyboardMirrorActive;
@@ -217,6 +219,7 @@ typedef struct _DOS_VM {
   BOOLEAN SearchActive;
   U8 ExecDepth, LastChildExitCode, LastChildTerminationType;
   BOOLEAN ChildStatusAvailable;
+  U16 LastDosError;
   int Running, ExitCode, Fault;
   U32 Steps;
   U32 CurrentInstructionIp;
@@ -327,4 +330,18 @@ U32 DosImageHash(const U8 *image, U32 size);
 BOOLEAN DosImageIsDos4g(const U8 *image, U32 size);
 U8 run_vm(DOS_VM *vm);
 
+void DosXOpen(DOS_VM *vm);
+void DosXClose(DOS_VM *vm);
+void DosXInherit(DOS_VM *destination, const DOS_VM *source);
+void DosXPoll(DOS_VM *vm);
+void DosXUpdateInput(DOS_VM *vm);
+BOOLEAN DosXPresent(DOS_VM *vm);
+BOOLEAN DosReadKey(DOS_VM *vm, UINT32 *event);
+BOOLEAN DosKeyAvailable(DOS_VM *vm);
+const MOUSE_STATE *DosHostMouse(DOS_VM *vm);
+
+void DosXAgent(DOS_VM *vm, void *packet);
+void DosVideoDimensions(DOS_VM *vm, U16 *width, U16 *height);
+U32 DosVideoRgbPixel(DOS_VM *vm, INT32 x, INT32 y);
+#define DOS_X_PACKET_SIZE 76u
 #endif

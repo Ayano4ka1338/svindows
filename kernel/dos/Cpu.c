@@ -1541,6 +1541,7 @@ static int pm_irq_installed(DOS_VM *vm, U8 vector) {
 
 static int dos_dispatch_hardware(DOS_VM *vm) {
   if (!vm) return 0;
+  DosXUpdateInput(vm);
   dos_timer_update(vm);
   DosMousePoll(vm);
   DosSerialMousePoll(vm);
@@ -1560,7 +1561,7 @@ static int dos_dispatch_hardware(DOS_VM *vm) {
     if (pm_irq_installed(vm, keyboard_vector) &&
         !(vm->PicMasterMask & 0x02u) && !vm->KeyboardDataReady) {
       UINT32 event;
-      while (KbdReadMirroredInputEvent(&event)) {
+      while (DosReadKey(vm, &event)) {
         if (event & KBD_INPUT_CHARACTER) continue;
         vm->KeyboardData = (U8)(event & 0x7fu);
         if (event & 0x0100u) vm->KeyboardData |= 0x80u;
@@ -1587,7 +1588,7 @@ static int dos_dispatch_hardware(DOS_VM *vm) {
     if (!(vm->PicMasterMask & 0x02u) &&
         (rw(0, keyboard_vector * 4u) || rw(0, keyboard_vector * 4u + 2u))) {
       UINT32 event;
-      while (KbdReadMirroredInputEvent(&event)) {
+      while (DosReadKey(vm, &event)) {
         if (event & KBD_INPUT_CHARACTER) continue;
         vm->KeyboardData = (U8)(event & 0x7fu);
         if (event & 0x0100u) vm->KeyboardData |= 0x80u;
@@ -2516,7 +2517,9 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
     }
     if (second == 0x01) {
       PM_MOD m = pm_decode(vm, segment_override, address32);
-      if ((vm->Cpl) && m.reg >= 2) {
+      /* SMSW (extension /4) is unprivileged, including at CPL 3.
+       * Watcom Win16 startup uses it to detect protected mode. */
+      if (vm->Cpl && (m.reg == 2 || m.reg == 3 || m.reg == 6)) {
         fail("DOSVM: privileged descriptor instruction fault\r\n"); return;
       }
       if (m.reg == 0 || m.reg == 1) {
@@ -2585,6 +2588,12 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   }
   if (op == 0xcd || op == 0xcc || op == 0xce) {
     U8 vector = op == 0xcc ? 3 : op == 0xce ? 4 : (U8)protected_fetch(vm, 1);
+    if (vector == 0x2f && vm->Registers[AX] == 0x5658 && vm->Registers[BX] == 0x5842) {
+      U32 linear;
+      if (protected_linear(vm, ES, vm->Registers[DI], DOS_X_PACKET_SIZE, 1, 0, &linear))
+        DosXAgent(vm, vm->Memory + linear);
+      return;
+    }
     if (op != 0xce || (vm->Eflags & OF))
       protected_interrupt(vector, 1, width);
     return;
@@ -3743,6 +3752,7 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   if (vm->MouseCallbackActive && DosMouseCallbackReturn(vm)) return;
   if (dos_hardware_poll_due(vm) && dos_dispatch_hardware(vm)) return;
   if ((vm->Steps & 0x3fffu) == 0) {
+    DosXPoll(vm);
     UINT32 tick = (UINT32)KeGetTickCount();
     if (vm->VideoActive && (tick - vm->LastVideoTick) >= 2u) {
       vm->LastVideoTick = tick;
@@ -3752,10 +3762,10 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   if (vm->ProtectedMode) {
     U16 saved_regs[8], saved_segments[6];
     U32 saved_regs32[8]; DOS_DESCRIPTOR saved_cache[6];
-    memcpy(saved_regs, vm->Registers, sizeof(saved_regs));
-    memcpy(saved_regs32, vm->Registers32, sizeof(saved_regs32));
-    memcpy(saved_segments, vm->Segments, sizeof(saved_segments));
-    memcpy(saved_cache, vm->SegmentCache, sizeof(saved_cache));
+    __builtin_memcpy(saved_regs, vm->Registers, sizeof(saved_regs));
+    __builtin_memcpy(saved_regs32, vm->Registers32, sizeof(saved_regs32));
+    __builtin_memcpy(saved_segments, vm->Segments, sizeof(saved_segments));
+    __builtin_memcpy(saved_cache, vm->SegmentCache, sizeof(saved_cache));
     U32 saved_ip = vm->Eip, saved_flags = vm->Eflags;
     U8 saved_cpl = vm->Cpl;
     step_protected(vm);
@@ -3763,10 +3773,10 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       U8 vector = vm->PendingException - 1u;
       U16 error = vm->PendingExceptionError;
       vm->PendingException = 0;
-      memcpy(vm->Registers, saved_regs, sizeof(saved_regs));
-      memcpy(vm->Registers32, saved_regs32, sizeof(saved_regs32));
-      memcpy(vm->Segments, saved_segments, sizeof(saved_segments));
-      memcpy(vm->SegmentCache, saved_cache, sizeof(saved_cache));
+      __builtin_memcpy(vm->Registers, saved_regs, sizeof(saved_regs));
+      __builtin_memcpy(vm->Registers32, saved_regs32, sizeof(saved_regs32));
+      __builtin_memcpy(vm->Segments, saved_segments, sizeof(saved_segments));
+      __builtin_memcpy(vm->SegmentCache, saved_cache, sizeof(saved_cache));
       vm->Eip = saved_ip; vm->Eflags = saved_flags; vm->Flags = (U16)saved_flags; vm->Cpl = saved_cpl;
       U8 access = vm->Memory[vm->Idtr.Base + (U32)vector * 8u + 5u];
       unsigned frame_width = access & 8u ? 32u : 16u;
@@ -4017,10 +4027,16 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     U32 di = address32 ? r32[DI] : r[DI];
     while (count--) {
       U16 source = seg[override >= 0 ? override : DS], dest = seg[ES];
-      U32 a = width == 32u ? read32(source, si) :
-              width == 16u ? rw(source, si) : rb(source, si);
-      U32 b = width == 32u ? read32(dest, di) :
-              width == 16u ? rw(dest, di) : rb(dest, di);
+      /* MOVS/LODS/CMPS read the source; only CMPS/SCAS read the
+       * destination. Besides wasted work, speculative VGA reads alter its
+       * latches even for write-only STOS. */
+      U32 a = 0, b = 0;
+      if (op <= 0xa7 || (op >= 0xac && op <= 0xad))
+        a = width == 32u ? read32(source, si) :
+            width == 16u ? rw(source, si) : rb(source, si);
+      if (op == 0xa6 || op == 0xa7 || op >= 0xae)
+        b = width == 32u ? read32(dest, di) :
+            width == 16u ? rw(dest, di) : rb(dest, di);
       if (op <= 0xa5) {
         if (width == 32u)
           write32(dest, di, a);
@@ -4939,6 +4955,11 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
   case 0xcd:
     {
       U8 vector = fetch8();
+      if (vector == 0x2f && r[AX] == 0x5658 && r[BX] == 0x5842) {
+        U32 linear = ((U32)seg[ES] << 4) + r[DI];
+        if (linear <= DOS_REAL_MEMORY_SIZE - DOS_X_PACKET_SIZE) DosXAgent(vm, vm->Memory + linear);
+        return;
+      }
       /* The default INT 31 vector is our DPMI entry. Once a DOS extender or
        * client installs its own real-mode handler, preserve normal IVT
        * dispatch so private INT 31 services reach that handler. */

@@ -155,6 +155,15 @@ UINT64 LinuxSocketReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
         return LinuxError(LINUX_EFAULT);
     LINUX_SOCKET *socket = LinuxSocketReferenceFd(process, fd);
     if (!socket) return LinuxError(LINUX_ENOTSOCK);
+    UINT64 result = LinuxLocalTransfer(socket, write, (void *)(ULONG_PTR)buffer, length, flags);
+    LinuxSocketRelease(socket);
+    return result;
+}
+
+UINT64 LinuxLocalTransfer(LINUX_SOCKET *socket, BOOLEAN write, void *data,
+                          UINT64 length, UINT64 flags)
+{
+    UINT64 buffer = (UINT64)(ULONG_PTR)data;
     UINT64 result = 0;
     while (length) {
         UINT64 irq = KiIrqSave();
@@ -186,6 +195,7 @@ UINT64 LinuxSocketReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
                 if (copied > first)
                     memcpy(peer->Data, (const void *)(ULONG_PTR)(buffer + first),
                            copied - first);
+                if (!peer->Buffered) peer->ReadSequence++;
                 peer->Buffered += copied;
                 KeSetEvent(&peer->ReadEvent);
                 if (peer->Buffered == LINUX_SOCKET_BUFFER)
@@ -224,6 +234,8 @@ UINT64 LinuxSocketReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
                 if (!(flags & LINUX_MSG_PEEK)) {
                     socket->ReadOffset = (socket->ReadOffset + copied) %
                                          LINUX_SOCKET_BUFFER;
+                    if (socket->Buffered == LINUX_SOCKET_BUFFER && socket->Peer)
+                        socket->Peer->WriteSequence++;
                     socket->Buffered -= copied;
                     KeSetEvent(&socket->SpaceEvent);
                     if (!socket->Buffered && !socket->PeerClosed)
@@ -248,7 +260,6 @@ UINT64 LinuxSocketReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
             KeWaitForSingleObject(&socket->ReadEvent.Header);
         }
     }
-    LinuxSocketRelease(socket);
     return result;
 }
 

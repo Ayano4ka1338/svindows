@@ -143,6 +143,28 @@ UINT64 LinuxEpollCtl(PKPROCESS process, UINT64 epfd, UINT64 operation,
     return result;
 }
 
+/* Sampling only the current readiness loses EPOLLET edges if a socket is
+ * drained and refilled before the next wait. AF_UNIX queues count those
+ * transitions at the producer/consumer, while holding the same IRQ lock. */
+static UINT32 linux_epoll_socket_edges(LINUX_EPOLL_CONTEXT *epoll, UINT32 i,
+                                       UINT32 current, BOOLEAN consume)
+{
+    UINT32 edges = current & ~epoll->Watches[i].LastReady;
+    LINUX_SOCKET *socket = epoll->Watches[i].Socket;
+    if (socket && socket->Family == LINUX_AF_UNIX) {
+        if ((current & 1u) && socket->ReadSequence != epoll->Watches[i].LastReadSequence)
+            edges |= 1u;
+        if ((current & 4u) && socket->WriteSequence != epoll->Watches[i].LastWriteSequence)
+            edges |= 4u;
+        if (consume) {
+            epoll->Watches[i].LastReadSequence = socket->ReadSequence;
+            epoll->Watches[i].LastWriteSequence = socket->WriteSequence;
+        }
+    }
+    if (consume) epoll->Watches[i].LastReady = current;
+    return edges;
+}
+
 UINT32 LinuxEpollPoll(PKPROCESS process, UINT64 fd)
 {
     if (fd >= LINUX_MAX_FDS || !process->LinuxContext->Files[fd].Used ||
@@ -179,7 +201,8 @@ UINT32 LinuxEpollPoll(PKPROCESS process, UINT64 fd)
             /* poll(epollfd) must re-arm an edge after observing the source
              * become not-ready, but must not consume a pending edge. */
             if (!current) epoll->Watches[i].LastReady = 0;
-            else if (!(current & ~epoll->Watches[i].LastReady))
+            else if (!(linux_epoll_socket_edges(epoll, i, current, FALSE) &
+                       (epoll->Watches[i].Events | 8u | 0x10u)))
                 continue;
         }
         if (ready & (epoll->Watches[i].Events | 8u | 0x10u)) {
@@ -243,15 +266,7 @@ UINT64 LinuxEpollWait(PKPROCESS process, UINT64 epfd, UINT64 events,
             }
             UINT32 current = ready & (1u | 4u | 8u | 0x10u | 0x2000u);
             if (epoll->Watches[i].Events & LINUX_EPOLL_ET) {
-                /* EPOLLET is a transition, not a one-time notification.
-                 * Record both the asserted and cleared states on every
-                 * wait scan.  Previously LastReady was only updated when
-                 * an event was returned, so after the first accept/read
-                 * drained a listener/socket, LastReady stayed set forever
-                 * and later connections/data never generated another edge. */
-                UINT32 previous = epoll->Watches[i].LastReady;
-                epoll->Watches[i].LastReady = current;
-                ready &= ~previous;
+                ready = linux_epoll_socket_edges(epoll, i, current, TRUE);
                 ready &= epoll->Watches[i].Events | 8u | 0x10u;
             } else {
                 ready &= epoll->Watches[i].Events | 8u | 0x10u;

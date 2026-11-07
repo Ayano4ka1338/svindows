@@ -439,14 +439,16 @@ void DosDestroyVm(PVOID context) {
   for (unsigned i = 5; i < 20; i++)
     dos_file_release(vm->Files[i]);
   DosVideoStop(vm);
-  ConRedraw();
+  DosXClose(vm);
+  if (!vm->XSession) ConRedraw();
   ExFreePool(vm->Memory);
   ExFreePool(vm);
 }
 
 U8 run_vm(DOS_VM *vm) {
   if (!vm) return 0;
-  if (!vm->KeyboardMirrorActive) {
+  DosXOpen(vm);
+  if (!vm->XSession && !vm->KeyboardMirrorActive) {
     KbdInputMirrorAcquire();
     vm->KeyboardMirrorActive = TRUE;
   }
