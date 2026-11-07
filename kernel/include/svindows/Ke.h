@@ -390,6 +390,9 @@ typedef struct _KTHREAD {
     PVOID           DosContext; /* appended; syscall assembly offsets fixed */
     UINT64          UserFsBase; /* architectural user FS base */
     struct _LINUX_THREAD_CONTEXT *LinuxThread;
+    /* One-shot dispatch boost for runnable Linux I/O clients (Xorg, window
+     * managers, and terminals). Appended so assembly-visible offsets stay put. */
+    LONG            SchedulerBoost;
 } KTHREAD, *PKTHREAD;
 
 /* Per-processor state reached through GS after swapgs. Keep the first three

@@ -64,9 +64,7 @@ LDFLAGS := -n -nostdlib -static -no-pie -z noexecstack \
            -T kernel/arch/x86_64/Linker.ld
 
 # Keep object and link order deterministic across hosts and filesystems.
-# DOS JIT is intentionally disabled in this recovery build. Exclude any
-# stale kernel/dos/Jit.c left behind when extracting a ZIP over an older tree.
-C_SRC   := $(sort $(shell find kernel -name '*.c' ! -path 'kernel/dos/Jit.c'))
+C_SRC   := $(sort $(shell find kernel -name '*.c'))
 ASM_SRC := $(sort $(shell find kernel -name '*.asm'))
 OBJ     := $(patsubst %,$(BUILD)/%.o,$(C_SRC) $(ASM_SRC))
 OBJ     += $(LWIP_OBJ)
@@ -164,16 +162,20 @@ CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
 QEMU                 ?= qemu-system-x86_64
 QEMU_MEMORY          ?= 1024M
 QEMU_MACHINE         ?= pc
+QEMU_ACCEL           ?= $(shell if test -r /dev/kvm -a -w /dev/kvm; then echo kvm; else echo tcg; fi)
 QEMU_CPU             ?= max
 QEMU_NET_ID          ?= svnet0
 QEMU_NETDEV          ?= user,id=$(QEMU_NET_ID),ipv6=off
 # Keep the device on the legacy PCI root bus and expose its legacy I/O BARs.
 # The in-tree driver currently speaks the VirtIO 0.9 PCI transport.
 QEMU_NET_DEVICE      ?= virtio-net-pci,netdev=$(QEMU_NET_ID),disable-modern=on,bus=pci.0,addr=0x04
+QEMU_AUDIO_BACKEND   ?= pa
 QEMU_EXTRA_ARGS      ?=
 QEMU_SERIAL          ?= stdio
-QEMUFLAGS            := -machine $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) -no-reboot -no-shutdown -boot d \
+QEMUFLAGS            := -machine $(QEMU_MACHINE),accel=$(QEMU_ACCEL) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) -no-reboot -no-shutdown -boot d \
                         -netdev $(QEMU_NETDEV) -device $(QEMU_NET_DEVICE) \
+                        -audiodev $(QEMU_AUDIO_BACKEND),id=svaudio0 \
+                        -device sb16,audiodev=svaudio0,irq=5,dma=1,dma16=5 \
                         $(QEMU_EXTRA_ARGS)
 .PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check dos-x11-check dos-performance-check win16-agent lwip-port-check network-check feh-path-check feh-fs-check .FORCE
 

@@ -241,6 +241,33 @@ UINT64 MmAllocatePagesBelow4G(SIZE_T count)
     return MM_INVALID_PHYS;
 }
 
+UINT64 MmAllocatePagesBelow16M(SIZE_T count)
+{
+    if (!count) return MM_INVALID_PHYS;
+    UINT64 interrupt_state = KiAcquireRawSpinLock(&g_pmm_lock);
+    UINT64 limit = g_pmm.total_pages < (0x01000000ULL >> PAGE_SHIFT) ?
+                   g_pmm.total_pages : (0x01000000ULL >> PAGE_SHIFT);
+    if ((UINT64)count > limit) {
+        KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
+        return MM_INVALID_PHYS;
+    }
+    for (UINT64 start = 0; start + count <= limit; ++start) {
+        UINT64 i;
+        for (i = 0; i < count && !bit_test(start + i); ++i) {}
+        if (i == count) {
+            for (i = 0; i < count; ++i) bit_set(start + i);
+            g_pmm.free_pages -= count;
+            g_pmm.used_pages += count;
+            g_pmm.next_hint = start + count;
+            KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
+            return start << PAGE_SHIFT;
+        }
+        start += i;
+    }
+    KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
+    return MM_INVALID_PHYS;
+}
+
 void MmFreePages(UINT64 phys, SIZE_T count)
 {
     UINT64 interrupt_state = KiAcquireRawSpinLock(&g_pmm_lock);

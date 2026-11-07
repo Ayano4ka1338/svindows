@@ -9,6 +9,13 @@ static U16 dpmi_make_descriptor(U32 base, U32 limit, U8 access, U8 desc_flags);
 static U16 dpmi_copy_descriptor(U16 function);
 static int dpmi_simulate_real_interrupt(U8 vector, U32 structure,
                                         int force_builtin_dos);
+static int dos_has_guest_interrupt_handler(U8 vector) {
+  U16 offset = rw(0, (U16)(vector * 4u));
+  U16 segment = rw(0, (U16)(vector * 4u + 2u));
+  return (offset || segment) &&
+         !(offset == DOS_BUILTIN_OFFSET(vector) &&
+           segment == DOS_BUILTIN_SEGMENT);
+}
 static __attribute__((always_inline)) inline int protected_linear(
                             DOS_VM *vm, unsigned index, U32 offset, U32 size,
                             int write, int execute, U32 *linear);
@@ -5105,8 +5112,16 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     U8 al = get8(0);
     if (op == 0xd4) {
       if (!radix) {
-        if (rw(0, 0) || rw(0, 2)) dos_int(0);
-        else fail("DOS: divide by zero\r\n");
+        if (dos_has_guest_interrupt_handler(0)) {
+          ip = instruction_ip;
+          dos_int(0);
+        } else {
+          /* With no guest INT 0 handler, keep a malformed legacy divide from
+           * killing the entire DOS VM. The quotient/remainder are undefined. */
+          set8(0, 0);
+          set8(4, 0);
+          flags &= ~(CF | OF);
+        }
         return;
       }
       set8(4, (U8)(al / radix));
@@ -5175,11 +5190,13 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
     }
     if (m.reg == 6 || m.reg == 7) {
       if (!v) {
-        if (rw(0, 0) || rw(0, 2)) {
+        if (dos_has_guest_interrupt_handler(0)) {
           ip = instruction_ip;
           dos_int(0);
         } else {
-          fail("DOS: divide by zero\r\n");
+          r[AX] = 0;
+          r[DX] = 0;
+          flags &= ~(CF | OF);
         }
         return;
       }
@@ -5187,11 +5204,13 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       if (m.reg == 6) {
         quotient = dividend / v;
         if (quotient > (wide ? 0xffffu : 0xffu)) {
-          if (rw(0, 0) || rw(0, 2)) {
+          if (dos_has_guest_interrupt_handler(0)) {
             ip = instruction_ip;
             dos_int(0);
           } else {
-            fail("DOS: divide overflow\r\n");
+            r[AX] = 0;
+            r[DX] = 0;
+            flags &= ~(CF | OF);
           }
           return;
         }
@@ -5204,21 +5223,25 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
         INT32 signed_dividend = wide ? (INT32)dividend : (INT16)dividend;
         INT32 divisor = wide ? (INT16)v : (signed char)v;
         if (signed_dividend == (INT32)0x80000000u && divisor == -1) {
-          if (rw(0, 0) || rw(0, 2)) {
+          if (dos_has_guest_interrupt_handler(0)) {
             ip = instruction_ip;
             dos_int(0);
           } else {
-            fail("DOS: divide overflow\r\n");
+            r[AX] = 0;
+            r[DX] = 0;
+            flags &= ~(CF | OF);
           }
           return;
         }
         INT32 q = signed_dividend / divisor;
         if (q < (wide ? -32768 : -128) || q > (wide ? 32767 : 127)) {
-          if (rw(0, 0) || rw(0, 2)) {
+          if (dos_has_guest_interrupt_handler(0)) {
             ip = instruction_ip;
             dos_int(0);
           } else {
-            fail("DOS: divide overflow\r\n");
+            r[AX] = 0;
+            r[DX] = 0;
+            flags &= ~(CF | OF);
           }
           return;
         }

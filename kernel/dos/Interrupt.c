@@ -1953,6 +1953,27 @@ static void dos_int_dispatch(U8 n) {
     r[DX] = ((U16)now.Second << 8) | now.Hundredths;
     break;
   }
+  case 0x2d: { /* Set time; validate input but never change the host clock. */
+    U8 hour = get8(5), minute = get8(1);
+    U8 second = get8(6), hundredths = get8(2);
+    set8(0, hour < 24u && minute < 60u && second < 60u &&
+                   hundredths < 100u ? 0u : 0xffu);
+    break;
+  }
+  case 0x32: { /* Get DOS parameter block for the default/C: drive. */
+    U8 drive = get8(2);
+    if (drive == 0 || drive == 3) {
+      set8(0, 0);
+      seg[DS] = DOS_SYSTEM_DATA_SEGMENT;
+      r[BX] = DOS_DPB_OFFSET;
+      flags &= ~CF;
+    } else {
+      set8(0, 0xffu);
+      r[BX] = 0;
+      flags |= CF;
+    }
+    break;
+  }
   case 0x1b:
   case 0x1c: { /* Allocation information and pointer to the media byte. */
     U8 drive = ah == 0x1b ? 0 : (U8)r[DX];

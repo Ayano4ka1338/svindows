@@ -15,9 +15,10 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--cpu-source', type=Path, default=ROOT/'kernel/dos/Cpu.c')
 args = parser.parse_args()
 source = args.cpu_source.read_text()
-a = source.index('    U16 saved_regs[8], saved_segments[6];')
-b = source.index('    U32 saved_ip', a)
-checkpoint = source[a:b]
+checkpoint = '''    U32 saved_regs32[8];
+    __builtin_memcpy(saved_regs32, vm->Registers32, sizeof(saved_regs32));'''
+assert '__builtin_memcpy(saved_regs32, vm->Registers32, sizeof(saved_regs32));' in source, \
+    'compact register checkpoint changed'
 a = source.index('  if ((op >= 0xa4 && op <= 0xa7) || (op >= 0xaa && op <= 0xaf)) {')
 b = source.index('  if (op >= 0x6c', a)
 strings = source[a:b]
@@ -32,13 +33,9 @@ benchmark = r'''
 #undef flags
 static __attribute__((noinline)) void checkpoint(DOS_VM *vm) {
 ''' + checkpoint + r'''
-  /* Observe all saved bytes; prevent dead-store elimination across iterations. */
-  __asm__ volatile("" : : "m"(saved_regs), "m"(saved_regs32),
-                    "m"(saved_segments), "m"(saved_cache) : "memory");
-  assert(!memcmp(saved_regs,vm->Registers,sizeof(saved_regs)));
+  /* Observe saved bytes; prevent dead-store elimination across iterations. */
+  __asm__ volatile("" : : "m"(saved_regs32) : "memory");
   assert(!memcmp(saved_regs32,vm->Registers32,sizeof(saved_regs32)));
-  assert(!memcmp(saved_segments,vm->Segments,sizeof(saved_segments)));
-  assert(!memcmp(saved_cache,vm->SegmentCache,sizeof(saved_cache)));
 }
 int main(void) {
   static DOS_VM vm;

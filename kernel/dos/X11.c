@@ -666,7 +666,7 @@ BOOLEAN DosXPresent(DOS_VM *vm) {
             put32(r + 8, x->Gc);
             put16(r + 12, w->Guest.Width);
             put16(r + 14, 1);
-            put16(r + 18, y);
+            put16(r + 18, (U16)y);
             r[21] = x->Depth;
             U64 hash = 14695981039346656037ULL ^ w->Guest.Width;
             for (U32 col = 0; col < w->Guest.Width; col++) {

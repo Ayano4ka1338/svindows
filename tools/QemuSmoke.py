@@ -38,9 +38,12 @@ def main():
                 qmp_path = Path(temporary) / "qmp.sock"
                 process = subprocess.Popen([
                     "qemu-system-x86_64", "-m", "1024M", "-no-reboot",
-                    "-no-shutdown", "-boot", "d", "-machine", "pc", "-cpu", "max", "-cdrom",
+                    "-no-shutdown", "-boot", "d", "-machine", "pc", "-cpu", "max",
+                    "-cdrom",
                     str(ROOT / "build/svindows.iso"), "-netdev", "user,id=svnet0",
                     "-device", "virtio-net-pci,netdev=svnet0,disable-modern=on,bus=pci.0,addr=0x04",
+                    "-audiodev", "none,id=svaudio0",
+                    "-device", "sb16,audiodev=svaudio0,irq=5,dma=1,dma16=5",
                     "-display", "none", "-monitor", "none", "-serial", "stdio",
                     "-qmp", f"unix:{qmp_path},server=on,wait=off",
                 ], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
