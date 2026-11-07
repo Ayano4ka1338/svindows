@@ -2,7 +2,38 @@
 #include <svindows/Gfx.h>
 #include <svindows/Console.h>
 #include <svindows/Hal.h>
+#include <svindows/Mm.h>
 #include "Internal.h"
+
+#define DOS_VIDEO_SCALE_MAX 8192u
+static U16 dos_video_xmap[DOS_VIDEO_SCALE_MAX];
+static U16 dos_video_ymap[DOS_VIDEO_SCALE_MAX];
+static U32 dos_video_map_width, dos_video_map_height;
+static U32 dos_video_map_source_width, dos_video_map_source_height;
+
+static int dos_video_prepare_scale_map(U32 source_width, U32 source_height,
+                                       U32 width, U32 height,
+                                       const U16 **xmap, const U16 **ymap)
+{
+    if (!width || !height || width > DOS_VIDEO_SCALE_MAX ||
+        height > DOS_VIDEO_SCALE_MAX)
+        return 0;
+    if (dos_video_map_width != width || dos_video_map_height != height ||
+        dos_video_map_source_width != source_width ||
+        dos_video_map_source_height != source_height) {
+        for (U32 x = 0; x < width; ++x)
+            dos_video_xmap[x] = (U16)((U64)x * source_width / width);
+        for (U32 y = 0; y < height; ++y)
+            dos_video_ymap[y] = (U16)((U64)y * source_height / height);
+        dos_video_map_width = width;
+        dos_video_map_height = height;
+        dos_video_map_source_width = source_width;
+        dos_video_map_source_height = source_height;
+    }
+    *xmap = dos_video_xmap;
+    *ymap = dos_video_ymap;
+    return 1;
+}
 
 /* BIOS OEM font tables use the same licensed glyph atlas as the console. */
 void DosVideoInitializeFonts(DOS_VM *vm) {
@@ -47,6 +78,25 @@ void DosVideoInitializeFonts(DOS_VM *vm) {
     vm->BiosFontsReady = TRUE;
 }
 
+static void dos_video_fps_sample(DOS_VM *vm)
+{
+    if (!vm || vm->VideoMode != 0x13u) return;
+    U32 now = (U32)KeGetTickCount();
+    if (!vm->VideoFpsLastTick) {
+        vm->VideoFpsLastTick = now ? now : 1u;
+        vm->VideoFpsFrames = 0;
+        return;
+    }
+    vm->VideoFpsFrames++;
+    U32 elapsed = now - vm->VideoFpsLastTick;
+    if (elapsed >= 100u) {
+        KeLog("[dos-fps] mode13=%u frames/s over %u ticks\n",
+              (unsigned)(vm->VideoFpsFrames * 100u / elapsed), elapsed);
+        vm->VideoFpsLastTick = now;
+        vm->VideoFpsFrames = 0;
+    }
+}
+
 #define VGA_MEMORY_BASE 0x000a0000u
 #define VGA_MODE13_SIZE (320u * 200u)
 
@@ -68,6 +118,58 @@ static UINT32 dos_vga_attribute_color(DOS_VM *vm, U8 pixel) {
     if (vm->VgaAttribute[0x10] & 0x80u) index = (index & 15u) | ((select & 3u) << 4);
     index |= (select & 12u) << 4;
     return dos_vga_color(vm, index & vm->VgaDacMask);
+}
+
+typedef struct _DOS_MODE13_RENDER {
+    DOS_VM *Vm;
+    UINT8 *Source;
+    UINT32 Colors[256];
+    const U16 *XMap, *YMap;
+    UINT32 Width, Height, Stride, Start;
+    BOOLEAN Mapped;
+} DOS_MODE13_RENDER;
+
+static void dos_video_render_mode13_rows(PVOID opaque, UINT32 first,
+                                         UINT32 end)
+{
+    DOS_MODE13_RENDER *render = opaque;
+    DOS_VM *vm = render->Vm;
+    for (UINT32 y = first; y < end; ++y) {
+        U32 sy = render->Mapped ? render->YMap[y]
+                                : (U32)((U64)y * 200u / render->Height);
+        U32 *dst = GfxFramebuffer.Base + y * render->Stride;
+        /* Nearest-neighbour vertical scaling repeats source rows (commonly
+         * four times at the 1200x800 boot mode). Copy completed rows with the
+         * SSE2 bulk primitive instead of repeating palette conversion. */
+        if (y > first) {
+            U32 previous_sy = render->Mapped ? render->YMap[y - 1u]
+                : (U32)((U64)(y - 1u) * 200u / render->Height);
+            if (previous_sy == sy) {
+                DosSimdCopy(dst, dst - render->Stride,
+                            (SIZE_T)render->Width * sizeof(U32));
+                continue;
+            }
+        }
+        U32 source_row = sy * 320u;
+        U32 x = 0;
+        while (x < render->Width) {
+            U32 sx = render->Mapped ? render->XMap[x]
+                : (U32)((U64)x * 320u / render->Width);
+            U8 pixel = (vm->VgaSequencer[4] & 8u)
+                ? render->Source[source_row + sx]
+                : vm->VgaPlanes[sx & 3u][(render->Start + sy * 80u + sx / 4u) & 0xffffu];
+            U32 color = render->Colors[pixel];
+            /* Horizontal nearest-neighbour expansion repeats source pixels.
+             * Resolve the palette once per source pixel, then write the run. */
+            do {
+                dst[x++] = color;
+                if (x >= render->Width) break;
+                U32 next_sx = render->Mapped ? render->XMap[x]
+                    : (U32)((U64)x * 320u / render->Width);
+                if (next_sx != sx) break;
+            } while (1);
+        }
+    }
 }
 
 static UINT32 dos_ega_color(U8 value)
@@ -438,7 +540,7 @@ static void dos_video_draw_mouse_cursor(DOS_VM *vm, U32 left, U32 top,
     }
 }
 
-void DosVideoPresent(DOS_VM *vm)
+__attribute__((optimize("O3"))) void DosVideoPresent(DOS_VM *vm)
 {
     if (!vm || !vm->VideoActive || !vm->VideoDirty ||
         !GfxAvailable() || !vm->Memory)
@@ -461,13 +563,16 @@ void DosVideoPresent(DOS_VM *vm)
         UINT32 palette[4];
         for (unsigned i = 0; i < 4; i++)
             palette[i] = dos_ega_color(vm->VgaAttribute[i]);
+        const U16 *xmap = NULL, *ymap = NULL;
+        int mapped = dos_video_prepare_scale_map(source_width, 200u, width,
+                                                 height, &xmap, &ymap);
         const U8 *cga = vm->Memory + 0xb8000u;
         for (UINT32 y = 0; y < height; y++) {
-            UINT32 sy = y * 200u / height;
+            UINT32 sy = mapped ? ymap[y] : (UINT32)((U64)y * 200u / height);
             UINT32 row = dos_cga_scanline_offset(sy);
             UINT32 *dst = GfxFramebuffer.Base + y * stride;
             for (UINT32 x = 0; x < width; x++) {
-                UINT32 sx = x * source_width / width;
+                UINT32 sx = mapped ? xmap[x] : (UINT32)((U64)x * source_width / width);
                 U8 bits = cga[row + (vm->VideoMode == 0x06u ? (sx >> 3) : (sx >> 2))];
                 U32 pixel = vm->VideoMode == 0x06u
                     ? ((bits >> (7u - (sx & 7u))) & 1u)
@@ -488,10 +593,13 @@ void DosVideoPresent(DOS_VM *vm)
         U32 start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
         U32 colors[16];
         for (unsigned i = 0; i < 16; i++) colors[i] = dos_vga_attribute_color(vm, (U8)i);
+        const U16 *xmap = NULL, *ymap = NULL;
+        int mapped = dos_video_prepare_scale_map(sw, sh, width, height,
+                                                 &xmap, &ymap);
         for (U32 y = 0; y < height; y++) {
-            U32 source_y = y * sh / height;
+            U32 source_y = mapped ? ymap[y] : (U32)((U64)y * sh / height);
             for (U32 x = 0; x < width; x++) {
-                U32 source_x = x * sw / width;
+                U32 source_x = mapped ? xmap[x] : (U32)((U64)x * sw / width);
                 U32 offset = (start + source_y * (sw / 8u) + source_x / 8u) & 0xffffu;
                 U8 pixel = 0;
                 for (unsigned plane = 0; plane < 4; plane++)
@@ -508,21 +616,24 @@ void DosVideoPresent(DOS_VM *vm)
     UINT32 left = 0, top = 0;
     UINT8 *source = vm->Memory + VGA_MEMORY_BASE;
 
-    UINT32 colors[256];
-    for (unsigned i = 0; i < 256; i++) colors[i] = dos_vga_color(vm, (U8)i);
-    U32 start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
-    for (UINT32 y = 0; y < height; y++) {
-        UINT32 sy = y * 200u / height;
-        UINT32 *dst = GfxFramebuffer.Base + y * stride;
-        for (UINT32 x = 0; x < width; x++) {
-            UINT32 sx = x * 320u / width;
-            U8 pixel = (vm->VgaSequencer[4] & 8u) ? source[sy * 320u + sx]
-                : vm->VgaPlanes[sx & 3u][(start + sy * 80u + sx / 4u) & 0xffffu];
-            UINT32 color = colors[pixel];
-            dst[x] = color;
-        }
-    }
+    const U16 *xmap = NULL, *ymap = NULL;
+    int mapped = dos_video_prepare_scale_map(320u, 200u, width, height,
+                                             &xmap, &ymap);
+    DOS_MODE13_RENDER render = {0};
+    render.Vm = vm;
+    render.Source = source;
+    render.XMap = xmap;
+    render.YMap = ymap;
+    render.Width = width;
+    render.Height = height;
+    render.Stride = stride;
+    render.Start = ((U32)vm->VgaCrtc[0x0c] << 8) | vm->VgaCrtc[0x0d];
+    render.Mapped = mapped;
+    for (unsigned i = 0; i < 256; ++i)
+        render.Colors[i] = dos_vga_color(vm, (U8)i);
+    dos_video_render_mode13_rows(&render, 0, height);
     dos_video_draw_mouse_cursor(vm, left, top, 1u, 320u, 200u, 640u);
+    dos_video_fps_sample(vm);
     vm->VideoDirty = FALSE;
 }
 
@@ -650,6 +761,73 @@ BOOLEAN DosSerialMouseIrqPending(DOS_VM *vm, unsigned uart_index)
            (uart[4] & 0x08u);
 }
 
+static int dos_sb_hw_write(U8 value)
+{
+    for (unsigned tries = 0; tries < 100000u; ++tries)
+        if (!(__inbyte(0x022cu) & 0x80u)) {
+            __outbyte(0x022cu, value);
+            return 1;
+        }
+    return 0;
+}
+
+static void dos_sb_hw_start(DOS_VM *vm, U8 command, const U8 *args,
+                            unsigned arg_count)
+{
+    if (!vm->SbHardwarePresent || !vm->SbDmaBuffer || !arg_count) return;
+    unsigned count_arg = command == 0xc0u || command == 0xc6u ? 1u : 0u;
+    if (!((command == 0x14u || command == 0x1cu ||
+           command == 0xc0u || command == 0xc6u) &&
+          arg_count == (count_arg ? 3u : 2u))) return;
+
+    U32 length = (U32)args[count_arg] |
+                 ((U32)args[count_arg + 1u] << 8);
+    length++;
+    U32 source = ((U32)vm->DmaPageRegisters[3] << 16) |
+                 vm->DmaRegisters[2];
+    if (!length || length > 0x10000u || source >= MEM_SIZE ||
+        length > MEM_SIZE - source ||
+        (vm->DmaMask & 0x02u) ||
+        vm->SbDmaAllocationPhysical == MM_INVALID_PHYS) return;
+
+    memcpy(vm->SbDmaBuffer, vm->Memory + source, length);
+    UINT64 buffer_phys = (vm->SbDmaAllocationPhysical + 0xffffu) & ~0xffffULL;
+    U16 dma_address = (U16)buffer_phys;
+    /* 8237 channel 1: single-cycle memory-to-device, 8-bit samples. */
+    __outbyte(0x000a, 0x05u); /* mask channel 1 */
+    __outbyte(0x000c, 0);
+    __outbyte(0x000b, 0x49u);
+    __outbyte(0x0002, (U8)dma_address);
+    __outbyte(0x0002, (U8)(dma_address >> 8));
+    __outbyte(0x0003, (U8)(length - 1u));
+    __outbyte(0x0003, (U8)((length - 1u) >> 8));
+    __outbyte(0x0083, (U8)(buffer_phys >> 16));
+    __outbyte(0x000a, 0x01u); /* unmask channel 1 */
+
+    (void)dos_sb_hw_write(command);
+    for (unsigned i = 0; i < arg_count; ++i)
+        if (!dos_sb_hw_write(args[i])) break;
+}
+
+static void dos_sb_hw_command(DOS_VM *vm, U8 command, const U8 *args,
+                              unsigned arg_count)
+{
+    if (!vm->SbHardwarePresent) return;
+    if (command == 0xd1u || command == 0xd3u || command == 0xd8u ||
+        command == 0xd0u || command == 0xd4u) {
+        (void)dos_sb_hw_write(command);
+        return;
+    }
+    if (command == 0x40u || command == 0x41u || command == 0xe0u ||
+        command == 0x10u) {
+        if (dos_sb_hw_write(command))
+            for (unsigned i = 0; i < arg_count; ++i)
+                if (!dos_sb_hw_write(args[i])) break;
+        return;
+    }
+    dos_sb_hw_start(vm, command, args, arg_count);
+}
+
 U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
 {
     if (width > 8) {
@@ -659,6 +837,17 @@ U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
     }
     U32 value;
     U8 byte = 0xffu;
+    /* Sound Blaster 2.0 DSP at the conventional 220h base. */
+    if (port == 0x022au) {
+        if (vm->SbDspResponseCount) {
+            byte = vm->SbDspResponse[vm->SbDspResponseHead++ & 7u];
+            vm->SbDspResponseCount--;
+        } else byte = 0xffu;
+        return byte;
+    }
+    if (port == 0x022cu) return 0;
+    if (port == 0x022eu) return vm->SbDspResponseCount ? 0x80u : 0;
+    if (port == 0x022fu) return vm->SbDspResponseCount ? 0x80u : 0;
     if ((port >= 0x02f8u && port <= 0x02ffu) ||
         (port >= 0x03f8u && port <= 0x03ffu)) {
         unsigned uart_index = port >= 0x03f8u;
@@ -757,6 +946,69 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
         return;
     }
     U8 byte = (U8)value;
+    if (port == 0x0226u) {
+        if (byte & 1u) {
+            vm->SbDspReset = TRUE;
+            vm->SbDspResponseHead = vm->SbDspResponseCount = 0;
+        } else if (vm->SbDspReset) {
+            vm->SbDspReset = FALSE;
+            vm->SbDspResponse[0] = 0xaau;
+            vm->SbDspResponseHead = 0;
+            vm->SbDspResponseCount = 1;
+            /* The emulated DSP remains available without a physical card.
+             * If a QEMU SB16 is present, use it as the host PCM sink. */
+            vm->SbHardwarePresent = FALSE;
+            __outbyte(0x0226u, 1u);
+            __iodelay();
+            __outbyte(0x0226u, 0u);
+            for (unsigned tries = 0; tries < 100000u; ++tries) {
+                if (__inbyte(0x022eu) & 0x80u) {
+                    if (__inbyte(0x022au) == 0xaau)
+                        vm->SbHardwarePresent = TRUE;
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    if (port == 0x022cu) {
+        if (vm->SbDspArgsNeeded) {
+            if (vm->SbDspArgCount < sizeof(vm->SbDspArgs))
+                vm->SbDspArgs[vm->SbDspArgCount] = byte;
+            vm->SbDspArgCount++;
+            if (vm->SbDspArgCount >= vm->SbDspArgsNeeded) {
+                dos_sb_hw_command(vm, vm->SbDspCommand, vm->SbDspArgs,
+                                  vm->SbDspArgsNeeded);
+                vm->SbDspArgsNeeded = vm->SbDspArgCount = 0;
+            }
+            return;
+        }
+        vm->SbDspCommand = byte;
+        vm->SbDspArgCount = 0;
+        switch (byte) {
+        case 0xe1: /* Get DSP version. */
+            vm->SbDspResponse[0] = vm->SbDspVersionMajor ? vm->SbDspVersionMajor : 4;
+            vm->SbDspResponse[1] = vm->SbDspVersionMinor;
+            vm->SbDspResponseHead = 0;
+            vm->SbDspResponseCount = 2;
+            break;
+        case 0x10: case 0x40: case 0xe0:
+            vm->SbDspArgsNeeded = 1; break;
+        case 0x41:
+            vm->SbDspArgsNeeded = 2; break;
+        case 0x14: case 0x24: case 0x48: case 0x80:
+            vm->SbDspArgsNeeded = 2; break;
+        case 0x1c: case 0xc0: case 0xc6:
+            vm->SbDspArgsNeeded = byte == 0x1cu ? 2 : 3; break;
+        case 0xd0: case 0xd1: case 0xd3: case 0xd4: case 0xd8:
+            break; /* DMA pause/resume and speaker controls are acknowledged. */
+        default:
+            break;
+        }
+        if (!vm->SbDspArgsNeeded)
+            dos_sb_hw_command(vm, byte, NULL, 0);
+        return;
+    }
     if ((port >= 0x02f8u && port <= 0x02ffu) ||
         (port >= 0x03f8u && port <= 0x03ffu)) {
         unsigned uart_index = port >= 0x03f8u;

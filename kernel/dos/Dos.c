@@ -1,4 +1,5 @@
 /* DOS image loading and VM lifetime. */
+#include <svindows/Mm.h>
 #include "Internal.h"
 #include <svindows/Console.h>
 
@@ -303,8 +304,19 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   vm->PitReload = 0;
   vm->VgaMiscOutput = 0x63u;
   vm->VgaDacMask = 0xffu;
+  vm->SbDspVersionMajor = 2u;
+  vm->SbDspVersionMinor = 1u;
+  /* Reserve one 64 KiB aligned bounce window for the physical 8237 channel 1.
+   * SB DMA cannot cross a 64 KiB boundary and must remain below 16 MiB. */
+  vm->SbDmaAllocationPhysical = MmAllocatePagesBelow16M(32);
+  if (vm->SbDmaAllocationPhysical != MM_INVALID_PHYS) {
+    UINT64 aligned = (vm->SbDmaAllocationPhysical + 0xffffu) & ~0xffffULL;
+    vm->SbDmaBuffer = (U8 *)MmPhysToVirt(aligned);
+  }
   vm->Memory = ExAllocatePoolWithTag(NonPagedPool, MEM_SIZE, 'asoD');
   if (!vm->Memory) {
+    if (vm->SbDmaAllocationPhysical != MM_INVALID_PHYS)
+      MmFreePages(vm->SbDmaAllocationPhysical, 32);
     ExFreePool(vm);
     return STATUS_NO_MEMORY;
   }
@@ -423,6 +435,8 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   KeGetCurrentThread()->DosContext = previous;
   if (!ok) {
     ExFreePool(vm->Memory);
+    if (vm->SbDmaAllocationPhysical != MM_INVALID_PHYS)
+      MmFreePages(vm->SbDmaAllocationPhysical, 32);
     ExFreePool(vm);
     return STATUS_INVALID_IMAGE_FORMAT;
   }
@@ -438,9 +452,12 @@ void DosDestroyVm(PVOID context) {
     return;
   for (unsigned i = 5; i < 20; i++)
     dos_file_release(vm->Files[i]);
+  DosJitDestroy(vm);
   DosVideoStop(vm);
   DosXClose(vm);
   if (!vm->XSession) ConRedraw();
+  if (vm->SbDmaAllocationPhysical != MM_INVALID_PHYS)
+    MmFreePages(vm->SbDmaAllocationPhysical, 32);
   ExFreePool(vm->Memory);
   ExFreePool(vm);
 }
@@ -459,6 +476,9 @@ U8 run_vm(DOS_VM *vm) {
      * run-loop call from every guest instruction without changing instruction
      * boundaries, virtual IRQ polling, or the kernel timer's preemption. */
     if (!DosCpuRunBatch(vm, DOS_CPU_BATCH_SIZE)) break;
+    /* DOS applications hosted by Xorg often poll video/input without blocking.
+     * Yield periodically so the X server and its clients get prompt CPU time. */
+    if (vm->XSession && !(vm->Steps & 0xffffu)) KeYield();
     /* The timer IRQ enforces the normal kernel-thread quantum.  A periodic
      * cooperative yield is only a long-run safety valve for unusual systems
      * where the timer is masked. The batch size divides this interval. */

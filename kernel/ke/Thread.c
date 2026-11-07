@@ -43,6 +43,17 @@ static LIST_ENTRY     g_all_threads;
 static ULONG          g_next_thread_id;
 static volatile UINT64 g_tick_count;
 static KSPIN_LOCK g_scheduler_lock;
+
+static LONG KepDispatchPriority(PKTHREAD thread)
+{
+    LONG priority = thread->Priority + thread->SchedulerBoost;
+    if (!thread->Process || thread->Process->PriorityClass != 4) {
+        if (priority > 15) priority = 15;
+    } else if (priority > 31) {
+        priority = 31;
+    }
+    return priority;
+}
 static KDPC g_clock_dpc;
 static void KepClockDpc(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2);
 static void KiSchedule(void);
@@ -441,11 +452,13 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
     } else {
         PLIST_ENTRY e = g_ready_queue.Flink;
         PLIST_ENTRY best = e;
-        LONG highest = CONTAINING_RECORD(e, KTHREAD, ReadyEntry)->Priority;
+        PKTHREAD first = CONTAINING_RECORD(e, KTHREAD, ReadyEntry);
+        LONG highest = KepDispatchPriority(first);
         for (e = e->Flink; e != &g_ready_queue; e = e->Flink) {
             PKTHREAD candidate = CONTAINING_RECORD(e, KTHREAD, ReadyEntry);
-            if (candidate->Priority > highest) {
-                highest = candidate->Priority;
+            LONG score = KepDispatchPriority(candidate);
+            if (score > highest) {
+                highest = score;
                 best = e;
             }
         }
@@ -468,6 +481,7 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
 
     next->State = ThreadStateRunning;
     next->Quantum = DEFAULT_QUANTUM;
+    next->SchedulerBoost = 0;
     KeGetCurrentProcessorBlock()->CurrentThread = next;
     KeSetCurrentThread(next);
 
@@ -550,8 +564,18 @@ void KiReadyThreadWithSchedulerLock(PKTHREAD thread)
     if (thread->State == ThreadStateWaiting) {
         thread->State = thread->SuspendCount ? ThreadStateSuspended :
                                                ThreadStateReady;
-        if (!thread->SuspendCount)
+        if (!thread->SuspendCount) {
+            /* Xorg and its clients frequently wake for socket/input work.
+             * Give a just-woken Linux thread one dispatch at +1 priority so
+             * a continuously running DOS VM cannot add a full quantum of
+             * latency to each display request. The boost is consumed when
+             * the scheduler selects the thread and never changes its base or
+             * Windows-visible priority. */
+            if (thread->Process && thread->Process->LinuxContext &&
+                thread->SchedulerBoost < 1)
+                thread->SchedulerBoost = 1;
             InsertTailList(&g_ready_queue, &thread->ReadyEntry);
+        }
     }
 }
 

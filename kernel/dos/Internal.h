@@ -86,6 +86,26 @@ typedef struct _DOS_DESCRIPTOR {
   BOOLEAN Valid;
 } DOS_DESCRIPTOR;
 
+#define DOS_JIT_CACHE_ENTRIES 256u
+typedef struct _DOS_JIT_OP {
+  U8 Kind, Opcode, Width, ModRm;
+  U8 Reg, Reg2, Segment, Condition;
+  U8 BaseReg, IndexReg, Scale, HasSib;
+  U32 Displacement, Immediate, NextIp, Target;
+} DOS_JIT_OP;
+typedef struct _DOS_JIT_ENTRY {
+  void *Storage;
+  U8 *Code;
+  U32 StartIp, CodeBase, CodeLimit, Signature;
+  U32 SourceLength, InstructionCount;
+  U16 Selector;
+  BOOLEAN NoJit, BudgetLimited, Warmup;
+  U8 WarmCount;
+} DOS_JIT_ENTRY;
+typedef struct _DOS_JIT_CACHE {
+  DOS_JIT_ENTRY Entries[DOS_JIT_CACHE_ENTRIES];
+} DOS_JIT_CACHE;
+
 typedef struct _DOS_DPMI_BLOCK {
   U32 Base, Size;
   BOOLEAN Used;
@@ -197,7 +217,15 @@ typedef struct _DOS_VM {
   U16 DmaRegisters[8];
   U8 DmaPageRegisters[16], DmaFlipFlop, DmaStatus;
   U8 DmaCommand, DmaMask, DmaMode;
-  U32 LastVideoTick, LastTimerTick, DosTimerPhase;
+  U8 SbDspCommand, SbDspArgsNeeded, SbDspArgCount;
+  U8 SbDspResponse[8], SbDspResponseHead, SbDspResponseCount;
+  U8 SbDspVersionMajor, SbDspVersionMinor;
+  U8 SbDspArgs[4];
+  UINT64 SbDmaAllocationPhysical;
+  U8 *SbDmaBuffer;
+  BOOLEAN SbDspReset, SbHardwarePresent;
+  U32 LastVideoTick, LastTimerTick, DosTimerPhase, VideoPresentPhase;
+  U32 VideoFpsLastTick, VideoFpsFrames;
   U32 PortTraceCount;
   U8 UartRegisters[2][8];
   U8 UartRx[2][64], UartRxHead[2], UartRxTail[2];
@@ -226,6 +254,9 @@ typedef struct _DOS_VM {
   U8 CurrentOpcode;
   U8 InterruptShadow;
   U32 HardwarePollDeadline;
+  U32 HardwarePollCountdown; /* compatibility mirror for native JIT probes */
+  DOS_JIT_CACHE *JitCache;
+  U32 JitLastExecuted;
 } DOS_VM;
 
 static inline DOS_VM *current(void) {
@@ -326,6 +357,11 @@ BOOLEAN KbdMirroredInputEventAvailable(void);
 void step(void);
 void step_vm(DOS_VM *vm);
 U32 DosCpuRunBatch(DOS_VM *vm, U32 max_steps);
+U32 DosJitRun(DOS_VM *vm, U32 instruction_budget);
+U32 DosJitRunHot(DOS_VM *vm, U32 instruction_budget);
+void DosJitDestroy(DOS_VM *vm);
+void DosSimdCopy(void *destination, const void *source, SIZE_T byte_count);
+void DosSimdFill32(void *destination, U32 value, SIZE_T dword_count);
 U32 DosImageHash(const U8 *image, U32 size);
 BOOLEAN DosImageIsDos4g(const U8 *image, U32 size);
 U8 run_vm(DOS_VM *vm);

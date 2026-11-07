@@ -113,6 +113,8 @@ UINT64 MmAllocatePages(SIZE_T count);        /* `count` contiguous frames       
 /* DMA32 allocations are physically below 4 GiB for legacy bus masters. */
 UINT64 MmAllocatePageBelow4G(void);
 UINT64 MmAllocatePagesBelow4G(SIZE_T count);
+/* Legacy 8237 DMA buffers must fit below the 16 MiB address ceiling. */
+UINT64 MmAllocatePagesBelow16M(SIZE_T count);
 void   MmFreePages(UINT64 phys, SIZE_T count);
 
 UINT64 MmTotalPages(void);

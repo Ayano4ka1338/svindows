@@ -11,7 +11,10 @@ paths, streams, and directory search. `Internal.h` holds their shared VM
 state and low-level memory helpers.
 
 The DOS process has a private 1 MiB real-mode memory arena. The kernel
-interpreter models 16-bit registers and segment:offset addressing, a PSP, the
+backs a 128 MiB flat-memory address space per DOS VM and reports bounds from
+that same limit to DPMI clients. Windows 3 standard mode
+and DOS/4GW games use separate VM instances; allocations are released on exit.
+The interpreter models 16-bit registers and segment:offset addressing, a PSP, the
 COM load address (`PSP:0100`), and DOS MZ image layout and relocation records. It
 handles common 8086 arithmetic, data movement, branches, stack, string and
 shift instructions, plus selected 80186 instructions. The interpreter also
@@ -90,16 +93,27 @@ The DOS environment includes `C:\WINDOWS3\SYSTEM` in `PATH`, which lets
 are also modeled. For separate top-level Win16 windows inside Xorg, use
 `WIN3X` from the X session; see [the legacy X11 backend](LegacyX11.md) for its
 rendering model, build instructions and current limitations.
+The DOS X11 backend retains unchanged-row detection and sends modified
+scanlines individually to the X server.
 
-The DOS CPU currently uses the optimized native C interpreter and batched
-execution loop. A native-code JIT is not present in this source tree; the
-`kernel/dos/Jit.c` file is a disabled stub and is excluded from the build.
+The DOS CPU uses a batched interpreter with a native x86-64 JIT for hot,
+flat 32-bit DPMI blocks. The JIT caches translations by CS:EIP, validates a
+source-byte signature on cache hits, and recompiles self-modifying code.
+Supported blocks include common register and RAM moves, arithmetic, branches,
+stack/call/return, shifts, multiply, narrow loads, and REP MOVS/STOS. VGA,
+non-flat addressing, unsupported opcodes, and interrupt-boundary instructions
+return to the checked interpreter. Cold blocks stay interpreted until they
+have been encountered repeatedly. The bundled DOS/4G Doom image stays on the
+optimized interpreter because measurements in QEMU TCG showed the helper-based
+JIT was slower for that workload.
 
 The DOS VM also virtualizes the PC I/O instructions `IN`/`OUT` and their
 string forms. Its virtual devices currently cover the VGA DAC and mode-13h
 linear framebuffer (`A000:0000`), CGA mode 04h-06h scanout (`B800:0000`),
 basic VGA status/register ports, the 8042
-keyboard data/status ports, a coarse PIT counter, and PIC mask/EOI registers, including the common ICW1–ICW4 sequence used to
+keyboard data/status ports, a Sound Blaster 2.0 DSP interface at 220h
+(reset handshake, version query, common playback command arguments, and
+acknowledged pause/resume controls), a coarse PIT counter, and PIC mask/EOI registers, including the common ICW1–ICW4 sequence used to
 remap the master/slave interrupt vector bases. Mode 13h is presented through
 the Svindows graphics framebuffer. DOS keyboard input is received through an
 independent mirrored event queue; timer and keyboard interrupts are reflected
@@ -111,9 +125,15 @@ keeps timer and input latency bounded while reducing hot-loop overhead. This
 is enough infrastructure for DOS/4G graphics and input experiments, but it is
 not a complete PC chipset or VGA implementation.
 
-This remains a partial DOS and 386 protected-mode subset. Paging, privilege
+QEMU runs attach an SB16 device and an audio backend. When the DOS guest resets
+its DSP, the VM probes that device; 8-bit single-cycle DMA playback is copied
+from guest RAM into an aligned below-16-MiB bounce buffer and sent to the SB16.
+This path depends on the QEMU device being present. The virtual DSP still does
+not implement full SB16 behavior: 16-bit playback, auto-init DMA, mixer/FM
+music, and virtual sound IRQ completion are not implemented. This remains a partial DOS and
+386 protected-mode subset. Paging, privilege
 level stack switching, full exception delivery, many DPMI services, arbitrary
-VGA register semantics, Sound Blaster/MPU-401 audio, EMS, TSRs, and DOS
+VGA register semantics, MPU-401 audio, EMS, TSRs, and DOS
 `EXEC` modes other than `AL=00h` are not implemented. Some protected-mode
 opcodes and extender behaviours may still be unsupported; the bundled Doom
 image is a compatibility target, not yet a guaranteed gameplay smoke test.
@@ -130,12 +150,32 @@ scheduler every 1M guest instructions. The protected decoder and register
 helpers also reuse the DOS VM pointer already obtained by the run loop, avoiding
 repeated current-thread lookups for each protected-mode register operation.
 Hardware polling remains batched at 256 instructions with interrupt-shadow
-handling preserved. Framebuffer conversion is capped near Doom's 35-Hz game
-tick rather than repeatedly converting continuously dirty VGA memory at 50 Hz.
-These are
-interpreter optimizations, not native execution: near-native speed still needs
-a separate native 32-bit backend or a dynamic recompiler, neither of which is
-implemented or claimed by this patch.
+handling preserved. Flat protected-mode DOS now runs short instruction blocks
+directly, avoiding the general real-mode/callback/render checks on every
+instruction; blocks stop before the next IRQ or render boundary. Exception
+rollback snapshots the register file each step and copies segment state only
+for instructions that can change it. Framebuffer conversion is capped near Doom's 35-Hz game
+tick rather than repeatedly converting continuously dirty VGA memory at 100 Hz;
+cached VGA scaling coordinates also avoid per-pixel division. Unsupported
+guest instructions continue through the interpreter. Validated flat protected
+mode `REP MOVS` spans use SSE2 bulk copies, and `REP STOSD` spans use SSE2
+vector stores; device-backed VGA spans retain the checked per-element path.
+Mode 13h scanout caches its nearest-neighbour scale maps, converts each
+palette color once per frame, and uses SSE2 copies for repeated output rows.
+These raster optimizations run on the BSP. APs remain parked because shared
+thread scheduling is not yet safe for SMP, so DOS work is not distributed
+across processors.
+The Doom startup probe
+checks WAD loading and VGA mode entry, but it does not measure in-game frame
+rate or establish a 30-FPS target.
+
+`make run` selects QEMU KVM when `/dev/kvm` is readable and writable, and
+otherwise uses TCG; set `QEMU_ACCEL=kvm` or `QEMU_ACCEL=tcg` to override the
+choice. The DOS renderer logs `[dos-fps]` once per second. In the current
+container, which has no accessible `/dev/kvm`, Doom presents roughly 15–19
+frames per second under TCG after the current changes, so 30 FPS has not yet
+been reached. Performance under
+KVM depends on the host and has not been measured here.
 
 Child DOS images currently run within the parent's native process; they have
 private DOS memory and inherit standard streams and DOS file handles. Their
@@ -148,6 +188,6 @@ DOS/4GW launch stub's same-image `EXEC`. For that one top-level bootstrap
 transition, the parent stub exits with the protected child image's exit code
 instead of remaining active and potentially re-launching the game. Other DOS
 `EXEC` parent/child behavior is unchanged. The protected instruction-fetch,
-register-access, and hardware-poll helpers are inlined in the hot interpreter
-path. These are interpreter optimizations only; they do not provide native
-execution or a measured near-native Doom frame rate.
+register-access, and hardware-poll helpers are inlined in the interpreter path.
+The JIT runs only up to the next hardware-poll boundary, preserving virtual
+IRQ delivery timing.
