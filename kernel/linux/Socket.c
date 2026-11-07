@@ -297,6 +297,7 @@ UINT64 LinuxSocketConnect(PKPROCESS process, UINT64 fd, UINT64 address,
         else
             listener->PendingHead = server;
         listener->PendingTail = server;
+        if (!listener->PendingCount) listener->ReadSequence++;
         listener->PendingCount++;
         KeSetEvent(&listener->AcceptEvent);
         error = 0;
@@ -381,4 +382,35 @@ UINT32 LinuxSocketPoll(LINUX_SOCKET *socket)
     }
     KiIrqRestore(irq);
     return ready;
+}
+
+/* Kernel clients use the same AF_UNIX queues without borrowing user FDs. */
+LINUX_SOCKET *LinuxLocalConnect(const char *name, UINT16 length)
+{
+    LINUX_SOCKET *client = LinuxSocketAllocate(), *server = LinuxSocketAllocate();
+    if (!client || !server) {
+        if (client) LinuxSocketRelease(client);
+        if (server) LinuxSocketRelease(server);
+        return NULL;
+    }
+    UINT64 irq = KiIrqSave();
+    LINUX_SOCKET *listener = linux_find_bound(name, length);
+    if (!listener || listener->Closed || listener->State != LINUX_SOCKET_LISTENING ||
+        listener->PendingCount >= listener->Backlog) {
+        KiIrqRestore(irq);
+        LinuxSocketRelease(client); LinuxSocketRelease(server);
+        return NULL;
+    }
+    client->SocketType = server->SocketType = LINUX_SOCK_STREAM;
+    client->State = server->State = LINUX_SOCKET_CONNECTED;
+    server->OwnerPid = listener->OwnerPid;
+    client->Peer = server; server->Peer = client;
+    if (listener->PendingTail) listener->PendingTail->PendingNext = server;
+    else listener->PendingHead = server;
+    listener->PendingTail = server;
+    if (!listener->PendingCount) listener->ReadSequence++;
+    listener->PendingCount++;
+    KeSetEvent(&listener->AcceptEvent);
+    KiIrqRestore(irq);
+    return client;
 }

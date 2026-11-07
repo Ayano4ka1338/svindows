@@ -8,7 +8,9 @@
 #define LINUX_SOCK_STREAM 1u
 #define LINUX_SOCK_NONBLOCK 0x800u
 #define LINUX_SOCK_CLOEXEC 0x80000u
-#define LINUX_SOCKET_BUFFER 8192u
+/* A 320x200 X11 ZPixmap is 256 KB. Small queues force the DOS sender
+ * to yield dozens of times per frame while Xorg drains the stream. */
+#define LINUX_SOCKET_BUFFER (256u * 1024u)
 #define LINUX_SOCKET_NAME_MAX 108u
 
 #define LINUX_SOCKET_CREATED 0u
@@ -34,6 +36,7 @@ typedef struct _LINUX_SOCKET {
     UINT32 PendingCount;
     UINT32 ReadOffset;
     UINT32 Buffered;
+    UINT64 ReadSequence, WriteSequence; /* AF_UNIX readiness transitions */
     char Name[LINUX_SOCKET_NAME_MAX];
     char DosPath[260];
     struct _LINUX_SOCKET *Peer;
@@ -72,4 +75,6 @@ void LinuxInetClose(struct _LINUX_SOCKET *socket);
 UINT64 LinuxInetSendMessage(struct _LINUX_SOCKET *socket, const void *buffer, UINT64 length, UINT64 flags, UINT64 address, UINT64 address_length);
 UINT64 LinuxInetReceiveMessage(struct _LINUX_SOCKET *socket, void *buffer, UINT64 length, UINT64 flags, UINT64 address, UINT64 address_length);
 
+LINUX_SOCKET *LinuxLocalConnect(const char *name, UINT16 length);
+UINT64 LinuxLocalTransfer(LINUX_SOCKET *socket, BOOLEAN write, void *data, UINT64 length, UINT64 flags);
 #endif

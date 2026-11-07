@@ -116,6 +116,7 @@ typedef struct _LINUX_EPOLL_CONTEXT {
         BOOLEAN Used; /* a watch occupies this slot */
         BOOLEAN Disabled; /* EPOLLONESHOT has delivered an event */
         UINT32 LastReady; /* readiness snapshot for EPOLLET */
+        UINT64 LastReadSequence, LastWriteSequence;
     } Watches[LINUX_MAX_FDS];
 } LINUX_EPOLL_CONTEXT;
 

@@ -597,7 +597,8 @@ static void dos_mouse_poll(DOS_VM *vm) {
   dos_mouse_dimensions(&width, &height);
   UINT32 host_width = GfxFramebuffer.Width ? GfxFramebuffer.Width : 1024u;
   UINT32 host_height = GfxFramebuffer.Height ? GfxFramebuffer.Height : 768u;
-  INT32 hx = MouseState.X, hy = MouseState.Y;
+  if (vm->XSession) { U16 w,h; DosVideoDimensions(vm,&w,&h); host_width=w; host_height=h; }
+  INT32 hx = DosHostMouse(vm)->X, hy = DosHostMouse(vm)->Y;
   if (hx < 0) hx = 0;
   if (hy < 0) hy = 0;
   if (hx >= (INT32)host_width) hx = (INT32)host_width - 1;
@@ -605,7 +606,7 @@ static void dos_mouse_poll(DOS_VM *vm) {
   U16 x = (U16)((UINT32)hx * (width - 1u) / (host_width - 1u ? host_width - 1u : 1u));
   U16 y = (U16)((UINT32)hy * (height - 1u) / (host_height - 1u ? host_height - 1u : 1u));
   if (vm->VideoMode <= 3u || vm->VideoMode == 7u) { x &= 0xfff8u; y &= 0xfff8u; }
-  U8 buttons = MouseState.Buttons & 7u;
+  U8 buttons = DosHostMouse(vm)->Buttons & 7u;
 
   if (!vm->MouseInitialized) {
     vm->MouseInitialized = TRUE;
@@ -616,7 +617,7 @@ static void dos_mouse_poll(DOS_VM *vm) {
     vm->MouseY = vm->MouseLastY = y;
     vm->MouseHostX = x; vm->MouseHostY = y;
     vm->MouseButtons = vm->MouseLastButtons = buttons;
-    vm->MouseHostSeq = MouseState.Seq;
+    vm->MouseHostSeq = DosHostMouse(vm)->Seq;
     vm->MouseVideoWidth = width; vm->MouseVideoHeight = height;
     vm->MouseSensitivityX = vm->MouseSensitivityY = 50;
     vm->MouseDoubleSpeedThreshold = 64;
@@ -638,7 +639,7 @@ static void dos_mouse_poll(DOS_VM *vm) {
     vm->MouseY = dos_mouse_clip(vm->MouseY, vm->MouseMinY, vm->MouseMaxY);
     vm->VideoDirty = TRUE;
   }
-  U32 seq = MouseState.Seq;
+  U32 seq = DosHostMouse(vm)->Seq;
   if (seq == vm->MouseHostSeq) return;
   vm->MouseHostSeq = seq;
   INT32 delta_x = (INT32)x - vm->MouseHostX;
@@ -952,7 +953,7 @@ static void dos_int33(void) {
     r[AX] = 0x001f;
     break;
   case 0x20:
-    vm->MouseDisabled = FALSE; vm->MouseHostSeq = MouseState.Seq;
+    vm->MouseDisabled = FALSE; vm->MouseHostSeq = DosHostMouse(vm)->Seq;
     vm->VideoDirty = TRUE;
     r[AX] = 0x0020;
     break;
@@ -1323,10 +1324,22 @@ static BOOLEAN dos_terminate_nested_psp(U8 code) {
   U16 psp = vm->CurrentPsp;
   if (psp == PSP) return FALSE;
   U16 parent = rw(psp, 0x16u);
+  KeLog("[dos] terminate PSP=%04x parent=%04x vector=%04x:%04x parent-stack=%04x:%04x\n",
+        psp,parent,rw(psp,0x0cu),rw(psp,0x0au),rw(parent,0x30u),rw(parent,0x2eu));
   if (!parent) return FALSE;
 
   U16 terminate_offset = rw(psp, 0x0au);
   U16 terminate_segment = rw(psp, 0x0cu);
+  /* DOSX uses AH=55h task PSPs without a nested EXEC frame. Its INT 22h
+   * trampoline is also the return address of this DOS call. In that case
+   * unwind the current interrupt frame, retaining the caller's four saved
+   * registers below it. Restoring an old parent EXEC stack feeds FLAGS to
+   * DOSX's POP ES and tears down the entire protected-mode session. */
+  U16 caller_sp = r[SP], caller_ss = seg[SS];
+  BOOLEAN caller_return = !vm->ProtectedMode && seg[CS] == DOS_BUILTIN_SEGMENT &&
+      ip == DOS_BUILTIN_OFFSET(0x21) && rw(caller_ss, caller_sp) == terminate_offset &&
+      rw(caller_ss, (U16)(caller_sp + 2u)) == terminate_segment;
+  U16 caller_flags = caller_return ? rw(caller_ss, (U16)(caller_sp + 4u)) : 0;
   for (U16 vector = 0x23u; vector <= 0x24u; vector++) {
     U16 field = (U16)(0x0eu + (vector - 0x23u) * 4u);
     ww(0, (U16)(vector * 4u), rw(psp, field));
@@ -1345,8 +1358,14 @@ static BOOLEAN dos_terminate_nested_psp(U8 code) {
   vm->CurrentPsp = parent;
   vm->DtaSegment = parent;
   vm->DtaOffset = 0x80u;
-  seg[SS] = rw(parent, 0x30u);
-  r[SP] = rw(parent, 0x2eu);
+  if (caller_return) {
+    r[SP] = (U16)(caller_sp + 6u);
+    flags = (flags & 0x0cd5u) | (caller_flags & ~0x0cd5u) | 2u;
+    vm->Eflags = (vm->Eflags & 0xffff0000u) | flags;
+  } else {
+    seg[SS] = rw(parent, 0x30u);
+    r[SP] = rw(parent, 0x2eu);
+  }
   seg[CS] = terminate_segment;
   ip = terminate_offset;
   dos_sync_system_data();
@@ -2449,6 +2468,20 @@ static void dos_int_dispatch(U8 n) {
     }
     break;
   }
+  case 0x59: { /* DOS 3+ extended error query; AL is reserved. */
+    DOS_VM *vm = current();
+    if (r[BX]) { r[AX] = 1; flags |= CF; break; }
+    r[AX] = vm->LastDosError;
+    U8 error_class = 12, locus = 1;
+    if (r[AX] == 2 || r[AX] == 3) { error_class = 8; locus = 2; }
+    else if (r[AX] == 4 || r[AX] == 8) { error_class = 1; locus = r[AX] == 8 ? 5 : 2; }
+    else if (r[AX] == 5) { error_class = 3; locus = 2; }
+    else if (r[AX] == 11) error_class = 9;
+    else if (r[AX] <= 13) error_class = 7;
+    r[BX] = r[AX] ? (U16)((error_class << 8) | 4u) : 0;
+    r[CX] = r[AX] ? (U16)(locus << 8) : 0;
+    break;
+  }
   case 0x58: {
     switch (get8(0)) {
     case 0x00: /* Get allocation strategy. */
@@ -2497,7 +2530,9 @@ void dos_int(U8 n) {
   U32 in_dos = ((U32)DOS_SYSTEM_DATA_SEGMENT << 4) + DOS_SDA_OFFSET + 1u;
   if (vm->InDosCount != 0xffu) vm->InDosCount++;
   vm->Memory[in_dos] = vm->InDosCount;
+  U8 function = get8(4);
   dos_int_dispatch(n);
+  if (function != 0x59 && (vm->Flags & CF)) vm->LastDosError = vm->Registers[AX];
   if (vm->InDosCount) vm->InDosCount--;
   vm->Memory[in_dos] = vm->InDosCount;
 }

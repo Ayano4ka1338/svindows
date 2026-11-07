@@ -175,7 +175,7 @@ QEMU_SERIAL          ?= stdio
 QEMUFLAGS            := -machine $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) -no-reboot -no-shutdown -boot d \
                         -netdev $(QEMU_NETDEV) -device $(QEMU_NET_DEVICE) \
                         $(QEMU_EXTRA_ARGS)
-.PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check lwip-port-check network-check feh-path-check feh-fs-check .FORCE
+.PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check dos-x11-check dos-performance-check win16-agent lwip-port-check network-check feh-path-check feh-fs-check .FORCE
 
 .FORCE:
 
@@ -189,19 +189,19 @@ $(STARTX): user/l/startx/StartX.c user/l/runtime/Memory.c
 	    -o $@ $^
 
 # The small native Linux-ABI ping client remains a low-level network smoke test.
-$(PING): user/l/net/ping.c user/l/net/netutil.h
+$(PING): user/l/net/ping.c user/l/net/netutil.h user/l/runtime/Memory.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector \
 	    -fno-pie -no-pie -mno-red-zone -nostdlib -static -O2 \
 	    -Wall -Wextra -Werror -Wl,-e,_start -Wl,--build-id=none \
-	    -o $@ $<
+	    -o $@ user/l/net/ping.c user/l/runtime/Memory.c
 
-$(CURL_HTTP): user/l/net/curl.c user/l/net/netutil.h
+$(CURL_HTTP): user/l/net/curl.c user/l/net/netutil.h user/l/runtime/Memory.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector \
 	    -fno-pie -no-pie -mno-red-zone -nostdlib -static -O2 \
 	    -Wall -Wextra -Werror -Wl,-e,_start -Wl,--build-id=none \
-	    -o $@ $<
+	    -o $@ user/l/net/curl.c user/l/runtime/Memory.c
 
 # A configuration change must invalidate existing objects even without clean.
 # Preserve the stamp's mtime when settings have not changed.
@@ -447,7 +447,7 @@ $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFe
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows3) $(WINDOWS3_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat other/Logo.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows3) $(WINDOWS3_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/xwin/XWIN.EXE other/Logo.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(INITRD) bs=1M count=200 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
@@ -484,6 +484,8 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) user/d/win.bat ::WIN.BAT
 	mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT
 	mcopy -i $(INITRD) user/d/win3.bat ::WIN3.BAT
+	mcopy -i $(INITRD) user/d/win3x.bat ::WIN3X.BAT
+	mcopy -i $(INITRD) user/d/xwin/XWIN.EXE ::WINDOWS3/XWIN.EXE
 	mcopy -i $(INITRD) $(STARTX) ::STARTX.ELF
 	mmd -i $(INITRD) ::TESTS
 	mcopy -i $(INITRD) $(BUILD)/dos-tests/COMSMOKE.COM ::TESTS/COMSMOKE.COM
@@ -557,6 +559,19 @@ $(KERNEL): $(OBJ) $(LWIP_MAKEFILE) kernel/arch/x86_64/Linker.ld
 iso: $(ISO)
 
 dos-tests: $(DOS_TESTS)
+
+dos-x11-check:
+	python3 tools/checks/EpollSocketEdgeChecks.py
+	python3 tools/checks/DosSmswChecks.py
+	python3 tools/checks/DosExtendedErrorChecks.py
+	python3 tools/checks/DosTaskReturnChecks.py
+	python3 tools/checks/DosX11Checks.py
+
+dos-performance-check:
+	python3 tools/checks/DosPerformanceChecks.py
+
+win16-agent:
+	python3 tools/BuildWin16Agent.py
 
 dos-vm-check:
 	python3 tools/checks/DosInputChecks.py

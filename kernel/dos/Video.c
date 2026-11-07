@@ -268,17 +268,18 @@ void DosVideoSetMode(DOS_VM *vm, U8 mode)
                                   (vm->VideoMode >= 0x0du && vm->VideoMode <= 0x12u) ||
                                   (vm->VideoMode >= 4u && vm->VideoMode <= 6u));
     if (needs_framebuffer && !vm->VideoActive && GfxAvailable()) {
-        HalConsoleAcquireFramebuffer();
+        if (!vm->XSession) HalConsoleAcquireFramebuffer();
         vm->VideoActive = TRUE;
     } else if (!needs_framebuffer && vm->VideoActive) {
         vm->VideoActive = FALSE;
-        if (HalConsoleReleaseFramebuffer()) ConRedraw();
+        if (!vm->XSession && HalConsoleReleaseFramebuffer()) ConRedraw();
     }
-    if (GfxAvailable() && needs_framebuffer) GfxClear(GfxColor(0, 0, 0));
+    if (!vm->XSession && GfxAvailable() && needs_framebuffer) GfxClear(GfxColor(0, 0, 0));
 }
 
 void DosVideoInherit(DOS_VM *destination, const DOS_VM *source)
 {
+    DosXInherit(destination, source);
     DosVideoSetMode(destination, source->VideoMode);
     memcpy(destination->Memory + 0xa0000u, source->Memory + 0xa0000u, 0x20000u);
     memcpy(destination->VgaPlanes, source->VgaPlanes, sizeof(source->VgaPlanes));
@@ -443,6 +444,8 @@ void DosVideoPresent(DOS_VM *vm)
         !GfxAvailable() || !vm->Memory)
         return;
 
+    if (DosXPresent(vm)) return;
+
     UINT32 width = GfxFramebuffer.Width;
     UINT32 height = GfxFramebuffer.Height;
     UINT32 stride = GfxFramebuffer.Pitch / sizeof(UINT32);
@@ -528,7 +531,7 @@ void DosVideoStop(DOS_VM *vm)
     if (!vm) return;
     if (vm->VideoActive) {
         vm->VideoActive = FALSE;
-        if (HalConsoleReleaseFramebuffer()) ConRedraw();
+        if (!vm->XSession && HalConsoleReleaseFramebuffer()) ConRedraw();
     }
     if (vm->KeyboardMirrorActive) {
         vm->KeyboardMirrorActive = FALSE;
@@ -543,7 +546,7 @@ static U8 dos_keyboard_read(DOS_VM *vm)
         return vm->KeyboardData;
     }
     UINT32 event;
-    while (KbdReadMirroredInputEvent(&event)) {
+    while (DosReadKey(vm, &event)) {
         /* The native driver also mirrors translated character events. The
          * virtual 8042 consumes only raw make/break scan-code events. */
         if (event & KBD_INPUT_CHARACTER) continue;
@@ -607,15 +610,15 @@ void DosSerialMousePoll(DOS_VM *vm)
 {
     if (!vm || !vm->SerialMouseActive) return;
     unsigned uart = vm->SerialMouseUart;
-    U32 sequence = MouseState.Seq;
+    U32 sequence = DosHostMouse(vm)->Seq;
     if (sequence == vm->SerialMouseHostSeq) return;
 
-    INT32 dx = MouseState.X - vm->SerialMouseHostX;
-    INT32 dy = MouseState.Y - vm->SerialMouseHostY;
-    U8 buttons = MouseState.Buttons;
+    INT32 dx = DosHostMouse(vm)->X - vm->SerialMouseHostX;
+    INT32 dy = DosHostMouse(vm)->Y - vm->SerialMouseHostY;
+    U8 buttons = DosHostMouse(vm)->Buttons;
     vm->SerialMouseHostSeq = sequence;
-    vm->SerialMouseHostX = MouseState.X;
-    vm->SerialMouseHostY = MouseState.Y;
+    vm->SerialMouseHostX = DosHostMouse(vm)->X;
+    vm->SerialMouseHostY = DosHostMouse(vm)->Y;
     /* Cursor composition happens after the guest frame is redrawn.  A host
      * pointer move must therefore request a fresh presentation even when the
      * guest has not touched video memory. */
@@ -695,7 +698,7 @@ U32 DosPortIn(DOS_VM *vm, U16 port, unsigned width)
         byte = vm->DmaPageRegisters[port - 0x80u];
         break;
     case 0x0060: byte = dos_keyboard_read(vm); break;
-    case 0x0064: byte = (vm->KeyboardDataReady || KbdMirroredInputEventAvailable()) ? 0x01u : 0x00u; break;
+    case 0x0064: byte = (vm->KeyboardDataReady || DosKeyAvailable(vm)) ? 0x01u : 0x00u; break;
     case 0x0061: byte = vm->VgaSpeakerControl; break;
     case 0x0040: byte = dos_pit_read(vm); break;
     case 0x0041: case 0x0042: byte = 0; break;
@@ -772,10 +775,10 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
                 if (!vm->SerialMouseActive) {
                     vm->SerialMouseActive = TRUE;
                     vm->SerialMouseUart = (U8)uart_index;
-                    vm->SerialMouseHostSeq = MouseState.Seq;
-                    vm->SerialMouseHostX = MouseState.X;
-                    vm->SerialMouseHostY = MouseState.Y;
-                    vm->SerialMouseButtons = MouseState.Buttons;
+                    vm->SerialMouseHostSeq = DosHostMouse(vm)->Seq;
+                    vm->SerialMouseHostX = DosHostMouse(vm)->X;
+                    vm->SerialMouseHostY = DosHostMouse(vm)->Y;
+                    vm->SerialMouseButtons = DosHostMouse(vm)->Buttons;
                     vm->VideoDirty = TRUE;
                 }
                 if (vm->SerialMouseUart == uart_index)
@@ -946,4 +949,40 @@ void DosPortOut(DOS_VM *vm, U16 port, U32 value, unsigned width)
         KeLog("[dos-vga] OUT port=0x%04x value=0x%08x width=%u\n",
               port, value, width);
     }
+}
+
+/* Unscaled VGA scanout, shared by each HWND's crop in the X11 backend. */
+void DosVideoDimensions(DOS_VM *vm, U16 *width, U16 *height)
+{
+    *width = (vm->VideoMode == 0x13 || vm->VideoMode == 4 ||
+              vm->VideoMode == 5 || vm->VideoMode == 0x0d) ? 320 : 640;
+    *height = vm->VideoMode == 0x0f || vm->VideoMode == 0x10 ? 350 :
+              vm->VideoMode == 0x11 || vm->VideoMode == 0x12 ? 480 : 200;
+}
+U32 DosVideoRgbPixel(DOS_VM *vm, INT32 x, INT32 y)
+{
+    U16 width,height; DosVideoDimensions(vm,&width,&height);
+    if (x<0 || y<0 || x>=width || y>=height) return 0;
+    U8 index=0;
+    U32 start=((U32)vm->VgaCrtc[0x0c]<<8)|vm->VgaCrtc[0x0d];
+    if (vm->VideoMode>=0x0d && vm->VideoMode<=0x12) {
+        U32 offset=(start+(U32)y*(width/8u)+(U32)x/8u)&0xffff;
+        for (U32 p=0;p<4;p++) index|=((vm->VgaPlanes[p][offset]>>(7-(x&7)))&1)<<p;
+        U8 select=vm->VgaAttribute[0x14];
+        index=vm->VgaAttribute[index]&63;
+        if (vm->VgaAttribute[0x10]&0x80) index=(index&15)|((select&3)<<4);
+        index=(index|((select&12)<<4))&vm->VgaDacMask;
+    } else if (vm->VideoMode==0x13) {
+        index=(vm->VgaSequencer[4]&8)?vm->Memory[0xa0000+y*320+x]:
+              vm->VgaPlanes[x&3][(start+y*80+x/4)&0xffff];
+    } else if (vm->VideoMode>=4 && vm->VideoMode<=6) {
+        U8 b=vm->Memory[0xb8000+dos_cga_scanline_offset(y)+(vm->VideoMode==6?x/8:x/4)];
+        U8 value=vm->VideoMode==6?((b>>(7-(x&7)))&1):((b>>(6-2*(x&3)))&3);
+        U8 c=vm->VgaAttribute[value];
+        U32 red=((c&4)?42:0)+((c&32)?21:0),g=((c&2)?42:0)+((c&16)?21:0),blue=((c&1)?42:0)+((c&8)?21:0);
+        return (((red*255+31)/63)<<16)|(((g*255+31)/63)<<8)|((blue*255+31)/63);
+    } else return 0;
+    U32 at=(U32)index*3;
+    U8 red=vm->VgaDac[at],g=vm->VgaDac[at+1],b=vm->VgaDac[at+2];
+    return ((U32)((red<<2)|(red>>4))<<16)|((U32)((g<<2)|(g>>4))<<8)|((b<<2)|(b>>4));
 }

@@ -87,8 +87,9 @@ the payload contains `KRNL286.EXE` and does not include the enhanced-mode
 `WIN386.EXE`.
 The DOS environment includes `C:\WINDOWS3\SYSTEM` in `PATH`, which lets
 `WIN.COM` locate `DOSX.EXE`; DOSX's real-mode `0F 00` system-selector probes
-are also modeled. In QEMU, `WIN3` now passes those startup checks and displays
-the Windows 3.1 splash screen, but still does not reach Program Manager.
+are also modeled. For separate top-level Win16 windows inside Xorg, use
+`WIN3X` from the X session; see [the legacy X11 backend](LegacyX11.md) for its
+rendering model, build instructions and current limitations.
 
 The DOS CPU currently uses the optimized native C interpreter and batched
 execution loop. A native-code JIT is not present in this source tree; the
