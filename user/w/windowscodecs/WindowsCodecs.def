@@ -1,0 +1,3 @@
+LIBRARY WindowsCodecs.dll
+EXPORTS
+    WICCreateImagingFactory_Proxy

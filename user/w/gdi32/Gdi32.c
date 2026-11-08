@@ -25,12 +25,22 @@ typedef unsigned long long UINT64;
 typedef long long          INT64;
 
 #include "Gdi32.h"
+#include <String.h>
+
 
 /* ------------------------------------------------------------------ */
 /* Native services (user/w/ntdll/Ntdll.asm -> kernel/win32k/gdi)          */
 /* ------------------------------------------------------------------ */
 
 __declspec(dllimport) UINT64 NtGdiGetEntry(ULONG handle, void *cell);
+__declspec(dllimport) UINT64 NtGdiBlitUserBuffer(HDC dc, const UINT32 *pixels,
+    UINT32 width, UINT32 height, UINT32 source_x, UINT32 source_y,
+    UINT32 copy_width, UINT32 copy_height);
+__declspec(dllimport) long NtAllocateVirtualMemory(HANDLE process,
+    void **base, ULONG_PTR zero_bits, ULONGLONG *size, ULONG allocation_type,
+    ULONG protect);
+__declspec(dllimport) long NtFreeVirtualMemory(HANDLE process,
+    void **base, ULONGLONG *size, ULONG free_type);
 __declspec(dllimport) UINT64 NtGdiCreateSolidBrush(COLORREF colour, ULONG unused);
 __declspec(dllimport) UINT64 NtGdiCreatePen(int style, int width, COLORREF colour,
                                             ULONG unused);
@@ -118,6 +128,33 @@ static UINT16 object_type(HGDIOBJ object)
     return cell.nType;
 }
 
+typedef struct { HBITMAP Handle; int Width, Height; void *Bits;
+                 ULONGLONG AllocatedBytes; } BITMAP_DIMENSIONS;
+static BITMAP_DIMENSIONS g_bitmap_dimensions[128];
+typedef struct { HRGN Handle; RECT Bounds; BOOL Used; } SV_REGION;
+static SV_REGION g_regions[128];
+typedef struct { HDC Dc; HBITMAP Bitmap; } SV_DC_BITMAP;
+static SV_DC_BITMAP g_dc_bitmaps[128];
+static SV_REGION *sv_region(HRGN region);
+static void sv_track_dc_bitmap(HDC dc, HBITMAP bitmap);
+static void sv_flush_dib(HDC dc);
+static void sv_read_dib(HDC dc);
+
+static void remember_bitmap_dimensions(HBITMAP bitmap, int width, int height)
+{
+    if (!bitmap || width <= 0 || height <= 0) return;
+    for (UINT i = 0; i < 128; i++) {
+        if (!g_bitmap_dimensions[i].Handle ||
+            g_bitmap_dimensions[i].Handle == bitmap) {
+            g_bitmap_dimensions[i].Handle = bitmap;
+            g_bitmap_dimensions[i].Width = width;
+            g_bitmap_dimensions[i].Height = height;
+            g_bitmap_dimensions[i].Bits = 0;
+            return;
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Device contexts and bitmaps                                          */
 /* ------------------------------------------------------------------ */
@@ -132,7 +169,10 @@ GDI32_API HDC CreateCompatibleDC(HDC reference)
 
 GDI32_API HBITMAP CreateCompatibleBitmap(HDC reference, int width, int height)
 {
-    return (HBITMAP)(ULONG_PTR)NtGdiCreateCompatibleBitmap(reference, width, height);
+    HBITMAP bitmap = (HBITMAP)(ULONG_PTR)NtGdiCreateCompatibleBitmap(
+        reference, width, height);
+    remember_bitmap_dimensions(bitmap, width, height);
+    return bitmap;
 }
 
 GDI32_API HBITMAP CreateBitmap(int width, int height, UINT planes,
@@ -144,8 +184,183 @@ GDI32_API HBITMAP CreateBitmap(int width, int height, UINT planes,
      * wrong content. */
     if (bits)
         return NULL;
-    return (HBITMAP)(ULONG_PTR)NtGdiCreateBitmap(width, height, planes,
-                                                 bits_per_pixel, NULL);
+    HBITMAP bitmap = (HBITMAP)(ULONG_PTR)NtGdiCreateBitmap(width, height,
+                                      planes, bits_per_pixel, NULL);
+    remember_bitmap_dimensions(bitmap, width, height);
+    return bitmap;
+}
+
+GDI32_API int GetObjectW(HGDIOBJ object, int bytes, LPVOID out)
+{
+    if (!object || bytes <= 0 || !out || object_type(object) != SV_GDI_TYPE_BITMAP)
+        return 0;
+    int width = 0, height = 0;
+    for (UINT i = 0; i < 128; i++) {
+        if (g_bitmap_dimensions[i].Handle == (HBITMAP)object) {
+            width = g_bitmap_dimensions[i].Width;
+            height = g_bitmap_dimensions[i].Height;
+            break;
+        }
+    }
+    if (!width || !height) return 0;
+    BITMAP bitmap = {0};
+    bitmap.bmWidth = width;
+    bitmap.bmHeight = height;
+    bitmap.bmWidthBytes = width * 4;
+    bitmap.bmPlanes = 1;
+    bitmap.bmBitsPixel = 32;
+    for (UINT i = 0; i < 128; i++)
+        if (g_bitmap_dimensions[i].Handle == (HBITMAP)object) {
+            bitmap.bmBits = g_bitmap_dimensions[i].Bits;
+            break;
+        }
+    int copied = bytes < (int)sizeof(bitmap) ? bytes : (int)sizeof(bitmap);
+    memcpy(out, &bitmap, (unsigned long long)copied);
+    return copied;
+}
+
+typedef struct {
+    DWORD Size;
+    LONG Width, Height;
+    WORD Planes, BitsPixel;
+    DWORD Compression, SizeImage;
+    LONG XPelsPerMeter, YPelsPerMeter;
+    DWORD ClrUsed, ClrImportant;
+} SV_BITMAPINFOHEADER;
+typedef struct { SV_BITMAPINFOHEADER Header; DWORD Colors[1]; } SV_BITMAPINFO;
+
+GDI32_API HBITMAP CreateDIBSection(HDC dc, const void *info, UINT usage,
+                                    void **bits, HANDLE section, DWORD offset)
+{
+    (void)usage; (void)section; (void)offset;
+    if (bits) *bits = 0;
+    if (!info || !bits) return 0;
+    const SV_BITMAPINFOHEADER *header = (const SV_BITMAPINFOHEADER *)info;
+    static int trace;
+    if(trace++<4){
+        extern __declspec(dllimport) long NtDisplayString(const char*);
+        char line[]="[dib] bpp=0000 compression=0000";
+        const char *hex="0123456789abcdef";
+        for(int i=0;i<4;i++){line[10+i]=hex[(header->BitsPixel>>(12-i*4))&15];line[27+i]=hex[(header->Compression>>(12-i*4))&15];}
+        NtDisplayString(line);
+    }
+    if (header->Size < sizeof(*header) || header->Width <= 0 ||
+        !header->Height || header->Height == (-2147483647L - 1) ||
+        header->Planes != 1 || header->BitsPixel != 32 ||
+        header->Compression != 0) return 0;
+    int height = header->Height < 0 ? -header->Height : header->Height;
+    if (header->Width > 4096 || height > 2160) return 0;
+    ULONGLONG bytes = (ULONGLONG)(UINT)header->Width * (UINT)height * 4;
+    ULONGLONG allocation = (bytes + 0xfff) & ~0xfffULL;
+    void *memory = 0;
+    if (NtAllocateVirtualMemory((HANDLE)(ULONGLONG)-1, &memory, 0,
+                                &allocation, 0x3000, 4) < 0)
+        return 0;
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, header->Width, height);
+    if (!bitmap) {
+        (void)NtFreeVirtualMemory((HANDLE)(ULONGLONG)-1, &memory,
+                                 &allocation, 0x8000);
+        return 0;
+    }
+    remember_bitmap_dimensions(bitmap, header->Width, height);
+    for (UINT i = 0; i < 128; i++) {
+        if (g_bitmap_dimensions[i].Handle == bitmap) {
+            g_bitmap_dimensions[i].Bits = memory;
+            g_bitmap_dimensions[i].AllocatedBytes = allocation;
+            break;
+        }
+    }
+    *bits = memory;
+    return bitmap;
+}
+
+GDI32_API HFONT CreateFontIndirectW(const void *logical_font)
+{
+    (void)logical_font;
+    return (HFONT)(ULONG_PTR)NtGdiHfontCreate();
+}
+
+GDI32_API HBRUSH CreatePatternBrush(HBITMAP bitmap)
+{
+    if (!bitmap) return 0;
+    /* Pattern sampling is not in the kernel raster ABI. A neutral solid brush
+     * keeps callers functional while bitmap-backed pattern rasterization is
+     * still unavailable. */
+    return CreateSolidBrush(0x00c0c0c0u);
+}
+
+typedef struct { UINT Style; COLORREF Color; ULONG_PTR Hatch; } SV_LOGBRUSH;
+GDI32_API HPEN ExtCreatePen(DWORD style, DWORD width, const void *brush,
+                             DWORD style_count, const DWORD *styles)
+{
+    (void)style_count; (void)styles;
+    if (!brush) return 0;
+    const SV_LOGBRUSH *lb = (const SV_LOGBRUSH *)brush;
+    return CreatePen((int)(style & 0xf), width ? (int)width : 1, lb->Color);
+}
+
+GDI32_API BOOL GetTextExtentPointW(HDC dc, const WCHAR *text, int count,
+                                    LPSIZE size)
+{ return GetTextExtentPoint32W(dc, text, count, size); }
+
+static SV_REGION *sv_region(HRGN region)
+{
+    for (UINT i=0;i<128;i++)if(g_regions[i].Used&&g_regions[i].Handle==region)return &g_regions[i];
+    return 0;
+}
+GDI32_API HRGN CreateRectRgn(int left,int top,int right,int bottom)
+{
+    for(UINT i=0;i<128;i++)if(!g_regions[i].Used){
+        g_regions[i].Used=TRUE;g_regions[i].Handle=(HRGN)&g_regions[i];
+        g_regions[i].Bounds=(RECT){left,top,right,bottom};return g_regions[i].Handle;}
+    return 0;
+}
+GDI32_API HRGN CreateRectRgnIndirect(const RECT *rect)
+{ return rect?CreateRectRgn(rect->left,rect->top,rect->right,rect->bottom):0; }
+GDI32_API BOOL SetRectRgn(HRGN region,int left,int top,int right,int bottom)
+{ SV_REGION*r=sv_region(region);if(!r)return FALSE;r->Bounds=(RECT){left,top,right,bottom};return TRUE; }
+GDI32_API int GetRgnBox(HRGN region,LPRECT rect)
+{ SV_REGION*r=sv_region(region);if(!r||!rect)return 0;*rect=r->Bounds;return rect->right<=rect->left||rect->bottom<=rect->top?1:2; }
+GDI32_API int CombineRgn(HRGN dst,HRGN src1,HRGN src2,int mode)
+{
+    SV_REGION*d=sv_region(dst),*a=sv_region(src1),*b=sv_region(src2);if(!d||!a)return 0;
+    if(mode==5||!b)d->Bounds=a->Bounds;
+    else if(mode==1){RECT*r=&d->Bounds,*x=&a->Bounds,*y=&b->Bounds;
+        r->left=x->left>y->left?x->left:y->left;r->top=x->top>y->top?x->top:y->top;
+        r->right=x->right<y->right?x->right:y->right;r->bottom=x->bottom<y->bottom?x->bottom:y->bottom;
+        if(r->right<r->left)r->right=r->left;if(r->bottom<r->top)r->bottom=r->top;
+    }else{RECT*x=&a->Bounds,*y=&b->Bounds;d->Bounds=(RECT){
+        x->left<y->left?x->left:y->left,x->top<y->top?x->top:y->top,
+        x->right>y->right?x->right:y->right,x->bottom>y->bottom?x->bottom:y->bottom};}
+    return d->Bounds.right<=d->Bounds.left||d->Bounds.bottom<=d->Bounds.top?1:2;
+}
+GDI32_API BOOL EqualRgn(HRGN first,HRGN second)
+{ SV_REGION*a=sv_region(first),*b=sv_region(second);return a&&b&&a->Bounds.left==b->Bounds.left&&a->Bounds.top==b->Bounds.top&&a->Bounds.right==b->Bounds.right&&a->Bounds.bottom==b->Bounds.bottom; }
+
+static void sv_track_dc_bitmap(HDC dc,HBITMAP bitmap)
+{
+    UINT slot=0;
+    for(UINT i=0;i<128;i++)if(g_dc_bitmaps[i].Dc==dc){slot=i;goto found;}
+    for(UINT i=0;i<128;i++)if(!g_dc_bitmaps[i].Dc){slot=i;goto found;}
+    return;
+found:g_dc_bitmaps[slot].Dc=bitmap?dc:0;g_dc_bitmaps[slot].Bitmap=bitmap;
+}
+
+static void sv_flush_dib(HDC dc)
+{
+    for(UINT i=0;i<128;i++)if(g_dc_bitmaps[i].Dc==dc&&g_dc_bitmaps[i].Bitmap){
+        for(UINT b=0;b<128;b++)if(g_bitmap_dimensions[b].Handle==g_dc_bitmaps[i].Bitmap&&g_bitmap_dimensions[b].Bits){
+            (void)NtGdiBlitUserBuffer(dc,(const UINT32*)g_bitmap_dimensions[b].Bits,
+                g_bitmap_dimensions[b].Width,g_bitmap_dimensions[b].Height,0,0,
+                g_bitmap_dimensions[b].Width,g_bitmap_dimensions[b].Height);return;}}
+}
+
+__declspec(dllimport) UINT64 NtGdiReadUserBuffer(HDC,void*,UINT,UINT);
+static void sv_read_dib(HDC dc)
+{
+    for(UINT i=0;i<128;i++)if(g_dc_bitmaps[i].Dc==dc&&g_dc_bitmaps[i].Bitmap)
+        for(UINT b=0;b<128;b++)if(g_bitmap_dimensions[b].Handle==g_dc_bitmaps[i].Bitmap&&g_bitmap_dimensions[b].Bits){
+            NtGdiReadUserBuffer(dc,g_bitmap_dimensions[b].Bits,g_bitmap_dimensions[b].Width,g_bitmap_dimensions[b].Height);return;}
 }
 
 GDI32_API BOOL DeleteDC(HDC hdc)
@@ -157,6 +372,7 @@ GDI32_API BOOL DeleteDC(HDC hdc)
      * device context, so this cannot strand a live DC. */
     if (!NtGdiDeleteObjectApp((ULONG)(ULONG_PTR)hdc))
         return FALSE;
+    sv_track_dc_bitmap(hdc, 0);
     return TRUE;
 }
 
@@ -190,7 +406,11 @@ GDI32_API HGDIOBJ SelectObject(HDC hdc, HGDIOBJ object)
     case SV_GDI_TYPE_FONT:
         return (HGDIOBJ)(ULONG_PTR)NtGdiSelectFont(hdc, (HFONT)object);
     case SV_GDI_TYPE_BITMAP:
-        return (HGDIOBJ)(ULONG_PTR)NtGdiSelectBitmap(hdc, (HBITMAP)object);
+    {
+        HGDIOBJ previous=(HGDIOBJ)(ULONG_PTR)NtGdiSelectBitmap(hdc,(HBITMAP)object);
+        if(previous||object)sv_track_dc_bitmap(hdc,(HBITMAP)object);
+        return previous;
+    }
     default:
         /* Also the "handle belongs to another process or is not a GDI object"
          * case: deleting or selecting it would corrupt the drawing state. */
@@ -223,6 +443,8 @@ GDI32_API BOOL DeleteObject(HGDIOBJ object)
 {
     if (!object)
         return FALSE;
+    SV_REGION *region=sv_region((HRGN)object);
+    if(region){region->Used=FALSE;region->Handle=0;return TRUE;}
     /* Deleting a stock object is a documented no-op that succeeds. */
     if (is_stock(object))
         return TRUE;
@@ -230,6 +452,12 @@ GDI32_API BOOL DeleteObject(HGDIOBJ object)
      * is the documented failure for DeleteObject. */
     if (!NtGdiDeleteObjectApp((ULONG)(ULONG_PTR)object))
         return FALSE;
+    for (UINT i = 0; i < 128; i++)
+        if (g_bitmap_dimensions[i].Handle == (HBITMAP)object) {
+            if(g_bitmap_dimensions[i].Bits){void*base=g_bitmap_dimensions[i].Bits;
+                ULONGLONG size=0;(void)NtFreeVirtualMemory((HANDLE)(ULONGLONG)-1,&base,&size,0x8000);}
+            g_bitmap_dimensions[i] = (BITMAP_DIMENSIONS){0};
+        }
     return TRUE;
 }
 
@@ -293,3 +521,7 @@ GDI32_API int GetDeviceCaps(HDC hdc, int index)
 }
 
 #include "GdiDraw.inc"
+
+__declspec(dllexport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
+                                         int count, LPRECT rect, UINT format)
+{ return DrawTextW(dc, text, count, rect, format); }

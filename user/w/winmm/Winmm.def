@@ -1,0 +1,3 @@
+LIBRARY WINMM.dll
+EXPORTS
+    timeGetTime

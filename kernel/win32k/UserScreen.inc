@@ -19,6 +19,8 @@
 #define W32K_PART_MAXIMIZE 4
 #define W32K_PART_CLOSE    5
 #define W32K_PART_BORDER   6
+#define W32K_PART_MENU     7
+#define W32K_MENU_HEIGHT  19
 
 /* Windows 10 frame metrics at 100% scaling come from svindows/Win32k.h, so the
  * services that size a window from its style and the painter below agree. */
@@ -73,6 +75,9 @@ typedef struct _W32K_WINDOW_STATE {
     UINT32  Style;          /* cached: the record lives in user memory      */
     UINT32  ExStyle;
     WCHAR   Title[W32K_TITLE_CHARS];
+    BOOLEAN MenuPresent,IsStatic;
+    UINT32 MenuCount;
+    WCHAR MenuLabels[16][64];
 } W32K_WINDOW_STATE;
 
 static W32K_WINDOW_STATE g_w32k[W32K_SLOTS];
@@ -152,6 +157,8 @@ void W32kClientOrigin(UINT16 slot, INT32 *x, INT32 *y, INT32 *width,
         if (window->Style & WS_CAPTION)
             top = W32K_CAPTION_HEIGHT;
     }
+    if (window->Kind == W32K_KIND_TOPLEVEL && window->MenuPresent)
+        top += W32K_MENU_HEIGHT;
     INT32 cw = (INT32)window->W - border * 2;
     INT32 ch = (INT32)window->H - top - border;
     if (cw < 0) cw = 0;
@@ -210,6 +217,8 @@ static UINT8 W32kHitTest(UINT16 slot, INT32 x, INT32 y, BOOLEAN *in_client)
             return W32K_PART_CAPTION;
         }
     }
+    INT32 menu_y=window->Y+((style&WS_CAPTION)?W32K_CAPTION_HEIGHT:W32K_BORDER);
+    if(window->MenuPresent&&y>=menu_y&&y<menu_y+W32K_MENU_HEIGHT)return W32K_PART_MENU;
     INT32 cx, cy, cw, ch;
     W32kClientOrigin(slot, &cx, &cy, &cw, &ch);
     if (x >= cx && y >= cy && x < cx + cw && y < cy + ch) {
@@ -269,6 +278,37 @@ static void W32kRaise(UINT16 slot)
         g_w32k[slot].ZPrev = g_w32k[slot].ZNext = 0;
         g_w32k_top = slot;
     }
+    KiIrqRestore(flags);
+}
+
+/* ZPrev points down; HWND_BOTTOM and sibling handles must retain the
+ * requested ordering instead of implicitly raising a background control. */
+void W32kSetZOrder(UINT16 slot, UINT64 after)
+{
+    if (!W32kWindowExists(slot)) return;
+    if (after == 0 || after == (UINT64)-1 || after == (UINT64)-2) {
+        W32kRaise(slot);
+        return;
+    }
+    UINT16 anchor = 0;
+    if (after == 1) {
+        for (UINT16 w = g_w32k_top; w; w = g_w32k[w].ZPrev)
+            if (w != slot && g_w32k[w].Parent == g_w32k[slot].Parent)
+                anchor = w;
+    } else {
+        anchor = (UINT16)after;
+        if (!W32kWindowExists(anchor) || anchor == slot ||
+            g_w32k[anchor].Parent != g_w32k[slot].Parent) return;
+    }
+    if (!anchor) return;
+    UINT64 flags = KiIrqSave();
+    W32kUnlink(slot);
+    UINT16 below = g_w32k[anchor].ZPrev;
+    g_w32k[slot].ZPrev = below;
+    g_w32k[slot].ZNext = anchor;
+    g_w32k[anchor].ZPrev = slot;
+    if (below) g_w32k[below].ZNext = slot;
+    W32kScreenCompose();
     KiIrqRestore(flags);
 }
 
@@ -458,6 +498,17 @@ static void W32kPaintFrame(UINT16 slot, INT32 cx, INT32 cy, INT32 cw, INT32 ch)
     W32kFillRectClipped(x, y, 1, h, border, cx, cy, cw, ch);
     W32kFillRectClipped(x + w - 1, y, 1, h, border, cx, cy, cw, ch);
     W32kFillRectClipped(x, y + h - 1, w, 1, border, cx, cy, cw, ch);
+    if(window->MenuPresent){
+        INT32 my=y+((style&WS_CAPTION)?W32K_CAPTION_HEIGHT:W32K_BORDER),mx=x+1;
+        W32kFillRectClipped(mx,my,w-2,W32K_MENU_HEIGHT,0xf0f0f0,cx,cy,cw,ch);
+        for(UINT32 i=0;i<window->MenuCount;i++){
+            INT32 width=16;for(UINT32 j=0;window->MenuLabels[i][j];j++)width+=GfxUiCharWidth(window->MenuLabels[i][j]);
+            INT32 available=x+w-1-(mx+8);if(available<=0)break;
+            if(available>width-16)available=width-16;
+            W32kRasterText(mx+8,my+(W32K_MENU_HEIGHT+GfxUiAscent())/2,window->MenuLabels[i],0,available,my,W32K_MENU_HEIGHT);
+            mx+=width;
+        }
+    }
     if (!(style & WS_CAPTION))
         return;
 
@@ -576,7 +627,7 @@ static void W32kComposeRect(INT32 x, INT32 y, INT32 width, INT32 height)
         UINT16 slot = list[i - 1];
         W32K_WINDOW_STATE *window = &g_w32k[slot];
         if (!window->Kind || !window->Visible || window->Minimized ||
-            window->Kind == W32K_KIND_CHILD)
+            window->Kind == W32K_KIND_CHILD || !window->W || !window->H)
             continue;
         if (window->Kind == W32K_KIND_DESKTOP)
             continue; /* the backdrop layer already covers the screen */
@@ -614,13 +665,14 @@ void W32kScreenCompose(void)
 /* --- lifecycle ----------------------------------------------------------- */
 
 /* CW_USEDEFAULT arrives as 0x80000000; Windows cascades such windows instead
- * of placing them at the raw value, which would be far off screen. */
+ * of placing them at the raw value, which would be far off screen. Zero
+ * dimensions are literal and must not create a default-sized visible window. */
 static void W32kResolveDefaultPosition(INT32 *x, INT32 *y, UINT32 *w, UINT32 *h)
 {
     INT32 sw = (INT32)GfxFramebuffer.Width, sh = (INT32)GfxFramebuffer.Height;
-    if ((UINT32)*w == 0x80000000u || *w == 0)
+    if ((UINT32)*w == 0x80000000u)
         *w = sw > 900 ? 800 : (UINT32)(sw * 3 / 4);
-    if ((UINT32)*h == 0x80000000u || *h == 0)
+    if ((UINT32)*h == 0x80000000u)
         *h = sh > 700 ? 600 : (UINT32)(sh * 2 / 3);
     if (*w > (UINT32)(sw - 40))
         *w = (UINT32)(sw - 40);
@@ -874,8 +926,11 @@ BOOLEAN W32kGetRect(UINT64 hwnd, INT32 *rect, BOOLEAN client)
         rect[3] = h;
         return TRUE;
     }
-    return W32kWindowRect(slot, &rect[0], &rect[1], (UINT32 *)&rect[2],
-                          (UINT32 *)&rect[3]);
+    UINT32 width, height;
+    if (!W32kWindowRect(slot, &rect[0], &rect[1], &width, &height)) return FALSE;
+    rect[2] = rect[0] + (INT32)width;
+    rect[3] = rect[1] + (INT32)height;
+    return TRUE;
 }
 
 static void W32kMinimizeWindow(UINT16 slot, BOOLEAN minimize)
@@ -1054,7 +1109,9 @@ static void W32kInputMouseLocked(INT32 x, INT32 y, UINT8 buttons)
             part != W32K_PART_NONE && part != W32K_PART_CLIENT) {
             W32kRaise(target);
             if (g_w32k_active != target) W32kSetFocus(KiUserWindowHandle(target));
-            if (part == W32K_PART_CAPTION) {
+            if(part==W32K_PART_MENU){
+                W32kSendWindowMessage(target,W32K_WM_SYSCOMMAND,0xf090,W32kMouseLParam(x,y));
+            } else if (part == W32K_PART_CAPTION) {
                 W32K_WINDOW_STATE *window = &g_w32k[target];
                 window->Dragging = 1;
                 g_w32k_drag = target;
@@ -1123,6 +1180,15 @@ static UINT8 W32kVirtualKey(UINT16 scan)
 {
     switch (scan) {
     case 0x01: return 0x1B;
+    case 0x0C: return 0xBD; case 0x0D: return 0xBB;
+    case 0x1A: return 0xDB; case 0x1B: return 0xDD;
+    case 0x27: return 0xBA; case 0x28: return 0xDE;
+    case 0x29: return 0xC0; case 0x2B: return 0xDC;
+    case 0x33: return 0xBC; case 0x34: return 0xBE;
+    case 0x35: return 0xBF;
+    case 0x37: return 0x6A; case 0x4A: return 0x6D;
+    case 0x4E: return 0x6B;
+    case 0x3A: return 0x14;
     case 0x0E: return 0x08;
     case 0x0F: return 0x09;
     case 0x1C: return 0x0D;
@@ -1164,11 +1230,12 @@ static UINT8 W32kVirtualKey(UINT16 scan)
     return 0;
 }
 
-void W32kInputKey(UINT16 event)
+void W32kInputKey(UINT16 event, UINT16 character)
 {
     BOOLEAN release = (event & 0x100) != 0;
     UINT16 scan = event & 0x7F;
     UINT8 vk = W32kVirtualKey(scan);
+    if ((event & 0x200) && scan == 0x35) vk = 0x6F;
     if (vk == 0x10) g_w32k_shift = !release;
     else if (vk == 0x11) g_w32k_ctrl = !release;
     else if (vk == 0x12) g_w32k_alt = !release;
@@ -1178,9 +1245,17 @@ void W32kInputKey(UINT16 event)
     if (!target)
         return;
     UINT64 lparam = 1 | ((UINT64)(scan & 0xFF) << 16) |
+                    ((event & 0x200) ? 1ULL << 24 : 0) |
                     (release ? 0xC0000000ULL : 0);
-    W32kSendWindowMessage(target, release ? W32K_WM_KEYUP : W32K_WM_KEYDOWN,
-                          vk, (INT64)lparam);
+    /* Carry layout translation privately with the key. TranslateMessage
+     * posts it only if the application has not consumed an accelerator. */
+    BOOLEAN system = g_w32k_alt || vk == 0x12;
+    if (g_w32k_alt) lparam |= 1ULL << 29;
+    KiUserEnqueueMessagePrivate(KiUserWindowHandle(target),
+        system ? (release ? 0x105 : 0x104) :
+                 (release ? W32K_WM_KEYUP : W32K_WM_KEYDOWN),
+        vk, (INT64)lparam, g_w32k_pointer_x, g_w32k_pointer_y,
+        !release && character ? 0x10000u | character : 0, FALSE);
 }
 
 /* Keyboard ownership: once a window has focus the window manager turns raw key
@@ -1236,11 +1311,33 @@ static UINT64 NtUserWindowFromPoint(UINT64 *a)
     return KiUserWindowHandle(slot);
 }
 
+static void W32kSetStyle(UINT16 slot, UINT32 style)
+{
+    if(!W32kWindowExists(slot))return;
+    BOOLEAN was_visible=g_w32k[slot].Visible;
+    g_w32k[slot].Style=style;
+    if(was_visible!=((style&WS_VISIBLE_)!=0))W32kShowWindow(KiUserWindowHandle(slot),(style&WS_VISIBLE_)?5:0);
+}
+
 static UINT64 NtUserGetWindowRect(UINT64 *a)
 {
     if (!KiUserWindowValid(a[0], TRUE))
         return 0;
     return W32kGetRect(a[0], (INT32 *)a[1], FALSE) ? 1 : 0;
+}
+
+/* Private client contract: source HWND, target HWND, POINT array, count. */
+static UINT64 NtUserMapWindowPoints(UINT64 *a)
+{
+    if ((a[0] && !KiUserWindowValid(a[0], TRUE)) ||
+        (a[1] && !KiUserWindowValid(a[1], TRUE)) || a[3]>65536 ||
+        !MmProbeForWrite(a[2], a[3]*8)) return 0;
+    INT32 sx=0,sy=0,tx=0,ty=0,w,h;
+    if(a[0])W32kClientOrigin((UINT16)a[0],&sx,&sy,&w,&h);
+    if(a[1])W32kClientOrigin((UINT16)a[1],&tx,&ty,&w,&h);
+    INT32 dx=sx-tx,dy=sy-ty;INT32 *p=(INT32*)a[2];
+    for(UINT64 i=0;i<a[3];i++){p[i*2]+=dx;p[i*2+1]+=dy;}
+    return (UINT32)((UINT16)dx|((UINT32)(UINT16)dy<<16));
 }
 
 static UINT64 NtUserGetClientRect(UINT64 *a)
@@ -1307,3 +1404,55 @@ static UINT64 NtUserTrackMouseEvent(UINT64 *a)
     g_w32k[slot].TrackLeave = !(flags & 0x80000000u);
     return 1;
 }
+
+
+void W32kSetMenuBar(UINT16 slot,const WCHAR *labels,UINT32 count,BOOLEAN present)
+{
+    if(!W32kWindowExists(slot)||g_w32k[slot].Kind!=W32K_KIND_TOPLEVEL)return;
+    UINT64 flags=KiIrqSave();
+    W32K_WINDOW_STATE *w=&g_w32k[slot];w->MenuPresent=present;
+    w->MenuCount=count>16?16:count;
+    memset(w->MenuLabels,0,sizeof(w->MenuLabels));
+    if(labels)for(UINT32 i=0;i<w->MenuCount;i++){
+        memcpy(w->MenuLabels[i],labels+i*64,126);w->MenuLabels[i][63]=0;
+    }
+    W32kScreenCompose();KiIrqRestore(flags);
+}
+static UINT64 NtUserMenuBar(UINT64 *a)
+{
+    if(!KiUserWindowValid(a[0],TRUE))return 0;
+    UINT16 slot=(UINT16)a[0];
+    if(a[1]==0)return g_window_menus[slot];
+    if(a[1]!=1&&a[1]!=2)return 0;
+    if(a[4]>16||(a[4]&&!MmProbeForRead(a[3],a[4]*128)))return 0;
+    if(a[1]==1)g_window_menus[slot]=a[2];
+    W32kSetMenuBar(slot,(const WCHAR*)a[3],(UINT32)a[4],g_window_menus[slot]!=0);
+    return 1;
+}
+
+/* GW_* traversal follows sibling Z-order, not allocation-slot order. */
+static UINT64 NtUserWindowRelation(UINT64 *a)
+{
+    if(!KiUserWindowValid(a[0],TRUE))return 0;
+    UINT16 slot=(UINT16)a[0],parent=g_w32k[slot].Parent;
+    UINT32 command=(UINT32)a[1];
+    if(command==4){
+        if(g_w32k[slot].Style&WS_CHILD)return 0;
+        UINT64 owner=*(UINT64*)(PROCESS_USER_OBJECT_ARENA_VA+(UINT64)slot*0x200+WND_PARENT_OFF);
+        return owner&&KiUserWindowValid(owner,FALSE)?owner:0;
+    }
+    UINT16 candidate=0;
+    if(command==5){parent=slot;candidate=g_w32k_top;}
+    else if(command==0||command==1)candidate=g_w32k_top;
+    else if(command==2)candidate=g_w32k[slot].ZPrev;
+    else if(command==3)candidate=g_w32k[slot].ZNext;
+    else return 0;
+    UINT16 result=0;
+    for(UINT32 depth=0;candidate&&depth<W32K_SLOTS;depth++){
+        if(g_w32k[candidate].Parent==parent){result=candidate;if(command!=1)break;}
+        candidate=command==3?g_w32k[candidate].ZNext:g_w32k[candidate].ZPrev;
+    }
+    return result?KiUserWindowHandle(result):0;
+}
+
+void W32kScreenSetStatic(UINT16 slot,BOOLEAN is_static){if(W32kWindowExists(slot))g_w32k[slot].IsStatic=is_static;}

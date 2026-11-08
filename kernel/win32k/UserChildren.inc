@@ -28,6 +28,7 @@ static void W32kScreenPosition(UINT16 slot, INT32 *x, INT32 *y)
         int top = border;
         if (parent->Kind == W32K_KIND_TOPLEVEL && (parent->Style & WS_CAPTION))
             top = W32K_CAPTION_HEIGHT;
+        if(parent->Kind==W32K_KIND_TOPLEVEL&&parent->MenuPresent)top+=W32K_MENU_HEIGHT;
         *x += parent->X + border;
         *y += parent->Y + top;
     }
@@ -41,6 +42,18 @@ void W32kScreenSetParent(UINT16 slot, UINT16 parent)
         if (ancestor == slot) return;
     UINT64 flags = KiIrqSave();
     g_w32k[slot].Parent = parent;
+    /* CreateWindow places a new child below existing siblings. Raising every
+     * new child hides overlapping controls that the application created first. */
+    UINT16 lowest=0;
+    for(UINT16 w=g_w32k_top;w;w=g_w32k[w].ZPrev)
+        if(w!=slot&&g_w32k[w].Parent==parent)lowest=w;
+    if(lowest){
+        W32kUnlink(slot);
+        UINT16 below=g_w32k[lowest].ZPrev;
+        g_w32k[slot].ZPrev=below;g_w32k[slot].ZNext=lowest;
+        g_w32k[lowest].ZPrev=slot;
+        if(below)g_w32k[below].ZNext=slot;
+    }
     KiIrqRestore(flags);
 }
 
@@ -54,6 +67,9 @@ static UINT16 W32kChildAt(UINT16 parent, INT32 x, INT32 y, unsigned depth)
         for (child = g_w32k_top; child; child = g_w32k[child].ZPrev) {
             const W32K_WINDOW_STATE *w = &g_w32k[child];
             if (w->Parent != parent || !w->Visible || w->Minimized || (w->Style & 0x08000000u)) continue;
+            /* Default STATIC hit testing passes through unless SS_NOTIFY is
+             * set. Background labels must not intercept sibling controls. */
+            if(w->IsStatic&&!(w->Style&0x100))continue;
             INT32 sx, sy; W32kScreenPosition(child, &sx, &sy);
             if (x >= sx && y >= sy && x < sx + (INT32)w->W && y < sy + (INT32)w->H) break;
         }

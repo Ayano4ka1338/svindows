@@ -102,6 +102,7 @@ void W32kScreenWindowCreated(UINT16 slot, const UINT16 *title, UINT32 style,
                              INT32 x, INT32 y, UINT32 w, UINT32 h, UINT8 kind);
 void W32kScreenWindowDestroyed(UINT16 slot);
 void W32kScreenSetParent(UINT16 slot, UINT16 parent);
+void W32kScreenSetStatic(UINT16 slot, BOOLEAN is_static);
 UINT16 W32kWindowParent(UINT16 slot);
 UINT16 W32kRootSlot(UINT16 slot);
 void W32kScreenSetTitle(UINT16 slot, const UINT16 *title);
@@ -109,6 +110,8 @@ void W32kSetWindowText(UINT64 hwnd, const UINT16 *text);
 void W32kShowWindow(UINT64 hwnd, UINT32 command);
 void W32kMoveWindow(UINT64 hwnd, INT32 x, INT32 y, UINT32 width, UINT32 height);
 void W32kRaiseSlot(UINT16 slot);
+void W32kSetMenuBar(UINT16 slot, const UINT16 *labels, UINT32 count, BOOLEAN present);
+void W32kSetZOrder(UINT16 slot, UINT64 after);
 void W32kInvalidateFrame(UINT16 slot);
 
 BOOLEAN W32kWindowExists(UINT16 slot);
@@ -121,7 +124,7 @@ BOOLEAN W32kGetRect(UINT64 hwnd, INT32 *rect, BOOLEAN client);
 
 /* Input arrives from the HAL through the kernel input worker. */
 void W32kInputMouse(INT32 x, INT32 y, UINT8 buttons);
-void W32kInputKey(UINT16 event);
+void W32kInputKey(UINT16 event, UINT16 character);
 void W32kPostCharacter(UINT16 character);
 /* TRUE when the focused window manager should receive keyboard events. */
 BOOLEAN W32kKeyboardOwner(void);
@@ -137,6 +140,7 @@ UINT64 NtGdiDeleteObjectApp(UINT64 *args);
 UINT64 NtGdiPatBlt(UINT64 *args);
 UINT64 NtGdiBitBlt(UINT64 *args);
 UINT64 NtGdiBlitUserBuffer(UINT64 *args);
+UINT64 NtGdiReadUserBuffer(UINT64 *args);
 UINT64 NtGdiExtTextOutW(UINT64 *args);
 UINT64 NtGdiGetTextMetricsW(UINT64 *args);
 UINT64 NtGdiGetTextExtent(UINT64 *args);

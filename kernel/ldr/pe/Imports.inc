@@ -539,6 +539,12 @@ static UINT64 LdrpLoadModuleWorker(const char *name)
     if (ci_strcmp(name, "kernelbase.dll") == 0)
         return LdrpLoadModule("kernel32.dll");
 
+    /* The current COM bootstrap is implemented in kernel32; the Win7
+     * calculator's OLE32 imports (CoInitialize/CoUninitialize/
+     * CoCreateInstance) are this supported bootstrap surface. */
+    if (ci_strcmp(name, "ole32.dll") == 0)
+        return LdrpLoadModule("kernel32.dll");
+
     /* GDI32's private kernel-facing contract is hosted by win32u.dll. */
     if (LdrpNameContains(name, "gdi-internal-uap") ||
         LdrpNameContains(name, "gdi-internal-desktop"))

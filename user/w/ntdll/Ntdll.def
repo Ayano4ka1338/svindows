@@ -34,6 +34,7 @@ EXPORTS
     NtQueryInformationFile
     NtWriteFile
     NtClose
+    NtQueryLicenseValue
     NtCreateEvent
     NtFlushBuffersFile
     NtSetEvent
@@ -133,6 +134,10 @@ EXPORTS
     NtUserGetWindowText
     NtUserWindowFromPoint
     NtUserQueryWindow
+    NtGdiReadUserBuffer
+    NtUserMapWindowPoints
+    NtUserClassLong
+    NtUserSetWindowLongPtr
     NtUserGetAncestor
     NtUserGetKeyState
     NtUserTrackMouseEvent
@@ -309,3 +314,7 @@ EXPORTS
     ZwCreateKey = NtCreateKey
     ZwSetValueKey = NtSetValueKey
     ZwQueryValueKey = NtQueryValueKey
+
+    NtUserMenuBar
+
+    NtUserWindowRelation

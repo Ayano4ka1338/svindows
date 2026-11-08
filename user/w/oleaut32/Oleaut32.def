@@ -1,0 +1,8 @@
+LIBRARY OLEAUT32
+EXPORTS
+    SysAllocString @2
+    SysFreeString @6
+    SysStringLen @7
+    VariantInit @8
+    VariantClear @9
+    SysAllocStringByteLen @150

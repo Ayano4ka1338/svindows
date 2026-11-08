@@ -7,6 +7,8 @@ BOOL SvRegisterTrackbar(void);
 BOOL SvRegisterTab(void);
 BOOL SvRegisterListView(void);
 BOOL SvRegisterToolbar(void);
+BOOL SvRegisterDateTime(void);
+BOOL SvRegisterUpDown(void);
 LRESULT SvProgressProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT SvStatusProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT SvTrackbarProc(HWND, UINT, WPARAM, LPARAM);

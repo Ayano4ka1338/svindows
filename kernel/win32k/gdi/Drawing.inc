@@ -303,6 +303,22 @@ UINT64 NtGdiBitBlt(UINT64 *a)
 
 /* Copy an RGB software surface into a DC's client rectangle. The service is
  * fast path for copying a user RGB surface into a window DC. */
+/* Private readback for a DIB section after native raster operations. */
+UINT64 NtGdiReadUserBuffer(UINT64 *a)
+{
+    W32K_DC *dc=dc_from_handle(a[0]);
+    UINT32 *out=(UINT32*)a[1];UINT32 w=(UINT32)a[2],h=(UINT32)a[3];
+    if(!dc||!dc->Surface||dc->Surface->IsScreen||!out||!w||!h||
+       w>dc->Surface->Width||h>dc->Surface->Height||
+       !MmProbeForWrite(a[1],(UINT64)w*h*4))return 0;
+    for(UINT32 y=0;y<h;y++)for(UINT32 x=0;x<w;x++){
+        UINT32 v=dc->Surface->Bits[(UINT64)y*dc->Surface->Stride+x];
+        out[(UINT64)y*w+x]=0xff000000u|(((v>>GfxFramebuffer.RedShift)&255)<<16)|
+            (((v>>GfxFramebuffer.GreenShift)&255)<<8)|((v>>GfxFramebuffer.BlueShift)&255);
+    }
+    return 1;
+}
+
 UINT64 NtGdiBlitUserBuffer(UINT64 *a)
 {
     W32K_DC *dc = dc_from_handle(a[0]);

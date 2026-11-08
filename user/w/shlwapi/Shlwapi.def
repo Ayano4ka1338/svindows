@@ -1,0 +1,3 @@
+LIBRARY SHLWAPI
+EXPORTS
+    SHStripMneumonicW @225

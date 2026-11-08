@@ -86,6 +86,20 @@ static int sv_wcslen(const WCHAR *text)
     return count;
 }
 
+__declspec(dllimport) UINT64 NtUserGetAncestor(HWND hwnd, UINT flags);
+
+static void sv_user_record_window(HWND hwnd, const WCHAR *class_name,
+                                  const WCHAR *window_name, DWORD style,
+                                  DWORD ex_style, HWND parent, HMENU menu,
+                                  HINSTANCE instance);
+
+static void sv_user_record_class(const WNDCLASSEXW*, ATOM);
+static HMENU sv_user_default_menu(const WCHAR*,HINSTANCE);
+static void sv_user_attach_menu(HWND);
+static void sv_user_forget_window(HWND);
+static BOOL sv_user_menu_command(HWND,WPARAM,LPARAM);
+USER32_API BOOL DrawMenuBar(HWND);
+
 USER32_API ATOM RegisterClassExW(const WNDCLASSEXW *wndclass)
 {
     if (!wndclass || !wndclass->lpfnWndProc || !wndclass->lpszClassName)
@@ -99,7 +113,9 @@ USER32_API ATOM RegisterClassExW(const WNDCLASSEXW *wndclass)
     name.buffer = wndclass->lpszClassName;
     /* WOW-compiled classes do not exist in this build: fnId and flags are zero
      * and the caller's WNDCLASSEXW is the only source of the class data. */
-    return (ATOM)NtUserRegisterClassExWOW(wndclass, &name, NULL, 0, 0, 0);
+    ATOM atom=(ATOM)NtUserRegisterClassExWOW(wndclass, &name, NULL, 0, 0, 0);
+    if(atom)sv_user_record_class(wndclass,atom);
+    return atom;
 }
 
 USER32_API ATOM RegisterClassW(const WNDCLASSW *wndclass)
@@ -160,6 +176,8 @@ USER32_API HWND CreateWindowExW(DWORD ex_style, const WCHAR *class_name,
     if (height == CW_USEDEFAULT)
         height = 400;
 
+    if(!menu&&!(style&(WS_CHILD|WS_POPUP)))menu=sv_user_default_menu(class_name,instance);
+
     SV_LARGE_STRING named_class;
     UINT64 class_arg;
     if (IS_INTRESOURCE(class_name)) {
@@ -178,10 +196,14 @@ USER32_API HWND CreateWindowExW(DWORD ex_style, const WCHAR *class_name,
      * when the class could not be resolved or the callback was refused). The
      * window manager also owns the frame from here on: it decides the client
      * rectangle and sends WM_SIZE when the window is created or resized. */
-    return (HWND)(UINT_PTR)NtUserCreateWindowEx(ex_style, class_arg, 0,
-                                                (UINT64)(UINT_PTR)window_name, style,
-                                                x, y, width, height, parent, menu,
-                                                instance, param, 0, 0, 0);
+    HWND hwnd = (HWND)(UINT_PTR)NtUserCreateWindowEx(
+        ex_style, class_arg, 0, (UINT64)(UINT_PTR)window_name, style,
+        x, y, width, height, parent, menu, instance, param, 0, 0, 0);
+    if (hwnd)
+        sv_user_record_window(hwnd, class_name, window_name, style, ex_style,
+                              parent, menu, instance);
+    if(hwnd&&menu&&!(style&WS_CHILD))sv_user_attach_menu(hwnd);
+    return hwnd;
 }
 
 USER32_API HWND CreateWindowW(const WCHAR *class_name, const WCHAR *window_name,
@@ -207,7 +229,9 @@ USER32_API BOOL DestroyWindow(HWND hwnd)
     if (!hwnd)
         return FALSE;
     /* win32k delivers both teardown messages and destroys descendants. */
-    return NtUserDestroyWindow(hwnd) != 0;
+    BOOL destroyed=NtUserDestroyWindow(hwnd)!=0;
+    if(destroyed)sv_user_forget_window(hwnd);
+    return destroyed;
 }
 
 USER32_API BOOL SetWindowPos(HWND hwnd, HWND insert_after, int x, int y, int width,
@@ -313,13 +337,16 @@ USER32_API DWORD GetSysColor(int index)
 #include "User32Message.inc"
 #include "User32Input.inc"
 #include "User32Paint.inc"
+#include "User32Compat.inc"
 
 USER32_API int GetWindowTextLengthW(HWND hwnd)
 {
     return (int)SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0);
 }
-__declspec(dllimport) UINT64 NtUserGetAncestor(HWND hwnd, UINT flags);
 USER32_API HWND GetParent(HWND hwnd)
 {
     return (HWND)(UINT_PTR)NtUserGetAncestor(hwnd, 1);
 }
+
+__declspec(dllimport) UINT64 NtUserWindowRelation(HWND,UINT);
+USER32_API HWND GetWindow(HWND hwnd,UINT command){return (HWND)(UINT_PTR)NtUserWindowRelation(hwnd,command);}

@@ -1204,6 +1204,11 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserGetObjectInformation] = NtUserGetObjectInformation;
     KiServiceTable[SN_NtUserRegisterHotKey] = NtUserRegisterHotKey;
     KiServiceTable[SN_NtUserCallTwoParam] = NtUserCallTwoParam;
+    KiServiceTable[0x1F02] = NtUserClassLong;
+    KiServiceTable[0x1F03] = NtUserMapWindowPoints;
+    KiServiceTable[0x1F04] = NtGdiReadUserBuffer;
+    KiServiceTable[0x1F05] = NtUserMenuBar;
+    KiServiceTable[0x1F06] = NtUserWindowRelation;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

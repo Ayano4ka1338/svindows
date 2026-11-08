@@ -16,6 +16,7 @@ extern DWORD GetLastError(void);
 #define SCM_SERVICE 2u
 #define SCM_CONNECT 0x0001u
 #define SERVICE_QUERY_STATUS 0x0004u
+#define SERVICE_QUERY_CONFIG 0x0001u
 #define SERVICE_START_ACCESS 0x0010u
 #define SERVICE_STOPPED 1u
 #define SERVICE_RUNNING 4u
@@ -41,6 +42,12 @@ typedef struct {
     DWORD ServiceType, CurrentState, ControlsAccepted, Win32ExitCode;
     DWORD ServiceSpecificExitCode, CheckPoint, WaitHint;
 } SCM_STATUS;
+typedef struct {
+    DWORD ServiceType, StartType, ErrorControl;
+    WCHAR *BinaryPathName, *LoadOrderGroup;
+    DWORD *TagId;
+    WCHAR *Dependencies, *ServiceStartName, *DisplayName;
+} SCM_QUERY_CONFIG;
 
 static SCM_SERVICE_RECORD g_scm_services[SCM_SERVICES];
 static SCM_HANDLE_SLOT g_scm_handles[SCM_SLOTS];
@@ -185,6 +192,102 @@ __declspec(dllexport) int CloseServiceHandle(HANDLE handle)
     if (!slot) { scm_unlock(); SetLastError(6); return 0; }
     slot->Kind = 0;
     scm_unlock();
+    return 1;
+}
+
+static DWORD scm_config_string(HKEY key, const WCHAR *value_name,
+                               WCHAR *buffer, DWORD capacity)
+{
+    DWORD type = 0, bytes = capacity * sizeof(WCHAR);
+    LONG status = RegQueryValueExW(key, value_name, 0, &type,
+                                   (BYTE *)buffer, &bytes);
+    if (status == ERROR_FILE_NOT_FOUND) { buffer[0] = 0; return 1; }
+    if (status || (type != 1 && type != 2 && type != 7) ||
+        bytes < sizeof(WCHAR) ||
+        bytes > capacity * sizeof(WCHAR)) return 0;
+    buffer[capacity - 1] = 0;
+    return 1;
+}
+
+static DWORD scm_wide_length(const WCHAR *text)
+{
+    DWORD n = 0;
+    while (text[n]) n++;
+    return n;
+}
+
+static WCHAR *scm_pack_string(WCHAR **cursor, const WCHAR *source)
+{
+    WCHAR *result = *cursor;
+    DWORD n = scm_wide_length(source) + 1;
+    for (DWORD i = 0; i < n; i++) result[i] = source[i];
+    *cursor += n;
+    return result;
+}
+
+__declspec(dllexport) int QueryServiceConfigW(HANDLE handle,
+        SCM_QUERY_CONFIG *config, DWORD capacity, DWORD *needed)
+{
+    scm_lock();
+    SCM_HANDLE_SLOT *slot = scm_slot(handle, SCM_SERVICE);
+    DWORD access = slot ? slot->Access : 0;
+    DWORD service_index = slot ? slot->ServiceIndex : 0;
+    WCHAR service_name[80] = {0};
+    if (slot) {
+        for (DWORD i = 0; i < 80; i++) {
+            service_name[i] = g_scm_services[service_index].Name[i];
+            if (!service_name[i]) break;
+        }
+    }
+    scm_unlock();
+    if (!slot) { SetLastError(6); return 0; }
+    if (!(access & SERVICE_QUERY_CONFIG)) { SetLastError(5); return 0; }
+    HKEY key = scm_open_config(service_name);
+    if (!key) { SetLastError(ERROR_SERVICE_DOES_NOT_EXIST); return 0; }
+
+    WCHAR binary[260] = {0}, group[128] = {0}, dependencies[256] = {0};
+    WCHAR account[128] = { 'L','o','c','a','l','S','y','s','t','e','m',0 };
+    WCHAR display[128] = {0};
+    DWORD type = 0, start = 3, error_control = 1;
+    int valid = scm_read_dword(key, L"Type", &type);
+    scm_read_dword(key, L"Start", &start);
+    scm_read_dword(key, L"ErrorControl", &error_control);
+    valid = valid && scm_config_string(key, L"ImagePath", binary, 260) &&
+        scm_config_string(key, L"Group", group, 128) &&
+        scm_config_string(key, L"DependOnService", dependencies, 256) &&
+        scm_config_string(key, L"ObjectName", account, 128) &&
+        scm_config_string(key, L"DisplayName", display, 128);
+    RegCloseKey(key);
+    if (!valid) { SetLastError(13); return 0; }
+
+    DWORD dep_units = dependencies[0] ? 1 : 2;
+    if (dependencies[0]) {
+        while (dependencies[dep_units]) dep_units++;
+        dep_units++;
+    }
+    DWORD units = (DWORD)(sizeof(SCM_QUERY_CONFIG) / sizeof(WCHAR)) +
+        scm_wide_length(binary) + 1 + scm_wide_length(group) + 1 + dep_units +
+        scm_wide_length(account) + 1 + scm_wide_length(display) + 1;
+    DWORD required = units * sizeof(WCHAR);
+    if (needed) *needed = required;
+    if (!config || capacity < required) {
+        SetLastError(122);
+        return 0;
+    }
+    config->ServiceType = type;
+    config->StartType = start;
+    config->ErrorControl = error_control;
+    config->TagId = 0;
+    WCHAR *cursor = (WCHAR *)((BYTE *)config + sizeof(*config));
+    config->BinaryPathName = scm_pack_string(&cursor, binary);
+    config->LoadOrderGroup = scm_pack_string(&cursor, group);
+    config->Dependencies = cursor;
+    if (dependencies[0]) {
+        for (DWORD i = 0; i < dep_units; i++) cursor[i] = dependencies[i];
+        cursor += dep_units;
+    } else { *cursor++ = 0; *cursor++ = 0; }
+    config->ServiceStartName = scm_pack_string(&cursor, account);
+    config->DisplayName = scm_pack_string(&cursor, display);
     return 1;
 }
 

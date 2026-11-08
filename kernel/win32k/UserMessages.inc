@@ -146,9 +146,9 @@ static UINT16 KiUserNextUpdateWindow(UINT32 tid)
     return 0;
 }
 
-static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
+static BOOLEAN KiUserEnqueueMessagePrivate(UINT64 hwnd, UINT32 message,
                                     UINT64 wparam, INT64 lparam,
-                                    INT32 x, INT32 y)
+                                    INT32 x, INT32 y, UINT32 private, BOOLEAN front)
 {
     /* A posted message is delivered to its window's owner thread; a thread
      * message (hwnd == 0) goes to the posting thread's own target queue via
@@ -169,7 +169,8 @@ static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
         return FALSE;
     }
 
-    USER_MSG_LOCAL *msg = &queue->Msgs[queue->Head];
+    UINT32 index = front ? (queue->Tail + USER_MESSAGE_QUEUE_CAPACITY - 1) % USER_MESSAGE_QUEUE_CAPACITY : queue->Head;
+    USER_MSG_LOCAL *msg = &queue->Msgs[index];
     memset(msg, 0, sizeof(*msg));
     msg->Hwnd = hwnd;
     msg->Message = message;
@@ -178,10 +179,20 @@ static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
     msg->Time = (UINT32)(KeGetTickCount() * 10);
     msg->PtX = x;
     msg->PtY = y;
-    queue->Head = next;
+    msg->Private = private;
+    if (front) queue->Tail = index;
+    else queue->Head = next;
     KiUserSyncInputEvent(queue);
     KiIrqRestore(flags);
     return TRUE;
+}
+
+/* Ordinary posted messages have no hardware character attached. */
+static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
+                                    UINT64 wparam, INT64 lparam,
+                                    INT32 x, INT32 y)
+{
+    return KiUserEnqueueMessagePrivate(hwnd,message,wparam,lparam,x,y,0,FALSE);
 }
 
 static BOOLEAN KiUserEnqueueThreadMessage(UINT32 target_tid, UINT32 message,
@@ -305,8 +316,9 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
     *out = queue->Msgs[queue->Tail];
     if (remove) {
         queue->Tail = (queue->Tail + 1) % USER_MESSAGE_QUEUE_CAPACITY;
-        if ((out->Message == 0x0100 || out->Message == 0x0101) && out->WParam < 256)
-            queue->KeyState[out->WParam] = out->Message == 0x0100;
+        if ((out->Message == 0x0100 || out->Message == 0x0101 ||
+             out->Message == 0x0104 || out->Message == 0x0105) && out->WParam < 256)
+            queue->KeyState[out->WParam] = out->Message == 0x0100 || out->Message == 0x0104;
         if (out->Message >= 0x0200 && out->Message <= 0x020A) {
             queue->KeyState[0x10] = !!(out->WParam & 4);
             queue->KeyState[0x11] = !!(out->WParam & 8);

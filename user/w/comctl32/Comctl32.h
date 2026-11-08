@@ -169,4 +169,26 @@ COMCTL32_API void InitCommonControls(void);
 COMCTL32_API HWND CreateStatusWindowW(LONG style, const WCHAR *text,
                                       HWND parent, UINT id);
 
+/* Date/time common controls, matching the Win64 SYSTEMTIME/NM layouts. */
+#define ICC_DATE_CLASSES 0x00000100u
+#define ICC_UPDOWN_CLASS 0x00000010u
+#define DATETIMEPICK_CLASSW L"SysDateTimePick32"
+#define MONTHCAL_CLASSW L"SysMonthCal32"
+#define UPDOWN_CLASSW L"msctls_updown32"
+typedef struct { WORD wYear,wMonth,wDayOfWeek,wDay,wHour,wMinute,wSecond,wMilliseconds; } SV_SYSTEMTIME;
+#define DTM_GETSYSTEMTIME 0x1001u
+#define DTM_SETSYSTEMTIME 0x1002u
+#define DTM_GETRANGE 0x1003u
+#define DTM_SETRANGE 0x1004u
+#define DTM_GETMONTHCAL 0x1008u
+#define DTM_SETFORMATW 0x1032u
+#define GDT_VALID 0
+#define GDT_NONE 1
+#define GDT_ERROR (-1)
+#define GDTR_MIN 1u
+#define GDTR_MAX 2u
+#define DTS_SHOWNONE 2u
+#define DTN_DATETIMECHANGE ((UINT)-759)
+typedef struct { NMHDR nmhdr; DWORD dwFlags; SV_SYSTEMTIME st; } SV_NMDATETIMECHANGE;
+
 #endif

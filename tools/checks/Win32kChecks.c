@@ -28,7 +28,8 @@ typedef struct _TEST_PAGE {
     int Fd;
     BOOLEAN Mapped;
 } TEST_PAGE;
-static TEST_PAGE pages[1024];
+#define TEST_PAGE_CAPACITY 4096
+static TEST_PAGE pages[TEST_PAGE_CAPACITY];
 static int fail_allocate_after = -1, fail_map_after = -1;
 static unsigned page_allocations, page_frees;
 GFX_FRAMEBUFFER GfxFramebuffer;
@@ -94,7 +95,7 @@ UINT64 MmAllocatePage(void)
 {
     if (fail_allocate_after == 0) return MM_INVALID_PHYS;
     if (fail_allocate_after > 0) fail_allocate_after--;
-    for (unsigned i = 0; i < 1024; i++) {
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++) {
         TEST_PAGE *page = &pages[i];
         if (page->Physical) continue;
         page->Fd = memfd_create("svindows-callback-check", 0);
@@ -112,7 +113,7 @@ BOOLEAN MmMapPage(UINT64 va, UINT64 pa, UINT64 flags)
 {
     if (fail_map_after == 0) return FALSE;
     if (fail_map_after > 0) fail_map_after--;
-    for (unsigned i = 0; i < 1024; i++) {
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++) {
         TEST_PAGE *page = &pages[i];
         if ((UINT64)page->Physical != pa) continue;
         int prot = PROT_READ | ((flags & PTE_WRITE) ? PROT_WRITE : 0) |
@@ -127,7 +128,7 @@ BOOLEAN MmMapPage(UINT64 va, UINT64 pa, UINT64 flags)
 }
 UINT64 MmGetPhysicalAddressInAddressSpace(UINT64 root, UINT64 va)
 {
-    for (unsigned i = 0; i < 1024; i++)
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++)
         if (pages[i].Mapped && pages[i].Root == root && pages[i].Va == PAGE_ALIGN(va))
             return (UINT64)pages[i].Physical + (va & PAGE_MASK);
     return MM_INVALID_PHYS;
@@ -137,14 +138,14 @@ UINT64 MmGetPhysicalAddress(UINT64 va)
 UINT64 MmGetPageFlags(UINT64 va)
 {
     if (va == 0xdead000) return PTE_PRESENT | PTE_USER | PTE_NX;
-    for (unsigned i = 0; i < 1024; i++)
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++)
         if (pages[i].Mapped && pages[i].Root == current->Process->DirectoryTableBase &&
             pages[i].Va == PAGE_ALIGN(va)) return pages[i].Flags | PTE_PRESENT;
     return PTE_USER | PTE_PRESENT; /* fake executable WndProc fixture */
 }
 BOOLEAN MmUnmapPageInAddressSpace(UINT64 root, UINT64 va)
 {
-    for (unsigned i = 0; i < 1024; i++) {
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++) {
         TEST_PAGE *page = &pages[i];
         if (!page->Mapped || page->Root != root || page->Va != va) continue;
         if (root == current->Process->DirectoryTableBase) assert(!munmap((void *)va, PAGE_SIZE));
@@ -156,7 +157,7 @@ BOOLEAN MmUnmapPageInAddressSpace(UINT64 root, UINT64 va)
 void MmFreePages(UINT64 pa, SIZE_T count)
 {
     assert(count == 1);
-    for (unsigned i = 0; i < 1024; i++) {
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++) {
         TEST_PAGE *page = &pages[i];
         if ((UINT64)page->Physical != pa) continue;
         assert(!page->Mapped);
@@ -172,11 +173,11 @@ void MmFreePages(UINT64 pa, SIZE_T count)
 static void switch_callback_process(PKTHREAD thread)
 {
     if (current->Process == thread->Process) { current = thread; return; }
-    for (unsigned i = 0; i < 1024; i++)
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++)
         if (pages[i].Mapped && pages[i].Root == current->Process->DirectoryTableBase)
             assert(!munmap((void *)pages[i].Va, PAGE_SIZE));
     current = thread;
-    for (unsigned i = 0; i < 1024; i++) {
+    for (unsigned i = 0; i < TEST_PAGE_CAPACITY; i++) {
         TEST_PAGE *page = &pages[i];
         if (!page->Mapped || page->Root != current->Process->DirectoryTableBase) continue;
         int prot = PROT_READ | ((page->Flags & PTE_WRITE) ? PROT_WRITE : 0) |
@@ -226,13 +227,13 @@ static void check_callbacks(void)
         assert(!thread_a.CallbackActive && original == 0);
         assert(thread_a.CallbackRip == 0x1234 && thread_a.CallbackRsp == (UINT64)&original);
     }
-    assert(page_allocations == allocations + 17);
+    assert(page_allocations == allocations + CALLBACK_MAX_DEPTH * CALLBACK_STACK_PAGES + 1);
     prepare_callback(&thread_a, &original);
     UINT64 create_args[16] = {0}; create_args[12] = 0xabc;
     UINT64 cs = KiBuildCreateStruct(create_args, 0x10001);
     assert(cs && *(UINT64 *)cs == 0xabc && cs < thread_a.UserCallbackBase + CALLBACK_THUNK_OFFSET);
     assert(KiBuildCreateStruct(create_args, 0x10001) == cs);
-    assert(page_allocations == allocations + 17);
+    assert(page_allocations == allocations + CALLBACK_MAX_DEPTH * CALLBACK_STACK_PAGES + 1);
     assert(!KiStartUserCallback(0xdead000, 0, 0, 0, 0, CB_CONT_SIMPLE, 0, 0, 0));
     assert(!KiStartUserCallback(MM_USER_MAX, 0, 0, 0, 0, CB_CONT_SIMPLE, 0, 0, 0));
     UINT64 slots[8] = {0}, thunks[8] = {0}, stacks[8] = {0};
@@ -243,6 +244,13 @@ static void check_callbacks(void)
                                   CB_CONT_SIMPLE, level + 1, 0, 0));
         thunks[level] = thread_a.CallbackRip; stacks[level] = thread_a.CallbackRsp;
         assert(thread_a.UserCallbackDepth == level + 1);
+        UINT64 top=thread_a.UserCallbackBase+CALLBACK_THUNK_OFFSET-level*CALLBACK_STACK_SLICE;
+        for(UINT32 page=1;page<=16;page++){
+            UINT64 va=top-page*PAGE_SIZE;
+            assert((MmGetPageFlags(va)&(PTE_WRITE|PTE_NX))==(PTE_WRITE|PTE_NX));
+            *(volatile UINT64*)va=0x12340000+level;
+        }
+        assert(MmGetPhysicalAddress(top-17*PAGE_SIZE)==MM_INVALID_PHYS);
         if (level) {
             assert(thunks[level] - thunks[level-1] == CALLBACK_THUNK_STRIDE);
             assert(stacks[level-1] - stacks[level] == CALLBACK_STACK_SLICE);
@@ -308,7 +316,7 @@ static void check_callbacks(void)
         }
     }
     prepare_callback(&thread_a, &original);
-    assert(page_allocations == allocations + 17);
+    assert(page_allocations == allocations + CALLBACK_MAX_DEPTH * CALLBACK_STACK_PAGES + 1);
     puts("PASS creation callback chain, refusal, failed dispatch and teardown after WM_CREATE failure");
 
     /* A parent creates a child inside WM_CREATE, then refuses creation.
@@ -350,7 +358,7 @@ static void check_callbacks(void)
     current = &thread_a;
     for (unsigned i = 0; i < 16; i++) W32kCleanupThreadUser(&pool[i]);
     free(pool);
-    assert(page_allocations - page_frees == 17);
+    assert(page_allocations - page_frees == CALLBACK_MAX_DEPTH * CALLBACK_STACK_PAGES + 1);
     puts("PASS per-process concurrent slot limit and thread slot reclamation");
 
     UINT64 base_a = thread_a.UserCallbackBase;
@@ -442,6 +450,19 @@ static void check_damage_matches_full(void)
     free(partial);
 }
 
+/* Rendering fixtures use an explicit server-side class; production calls
+ * must no longer succeed with NULL or unregistered class arguments. */
+static UINT64 create_fixture_window(UINT64 *args)
+{
+    if(!args[1]){
+        USER_CLASS_LOCAL *cls=0;
+        for(UINT32 i=0;i<USER_MAX_CLASSES;i++)if(g_user_classes[i].Used&&g_user_classes[i].Process==current->Process&&g_user_classes[i].Atom==0xdfff){cls=&g_user_classes[i];break;}
+        if(!cls)for(UINT32 i=0;i<USER_MAX_CLASSES;i++)if(!g_user_classes[i].Used){cls=&g_user_classes[i];*cls=(USER_CLASS_LOCAL){.Used=TRUE,.Process=current->Process,.Atom=0xdfff};break;}
+        assert(cls);args[1]=cls->Atom;
+    }
+    return NtUserCreateWindowEx(args);
+}
+
 static void check_retained_window_painting(void)
 {
     enum { WIDTH = 240, HEIGHT = 180, STRIDE = WIDTH + 3 };
@@ -454,7 +475,7 @@ static void check_retained_window_painting(void)
     UINT64 args[16] = {0};
     args[4] = WS_CAPTION | WS_SYSMENU;
     args[5] = 20; args[6] = 20; args[7] = 190; args[8] = 100;
-    UINT64 hwnd = NtUserCreateWindowEx(args);
+    UINT64 hwnd = create_fixture_window(args);
     assert(hwnd);
     UINT16 slot = (UINT16)hwnd;
     W32kShowWindow(hwnd, 1);
@@ -521,7 +542,7 @@ static void check_retained_window_painting(void)
     memset(args, 0, sizeof(args));
     args[4] = WS_POPUP; args[5] = 0; args[6] = 40;
     args[7] = 140; args[8] = 100;
-    UINT64 popup = NtUserCreateWindowEx(args);
+    UINT64 popup = create_fixture_window(args);
     assert(popup);
     g_w32k[(UINT16)popup].Kind = W32K_KIND_TASKBAR;
     W32kShowWindow(popup, 1);
@@ -579,8 +600,22 @@ static void check_retained_window_painting(void)
     memset(args, 0, sizeof(args));
     args[4] = WS_CHILD | 0x10000000u;
     args[5] = (UINT64)-8; args[6] = 3; args[7] = 30; args[8] = 24; args[9] = hwnd;
-    UINT64 child = NtUserCreateWindowEx(args); assert(child);
+    UINT64 child = create_fixture_window(args); assert(child);
     assert(W32kWindowParent((UINT16)child) == slot && W32kRootSlot((UINT16)child) == slot);
+    UINT64 sibling_args[16]={0};sibling_args[4]=WS_CHILD;sibling_args[7]=10;sibling_args[8]=10;sibling_args[9]=hwnd;
+    UINT64 sibling=create_fixture_window(sibling_args);assert(sibling);
+    UINT64 relation[]={sibling,3};assert(NtUserWindowRelation(relation)==child);
+    relation[0]=child;relation[1]=2;assert(NtUserWindowRelation(relation)==sibling);
+    relation[0]=hwnd;relation[1]=5;assert(NtUserWindowRelation(relation)==child);
+    relation[0]=child;relation[1]=1;assert(NtUserWindowRelation(relation)==sibling);
+    relation[0]=sibling;relation[1]=0;assert(NtUserWindowRelation(relation)==child);
+    g_w32k[(UINT16)sibling].Visible=TRUE;g_w32k[(UINT16)sibling].X=-8;g_w32k[(UINT16)sibling].Y=3;
+    g_w32k[(UINT16)sibling].W=30;g_w32k[(UINT16)sibling].H=24;g_w32k[(UINT16)sibling].IsStatic=TRUE;
+    W32kRaise((UINT16)sibling);INT32 hit_x,hit_y,hit_w,hit_h;W32kClientOrigin(slot,&hit_x,&hit_y,&hit_w,&hit_h);
+    assert(W32kChildAt(slot,hit_x+1,hit_y+4,0)==(UINT16)child);
+    g_w32k[(UINT16)sibling].Style|=0x100;assert(W32kChildAt(slot,hit_x+1,hit_y+4,0)==(UINT16)sibling);
+    sibling_args[0]=sibling;assert(NtUserDestroyWindow(sibling_args));
+
     args[0] = child; args[1] = (UINT64)ps;
     UINT64 child_dc = NtUserBeginPaint(args); assert(child_dc);
     UINT64 child_fill[] = {child_dc, 0, 0, 30, 24, 0x00FF0062};
@@ -616,6 +651,25 @@ static void check_retained_window_painting(void)
     free(screen); free(pixels); free(before);
     GfxFramebuffer.Base = NULL;
     GfxFramebuffer.Width = GfxFramebuffer.Height = GfxFramebuffer.Pitch = 0;
+}
+
+static void check_menu_geometry(void)
+{
+    BOOLEAN saved_graphics=graphics;graphics=FALSE;
+    memset(g_w32k,0,sizeof(g_w32k));g_w32k_top=0;
+    g_w32k[1]=(W32K_WINDOW_STATE){.Kind=W32K_KIND_TOPLEVEL,.X=10,.Y=20,.W=200,.H=100,.Style=WS_CAPTION};
+    g_w32k[2]=(W32K_WINDOW_STATE){.Kind=W32K_KIND_CHILD,.Parent=1,.X=5,.Y=6,.W=10,.H=10};
+    INT32 x,y,w,h;W32kClientOrigin(1,&x,&y,&w,&h);INT32 old_y=y,old_h=h;
+    WCHAR labels[64]={ 'V','i','e','w',0 };
+    W32kSetMenuBar(1,labels,1,TRUE);labels[0]='X';
+    assert(g_w32k[1].MenuLabels[0][0]=='V');
+    W32kClientOrigin(1,&x,&y,&w,&h);
+    assert(y==old_y+19&&h==old_h-19);
+    BOOLEAN client=TRUE;assert(W32kHitTest(1,20,old_y+5,&client)==W32K_PART_MENU&&!client);
+    W32kClientOrigin(2,&x,&y,&w,&h);assert(y==old_y+19+6);
+    W32kSetMenuBar(1,NULL,0,FALSE);W32kClientOrigin(1,&x,&y,&w,&h);assert(y==old_y&&h==old_h);
+    graphics=saved_graphics;
+    puts("PASS menu snapshots, nonclient hit testing and child/client geometry");
 }
 
 int main(void)
@@ -752,7 +806,10 @@ int main(void)
     current = &thread_a;
     assert(KiClassForCreate(atom)->WndProc == 0x1111);
     memset(args, 0, sizeof(args));
-    UINT64 hwnd_a = NtUserCreateWindowEx(args);
+    UINT8 teb[128]={0};UINT64 saved_teb=thread_a.UserGsBase;thread_a.UserGsBase=(UINT64)teb;
+    assert(!NtUserCreateWindowEx(args)&&*(UINT32*)(teb+0x68)==1407);
+    args[1]=0xffff;assert(!NtUserCreateWindowEx(args));args[1]=0;thread_a.UserGsBase=saved_teb;
+    UINT64 hwnd_a = create_fixture_window(args);
     assert(hwnd_a && KiUserWindowValid(hwnd_a, TRUE));
     args[0] = hwnd_a;
     graphics = TRUE;
@@ -767,7 +824,7 @@ int main(void)
     current = &thread_a;
     assert(!gdi_object(window_dc, 0));
     memset(args, 0, sizeof(args));
-    UINT64 hwnd_fresh = NtUserCreateWindowEx(args);
+    UINT64 hwnd_fresh = create_fixture_window(args);
     assert(hwnd_fresh && hwnd_fresh != hwnd_a && (UINT16)hwnd_fresh == (UINT16)hwnd_a);
     args[0] = hwnd_a;
     assert(!NtUserDestroyWindow(args));
@@ -796,6 +853,7 @@ int main(void)
     ObDestroyHandleTable(process_a.HandleTable);
     ObDestroyHandleTable(process_b.HandleTable);
     puts("PASS USER object ownership and process cleanup isolation");
+    check_menu_geometry();
     munmap((void *)PROCESS_USER_OBJECT_ARENA_VA, PROCESS_USER_OBJECT_ARENA_SIZE);
     munmap((void *)PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE);
     munmap((void *)PROCESS_GDI_ATTR_VA, PROCESS_GDI_ATTR_SIZE);

@@ -55,11 +55,22 @@ static void InputWorker(PVOID context)
         BOOLEAN window_owns_keyboard = W32kKeyboardOwner();
         BOOLEAN linux_owns_keyboard = LinuxInputKeyboardActive();
         UINT32 event;
+        UINT16 pending_key = 0;
+        BOOLEAN have_key = FALSE;
         while (KbdReadInputEvent(&event)) {
             if (!window_owns_keyboard) continue;
-            if (event & KBD_INPUT_CHARACTER) KiUserQueueCharacter((UINT16)event);
-            else W32kInputKey((UINT16)event);
+            if (event & KBD_INPUT_CHARACTER) {
+                if (have_key) {
+                    W32kInputKey(pending_key, (UINT16)event);
+                    have_key = FALSE;
+                } else KiUserQueueCharacter((UINT16)event);
+            } else {
+                if (have_key) W32kInputKey(pending_key, 0);
+                pending_key = (UINT16)event;
+                have_key = TRUE;
+            }
         }
+        if (have_key) W32kInputKey(pending_key, 0);
 
         /* Headless `make run-serial` uses COM1 as the keyboard. */
         while (HalSerialDataAvailable()) {

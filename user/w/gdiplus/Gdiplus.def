@@ -1,0 +1,26 @@
+LIBRARY GDIPLUS
+EXPORTS
+    GdipCloneImage
+    GdipCreateBitmapFromScan0
+    GdipCreateHBITMAPFromBitmap
+    GdipCreateFromHDC
+    GdipDrawImageRectI
+    GdipCreateBitmapFromHBITMAP
+    GdipCloneBitmapAreaI
+    GdipSetPageUnit
+    GdipFillRectangleI
+    GdipDeletePen
+    GdipCreatePen1
+    GdipDisposeImage
+    GdipCreateSolidFill
+    GdipDeleteBrush
+    GdipAlloc
+    GdipFree
+    GdiplusShutdown
+    GdiplusStartup
+    GdipDrawArcI
+    GdipSetSmoothingMode
+    GdipSetInterpolationMode
+    GdipDeleteGraphics
+    GdipDrawLineI
+    GdipGetImageGraphicsContext

@@ -795,3 +795,101 @@ __declspec(dllexport) void msvcrt_terminate(void)
 /* The C++ exception personality (__CxxFrameHandler3) and _CxxThrowException
  * now live in ntdll.dll next to the unwinder they depend on, so programs link
  * them from ntdll.lib. */
+
+/* Windows 7 Calculator's additional CRT surface. These implementations cover
+ * its ASCII/UTF-16 formatting and locale paths used by the calculator UI. */
+__declspec(dllexport) WCHAR *_wcsdup(const WCHAR *s)
+{
+    if (!s) return 0;
+    SIZE_T n = wcslen(s) + 1;
+    WCHAR *p = (WCHAR *)malloc(n * sizeof(WCHAR));
+    if (p) memcpy(p, s, n * sizeof(WCHAR));
+    return p;
+}
+__declspec(dllexport) long long _wtoi64(const WCHAR *s)
+{ return (long long)wcstol(s, 0, 10); }
+__declspec(dllexport) int _i64tow_s(long long value, WCHAR *out, SIZE_T cap, int radix)
+{
+    if (!out || !cap || radix < 2 || radix > 36) return 22;
+    unsigned long long v = value < 0 && radix == 10 ? (unsigned long long)(-(value + 1)) + 1 : (unsigned long long)value;
+    WCHAR tmp[66]; SIZE_T n=0;
+    do { unsigned d=(unsigned)(v%(unsigned)radix); tmp[n++]=(WCHAR)(d<10?'0'+d:'a'+d-10); v/=(unsigned)radix; } while(v && n<65);
+    if (value<0 && radix==10) tmp[n++]='-';
+    if (n+1>cap) { out[0]=0; return 34; }
+    for(SIZE_T i=0;i<n;i++) out[i]=tmp[n-1-i]; out[n]=0; return 0;
+}
+__declspec(dllexport) int _itow_s(int value, WCHAR *out, SIZE_T cap, int radix)
+{ return _i64tow_s(value,out,cap,radix); }
+__declspec(dllexport) char *_itoa(int value, char *out, int radix)
+{
+    if (!out || radix<2 || radix>36) return 0;
+    unsigned int v=value<0 && radix==10 ? (unsigned int)(-(value+1))+1 : (unsigned int)value;
+    char tmp[34]; int n=0;
+    do { unsigned d=v%(unsigned)radix; tmp[n++]=(char)(d<10?'0'+d:'a'+d-10); v/=(unsigned)radix; } while(v && n<33);
+    if(value<0 && radix==10) tmp[n++]='-';
+    for(int i=0;i<n;i++) out[i]=tmp[n-1-i]; out[n]=0; return out;
+}
+__declspec(dllexport) SIZE_T strcspn(const char *s, const char *reject)
+{
+    SIZE_T n=0; for(;s[n];n++){ const char *r=reject; while(*r && *r!=s[n])r++; if(*r)break; } return n;
+}
+__declspec(dllexport) int sprintf_s(char *out, SIZE_T cap, const char *fmt, ...)
+{
+    if(!out || !cap) return -1;
+    __builtin_va_list ap; __builtin_va_start(ap,fmt);
+    int n=qg_vsnprintf(out,cap,fmt,ap); __builtin_va_end(ap);
+    if(n<0 || (SIZE_T)n>=cap){out[0]=0;return -1;} return n;
+}
+__declspec(dllexport) int wcscat_s(WCHAR *dst, SIZE_T cap, const WCHAR *src)
+{
+    if(!dst||!src||!cap)return 22; SIZE_T n=wcslen(dst),i=0;
+    if(n>=cap)return 22; while(src[i]&&n+i+1<cap){dst[n+i]=src[i];i++;}
+    if(src[i]){dst[0]=0;return 34;} dst[n+i]=0; return 0;
+}
+__declspec(dllexport) int _wcslwr_s(WCHAR *s, SIZE_T cap)
+{
+    if(!s||!cap)return 22; for(SIZE_T i=0;i<cap&&s[i];i++) if(s[i]>='A'&&s[i]<='Z')s[i]+=32;
+    if(cap && s[cap-1]){s[0]=0;return 34;} return 0;
+}
+__declspec(dllexport) WCHAR *_wcsrev(WCHAR *s)
+{
+    if(!s)return 0; SIZE_T n=wcslen(s); for(SIZE_T i=0;i<n/2;i++){WCHAR c=s[i];s[i]=s[n-1-i];s[n-1-i]=c;} return s;
+}
+__declspec(dllexport) int iswalpha(WCHAR c)
+{ return (c>='A'&&c<='Z')||(c>='a'&&c<='z'); }
+__declspec(dllexport) int iswdigit(WCHAR c) { return c>='0'&&c<='9'; }
+__declspec(dllexport) int mbstowcs_s(SIZE_T *converted, WCHAR *out, SIZE_T cap,
+                                      const char *src, SIZE_T count)
+{
+    if(converted)*converted=0; if(!src)return 22;
+    SIZE_T i=0; while(src[i] && i<count && (!out || i+1<cap)){if(out)out[i]=(unsigned char)src[i];i++;}
+    if(out){if(i>=cap)return 34;out[i]=0;} if(converted)*converted=i+1; return 0;
+}
+__declspec(dllexport) int __uncaught_exception(void) { return 0; }
+__declspec(dllexport) void __CxxThrowException(void *object, void *record)
+{ (void)object; (void)record; ExitProcess(3); }
+__declspec(dllexport) int __CxxFrameHandler3(void)
+{ return 0; }
+__declspec(dllexport) void msvcrt_type_info_dtor(void *self) { (void)self; }
+__declspec(dllexport) int __crtGetStringTypeW(DWORD info, const WCHAR *src,
+                                               int count, unsigned short *out)
+{
+    (void)info; if(!src||!out||count<0)return 0;
+    for(int i=0;i<count;i++){WCHAR c=src[i];unsigned short t=0;
+      if(c>='A'&&c<='Z')t=0x0101; else if(c>='a'&&c<='z')t=0x0102;
+      else if(c>='0'&&c<='9')t=0x0004; else if(c==' '|| (c>=9&&c<=13))t=0x0008;
+      else if(c<32||c==127)t=0x0020; else if(c)t=0x0010; out[i]=t; }
+    return 1;
+}
+__declspec(dllexport) int __crtLCMapStringW(DWORD locale, DWORD flags,
+        const WCHAR *src, int count, WCHAR *dst, int cap)
+{
+    (void)locale; if(!src||count<0)return 0; int n=count;
+    if(!count){while(src[n])n++;n++;} if(!dst)return n; if(cap<n)return 0;
+    for(int i=0;i<n;i++){WCHAR c=src[i]; if(flags&0x100)c=(WCHAR)(c>='a'&&c<='z'?c-32:c); else if(flags&0x200)c=(WCHAR)(c>='A'&&c<='Z'?c+32:c); dst[i]=c;} return n;
+}
+static int g_lc_handle;
+__declspec(dllexport) int *___lc_handle_func(void) { return &g_lc_handle; }
+__declspec(dllexport) int __mb_cur_max = 1;
+static const unsigned short g_ctype[257] = {0};
+__declspec(dllexport) const unsigned short *__pctype_func(void) { return g_ctype+1; }

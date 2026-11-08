@@ -114,6 +114,14 @@ UXTHEME    := $(BUILD)/uxtheme.dll
 UXTHEMELIB := $(BUILD)/uxtheme.lib
 COMCTL32   := $(BUILD)/comctl32.dll
 COMCTL32LIB := $(BUILD)/comctl32.lib
+SHELL32    := $(BUILD)/shell32.dll
+SHELL32LIB := $(BUILD)/shell32.lib
+SHLWAPI    := $(BUILD)/shlwapi.dll
+GDIPLUS    := $(BUILD)/gdiplus.dll
+OLEAUT32   := $(BUILD)/oleaut32.dll
+RPCRT4     := $(BUILD)/rpcrt4.dll
+WINMM      := $(BUILD)/winmm.dll
+WINDOWSCODECS := $(BUILD)/windowscodecs.dll
 NOTEPAD    := $(BUILD)/notepad.exe
 CALC       := $(BUILD)/calc.exe
 NOTEPAD_INC := -Iuser/w/gdi32 -Iuser/w/user32 -Iuser/w/uxtheme
@@ -147,6 +155,8 @@ WINDOWS1_NAMES := $(notdir $(WINDOWS1_FILES))
 WINDOWS3_FILES := $(shell find user/d/windows3 -type f -print | sort)
 WINDOWS3_DIRS := $(shell find user/d/windows3 -mindepth 1 -type d -print | sort)
 WINDOWS3_NAMES := $(notdir $(WINDOWS3_FILES))
+WINDOWS7_FILES := $(sort $(wildcard user/w/windows7/*))
+WINDOWS_FILES := $(sort $(wildcard user/w/windows/*))
 WINDOWS_NAMES := $(sort $(WINDOWS1_NAMES) $(WINDOWS3_NAMES))
 # Filter the Windows names as well, so stale copies cannot leak under C:\DOOM.
 DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS_NAMES)),$(sort $(wildcard user/d/doom/*)))
@@ -233,7 +243,7 @@ $(DOS_COMPAT_STAMP): .FORCE
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 $(DOS_COMPAT_OBJECTS) $(DOS_TESTS) $(INITRD): $(DOS_COMPAT_STAMP)
 
-$(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(CONTROL_OBJ) $(NOTEPAD) $(CALC): $(BUILD_CONFIG)
+$(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(CONTROL_OBJ) $(NOTEPAD) $(CALC): $(BUILD_CONFIG)
 
 $(BUILD)/%.c.o: %.c
 	@mkdir -p $(dir $@)
@@ -341,6 +351,8 @@ $(MSVCRT): user/w/msvcrt/Msvcrt.c $(MSVCRT_PARTS) $(KERNEL32)
 	           /export:??1exception@@UEAA@XZ=msvcrt_exception_dtor \
 	           "/export:?what@exception@@UEBAPEBDXZ=msvcrt_exception_what" \
 	           "/export:?terminate@@YAXXZ=msvcrt_terminate" \
+	           "/export:??1type_info@@UEAA@XZ=msvcrt_type_info_dtor" \
+	           /export:_CxxThrowException=__CxxThrowException \
 	           $(BUILD)/msvcrt.obj $(KERNEL32LIB)
 	@echo "  DLL   $(MSVCRT)"
 
@@ -379,9 +391,9 @@ $(UXTHEME): user/w/uxtheme/Uxtheme.c user/w/uxtheme/Uxtheme.h $(GDI32) $(KERNEL3
 
 # Shared common controls are a separate Win32 library layered on USER32/GDI32.
 COMCTL32_SRC := user/w/comctl32/Comctl32.c user/w/comctl32/Progress.c user/w/comctl32/Status.c \
-                user/w/comctl32/Trackbar.c user/w/comctl32/Tab.c user/w/comctl32/ListView.c user/w/comctl32/Toolbar.c
+                user/w/comctl32/Trackbar.c user/w/comctl32/Tab.c user/w/comctl32/ListView.c user/w/comctl32/Toolbar.c user/w/comctl32/DateTime.c user/w/comctl32/UpDown.c
 COMCTL32_HEADERS := user/w/comctl32/Comctl32.h user/w/comctl32/Internal.h
-$(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) $(USER32) $(GDI32) $(KERNEL32)
+$(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) user/w/comctl32/Comctl32.def $(USER32) $(GDI32) $(KERNEL32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/Comctl32.c -o $(BUILD)/comctl32.obj
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/Progress.c -o $(BUILD)/comctl32-progress.obj
@@ -390,12 +402,69 @@ $(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) $(USER32) $(GDI32) $(KERNEL32)
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/Tab.c -o $(BUILD)/comctl32-tab.obj
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/ListView.c -o $(BUILD)/comctl32-listview.obj
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/Toolbar.c -o $(BUILD)/comctl32-toolbar.obj
+	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/DateTime.c -o $(BUILD)/comctl32-datetime.obj
+	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/UpDown.c -o $(BUILD)/comctl32-updown.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x250000000 \
+	           /def:user/w/comctl32/Comctl32.def \
 	           /out:$@ /implib:$(COMCTL32LIB) $(BUILD)/comctl32.obj \
 	           $(BUILD)/comctl32-progress.obj $(BUILD)/comctl32-status.obj \
 	           $(BUILD)/comctl32-trackbar.obj $(BUILD)/comctl32-tab.obj \
-	           $(BUILD)/comctl32-listview.obj $(BUILD)/comctl32-toolbar.obj \
+	           $(BUILD)/comctl32-listview.obj $(BUILD)/comctl32-toolbar.obj $(BUILD)/comctl32-datetime.obj $(BUILD)/comctl32-updown.obj \
 	           $(USER32LIB) $(GDI32LIB) $(KERNEL32LIB)
+	@echo "  DLL   $@"
+
+$(SHELL32): user/w/shell32/Shell32.c user/w/shell32/Shell32.def $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/w/shell32/Shell32.c -o $(BUILD)/shell32.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x260000000 \
+	           /def:user/w/shell32/Shell32.def /out:$@ /implib:$(SHELL32LIB) \
+	           $(BUILD)/shell32.obj $(KERNEL32LIB)
+	@echo "  DLL   $@"
+
+$(SHLWAPI): user/w/shlwapi/Shlwapi.c user/w/shlwapi/Shlwapi.def
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/w/shlwapi/Shlwapi.c -o $(BUILD)/shlwapi.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x270000000 \
+	           /def:user/w/shlwapi/Shlwapi.def /out:$@ $(BUILD)/shlwapi.obj
+	@echo "  DLL   $@"
+
+$(GDIPLUS): user/w/gdiplus/Gdiplus.c user/w/gdiplus/Gdiplus.def $(GDI32) $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -Iuser/w/gdi32 -c user/w/gdiplus/Gdiplus.c -o $(BUILD)/gdiplus.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x280000000 \
+	           /def:user/w/gdiplus/Gdiplus.def /out:$@ /implib:$(BUILD)/gdiplus.lib \
+	           $(BUILD)/gdiplus.obj $(GDI32LIB) $(KERNEL32LIB)
+	@echo "  DLL   $@"
+
+$(OLEAUT32): user/w/oleaut32/Oleaut32.c user/w/oleaut32/Oleaut32.def $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/w/oleaut32/Oleaut32.c -o $(BUILD)/oleaut32.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x290000000 \
+	           /def:user/w/oleaut32/Oleaut32.def /out:$@ /implib:$(BUILD)/oleaut32.lib \
+	           $(BUILD)/oleaut32.obj $(KERNEL32LIB)
+	@echo "  DLL   $@"
+
+$(RPCRT4): user/w/rpcrt4/Rpcrt4.c user/w/rpcrt4/Rpcrt4.def $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/w/rpcrt4/Rpcrt4.c -o $(BUILD)/rpcrt4.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x2A0000000 \
+	           /def:user/w/rpcrt4/Rpcrt4.def /out:$@ /implib:$(BUILD)/rpcrt4.lib \
+	           $(BUILD)/rpcrt4.obj $(KERNEL32LIB)
+	@echo "  DLL   $@"
+
+$(WINMM): user/w/winmm/Winmm.c user/w/winmm/Winmm.def $(KERNEL32)
+	$(CLANGWIN) -c user/w/winmm/Winmm.c -o $(BUILD)/winmm.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x2B0000000 \
+	           /def:user/w/winmm/Winmm.def /out:$@ /implib:$(BUILD)/winmm.lib \
+	           $(BUILD)/winmm.obj $(KERNEL32LIB)
+	@echo "  DLL   $@"
+
+$(WINDOWSCODECS): user/w/windowscodecs/WindowsCodecs.c user/w/windowscodecs/WindowsCodecs.def user/w/windowscodecs/third_party/stb_image.h $(wildcard user/w/windowscodecs/include/*.h) $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -mno-stack-arg-probe -Iuser/w/windowscodecs/include -c user/w/windowscodecs/WindowsCodecs.c -o $(BUILD)/windowscodecs.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x2C0000000 \
+	           /def:user/w/windowscodecs/WindowsCodecs.def /out:$@ \
+	           $(BUILD)/windowscodecs.obj $(KERNEL32LIB)
 	@echo "  DLL   $@"
 
 $(BUILD)/control_%.obj: user/w/user32/controls/%.c $(CONTROL_HEADERS) user/w/user32/User32.h user/w/gdi32/Gdi32.h user/w/uxtheme/Uxtheme.h | $(BUILD_CONFIG)
@@ -449,7 +518,7 @@ $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFe
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows3) $(WINDOWS3_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/xwin/XWIN.EXE other/Logo.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows3) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/xwin/XWIN.EXE other/Logo.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(INITRD) bs=1M count=200 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
@@ -461,8 +530,16 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(USER32) ::USER32.DLL
 	mcopy -i $(INITRD) $(GDI32) ::GDI32.DLL
 	mcopy -i $(INITRD) $(UXTHEME) ::UXTHEME.DLL
-	if [ -f "$(COMCTL32)" ]; then mcopy -i $(INITRD) $(COMCTL32) ::COMCTL32.DLL; fi
+	mcopy -i $(INITRD) $(COMCTL32) ::COMCTL32.DLL
+	mcopy -i $(INITRD) $(SHELL32) ::SHELL32.DLL
+	mcopy -i $(INITRD) $(SHLWAPI) ::SHLWAPI.DLL
+	mcopy -i $(INITRD) $(GDIPLUS) ::GDIPLUS.DLL
+	mcopy -i $(INITRD) $(OLEAUT32) ::OLEAUT32.DLL
+	mcopy -i $(INITRD) $(RPCRT4) ::RPCRT4.DLL
+	mcopy -i $(INITRD) $(WINMM) ::WINMM.DLL
+	mcopy -i $(INITRD) $(WINDOWSCODECS) ::WINDOWSCODECS.DLL
 	mmd -i $(INITRD) ::WINDOWS ::WINDOWS/SYSTEM32
+	if [ -n "$(WINDOWS_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS_FILES) ::WINDOWS/; fi
 	mcopy -i $(INITRD) $(KERNEL32) ::WINDOWS/SYSTEM32/KERNEL32.DLL
 	mcopy -i $(INITRD) $(NTDLL) ::WINDOWS/SYSTEM32/NTDLL.DLL
 	mcopy -i $(INITRD) $(ADVAPI32) ::WINDOWS/SYSTEM32/ADVAPI32.DLL
@@ -470,10 +547,17 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(USER32) ::WINDOWS/SYSTEM32/USER32.DLL
 	mcopy -i $(INITRD) $(GDI32) ::WINDOWS/SYSTEM32/GDI32.DLL
 	mcopy -i $(INITRD) $(UXTHEME) ::WINDOWS/SYSTEM32/UXTHEME.DLL
-	if [ -f "$(COMCTL32)" ]; then mcopy -i $(INITRD) $(COMCTL32) ::WINDOWS/SYSTEM32/COMCTL32.DLL; fi
+	mcopy -i $(INITRD) $(COMCTL32) ::WINDOWS/SYSTEM32/COMCTL32.DLL
+	mcopy -i $(INITRD) $(SHELL32) ::WINDOWS/SYSTEM32/SHELL32.DLL
+	mcopy -i $(INITRD) $(SHLWAPI) ::WINDOWS/SYSTEM32/SHLWAPI.DLL
+	mcopy -i $(INITRD) $(GDIPLUS) ::WINDOWS/SYSTEM32/GDIPLUS.DLL
+	mcopy -i $(INITRD) $(OLEAUT32) ::WINDOWS/SYSTEM32/OLEAUT32.DLL
+	mcopy -i $(INITRD) $(RPCRT4) ::WINDOWS/SYSTEM32/RPCRT4.DLL
+	mcopy -i $(INITRD) $(WINMM) ::WINDOWS/SYSTEM32/WINMM.DLL
+	mcopy -i $(INITRD) $(WINDOWSCODECS) ::WINDOWS/SYSTEM32/WINDOWSCODECS.DLL
 	mcopy -i $(INITRD) $(COMMAND_BINS) ::
 	# Keep each Windows release together; root batch files are launchers.
-	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS3
+	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS3 ::WINDOWS7
 	if [ -n "$(WINDOWS1_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS1_FILES) ::WINDOWS1/; fi
 	for d in $(WINDOWS3_DIRS); do \
 	    rel=$${d#user/d/windows3/}; \
@@ -483,6 +567,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	    rel=$${f#user/d/windows3/}; \
 	    mcopy -i $(INITRD) "$$f" "::WINDOWS3/$$rel"; \
 	done
+	if [ -n "$(WINDOWS7_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS7_FILES) ::WINDOWS7/; fi
 	mcopy -i $(INITRD) user/d/win.bat ::WIN.BAT
 	mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT
 	mcopy -i $(INITRD) user/d/win3.bat ::WIN3.BAT
@@ -533,7 +618,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(PING) ::USR/BIN/PING.ELF
 	mcopy -i $(INITRD) $(CURL_HTTP) ::USR/BIN/CURLHTTP.ELF
 	mmd -i $(INITRD) ::DEV ::DEV/PTS
-	mmd -i $(INITRD) ::TMP
+	mmd -i $(INITRD) ::TMP ::TEMP
 	# Provide a known-good image for the first feh smoke test.
 	mcopy -i $(INITRD) other/Logo.png ::LOGO.PNG
 	# Give POSIX programs a real HOME rather than leaving HOME unset.
@@ -626,3 +711,25 @@ run-net: run-gui
 
 clean:
 	rm -rf $(BUILD)
+
+# Host checks execute the actual USER menu model and native USER/GDI code.
+.PHONY: user-menu-check win32k-check
+user-menu-check:
+	mkdir -p $(BUILD)
+	clang -fdeclspec -fshort-wchar -Wno-ignored-attributes -ffunction-sections -fdata-sections $(NOTEPAD_INC) tools/checks/UserMenuChecks.c -Wl,--gc-sections -o $(BUILD)/UserMenuChecks
+	$(BUILD)/UserMenuChecks
+
+win32k-check:
+	mkdir -p $(BUILD)
+	cc -O2 -g -ffunction-sections -fdata-sections -Wno-multichar -idirafter kernel/include -Ikernel/net/lwip -I$(LWIP_ROOT)/include tools/checks/Win32kChecks.c -Wl,--gc-sections -o $(BUILD)/Win32kChecks
+	$(BUILD)/Win32kChecks
+
+.PHONY: common-controls-check
+common-controls-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/DateTimeChecks.c -Wl,--gc-sections -o $(BUILD)/DateTimeChecks
+	$(BUILD)/DateTimeChecks
+	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/ComboChecks.c -Wl,--gc-sections -o $(BUILD)/ComboChecks
+	$(BUILD)/ComboChecks
+	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/EditChecks.c -Wl,--gc-sections -o $(BUILD)/EditChecks
+	$(BUILD)/EditChecks

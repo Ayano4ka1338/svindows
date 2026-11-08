@@ -204,14 +204,16 @@ _Static_assert(KI_OFFSETOF(KTHREAD, CallbackFlags) == 0xAE8, "KTH_CB_FLAGS");
 _Static_assert(KI_OFFSETOF(KTHREAD, RedirectPending) == 0xB29, "KTH_REDIRECT");
 
 /* Per-thread resources, reused across callback chains, private to a process.
- * Each slot: eight guarded two-page RW/NX stacks, one client-read-only RX
- * trampoline page. CREATESTRUCT lives above the callback's home space. */
+ * Each nesting level has a 64 KiB RW/NX stack and an unmapped guard page.
+ * Image codecs and nested modal loops exceed the former two-page stacks.
+ * The shared trampoline remains client-read-only RX. */
 #define CALLBACK_STACK_ARENA_VA  0x0000000001400000ULL
 #define CALLBACK_STACK_SLOTS     16
-#define CALLBACK_STACK_SLOT_SIZE 0x0000000000020000ULL
-#define CALLBACK_THUNK_OFFSET (CALLBACK_STACK_SLOT_SIZE - PAGE_SIZE)
 #define CALLBACK_MAX_DEPTH 8
-#define CALLBACK_STACK_SLICE (3 * PAGE_SIZE)
+#define CALLBACK_STACK_PAGES 16
+#define CALLBACK_STACK_SLICE ((CALLBACK_STACK_PAGES + 1) * PAGE_SIZE)
+#define CALLBACK_STACK_SLOT_SIZE (CALLBACK_MAX_DEPTH * CALLBACK_STACK_SLICE + PAGE_SIZE)
+#define CALLBACK_THUNK_OFFSET (CALLBACK_STACK_SLOT_SIZE - PAGE_SIZE)
 #define CALLBACK_THUNK_STRIDE 128
 
 static void KiReleaseCallbackResources(PKTHREAD thread)
@@ -254,10 +256,9 @@ static UINT64 KiClaimCallbackStack(void)
         if (busy) continue;
         thread->UserCallbackBase = base;
         for (UINT64 off = PAGE_SIZE; off < CALLBACK_STACK_SLOT_SIZE; off += PAGE_SIZE) {
-            /* Two stack pages and an unmapped guard per nesting level. */
+            /* Leave one unmapped page between adjacent callback stacks. */
             if (off != CALLBACK_THUNK_OFFSET &&
-                (off < 8 * PAGE_SIZE ||
-                 (CALLBACK_THUNK_OFFSET - off) % CALLBACK_STACK_SLICE == 0))
+                (CALLBACK_THUNK_OFFSET - off) % CALLBACK_STACK_SLICE == 0)
                 continue;
             UINT64 pa = MmAllocatePage();
             if (pa == MM_INVALID_PHYS) { KiReleaseCallbackResources(thread); return 0; }
@@ -618,8 +619,17 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
 
     PKTHREAD creator = KeGetCurrentThread();
     if (!creator || !creator->Process || creator->Process->Exiting) return 0;
-    if ((a[4] & 0x40000000u) && !a[9]) return 0;
+    if ((a[4] & 0x40000000u) && !a[9]) {
+        KeLog("[user]   rejected child window with NULL parent\n");
+        return 0;
+    }
     if (a[9] && !KiUserWindowValid(a[9], TRUE)) return 0;
+    USER_CLASS_LOCAL *cls = KiClassForCreate(a[1]);
+    if(!cls){
+        if(creator->UserGsBase&&MmProbeForWrite(creator->UserGsBase+0x68,4))
+            *(UINT32*)(creator->UserGsBase+0x68)=1407; /* ERROR_CANNOT_FIND_WND_CLASS */
+        KeLog("[user]   rejected window with unregistered class\n");return 0;
+    }
     if (!KiUserQueueForThread(creator->ThreadId)) return 0;
     UINT16 index;
     for (index = 1; index < 128; index++)
@@ -650,7 +660,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     g_window_owner[index] = creator ? creator->ThreadId : 0;
     g_window_process[index] = creator->Process;
 
-    USER_CLASS_LOCAL *cls = KiClassForCreate(a[1]);
+    g_window_classes[index] = cls;
     KiPublishWindowState((UINT64)window, (UINT32)a[4], (UINT32)a[0],
                          a[9], cls);
     {
@@ -685,8 +695,12 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
         UINT8 kind = W32kClassifyWindow(cls ? cls->Name : NULL, (UINT32)a[4]);
         W32kScreenWindowCreated(index, title, (UINT32)a[4], (INT32)a[5],
                                 (INT32)a[6], (UINT32)a[7], (UINT32)a[8], kind);
+        static const WCHAR static_class[]={'S','T','A','T','I','C',0};
+        W32kScreenSetStatic(index,KiWideEqual(cls->Name,static_class));
         if (kind == W32K_KIND_CHILD) W32kScreenSetParent(index, (UINT16)a[9]);
     }
+    g_window_menus[index] = ((UINT32)a[4] & 0x40000000u) ? 0 : a[10];
+    if(g_window_menus[index])W32kSetMenuBar(index,NULL,0,TRUE);
     /* A window that is created visible owes its first WM_PAINT immediately. */
     if ((UINT32)a[4] & WS_VISIBLE_)
         KiUserInvalidateWindow(index);

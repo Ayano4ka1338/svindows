@@ -118,6 +118,8 @@ typedef struct _TRACKMOUSEEVENT {
 #define TME_QUERY 0x40000000u
 #define TME_CANCEL 0x80000000u
 USER32_API BOOL TrackMouseEvent(TRACKMOUSEEVENT *event);
+__declspec(dllimport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
+                                          int count, LPRECT rect, UINT format);
 /* Window styles. */
 #define WS_OVERLAPPED   0x00000000u
 #define WS_POPUP        0x80000000u
@@ -300,6 +302,8 @@ USER32_API BOOL TrackMouseEvent(TRACKMOUSEEVENT *event);
 #define SS_RIGHT         0x0002u
 #define SS_SIMPLE        0x000Bu
 #define SS_LEFTNOWORDWRAP 0x000Cu
+#define SS_BITMAP         0x000Eu
+#define SS_ENHMETAFILE    0x000Fu
 #define SS_NOPREFIX      0x0080u
 
 /* MessageBox types and results. */
@@ -433,6 +437,7 @@ USER32_API BOOL      SetWindowTextW(HWND hwnd, const WCHAR *text);
 USER32_API int       GetWindowTextW(HWND hwnd, WCHAR *buffer, int capacity);
 USER32_API HWND      WindowFromPoint(POINT point);
 USER32_API HWND      GetParent(HWND hwnd);
+USER32_API HWND      GetWindow(HWND hwnd, UINT command);
 USER32_API int       GetWindowTextLengthW(HWND hwnd);
 USER32_API HWND      GetForegroundWindow(void);
 USER32_API LRESULT   DefWindowProcW(HWND hwnd, UINT message, WPARAM wparam,

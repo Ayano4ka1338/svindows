@@ -14,6 +14,23 @@ default rel
 
 section .text
 
+; Licensing values are not backed by a local license store. Return the native
+; not-found status and initialize optional output fields so callers can take
+; their normal unlicensed/default path.
+global NtQueryLicenseValue
+NtQueryLicenseValue:
+    test    rdx, rdx
+    jz      .no_type
+    mov     dword [rdx], 0
+.no_type:
+    mov     r10, [rsp + 0x28]
+    test    r10, r10
+    jz      .no_size
+    mov     dword [r10], 0
+.no_size:
+    mov     eax, 0xC0000034          ; STATUS_OBJECT_NAME_NOT_FOUND
+    ret
+
 ; Process bootstrap used by the kernel loader. RCX points to:
 ;   +0    final executable entry
 ;   +8    DLL count
@@ -449,6 +466,10 @@ SYSCALL_STUB NtUserGetWindowText,            0x1036
 SYSCALL_STUB NtUserWindowFromPoint,          0x1037
 SYSCALL_STUB NtUserQueryWindow,              0x1013
 SYSCALL_STUB NtUserGetAncestor,              0x10B4
+SYSCALL_STUB NtUserSetWindowLongPtr,          0x1471
+SYSCALL_STUB NtUserClassLong,                 0x1F02
+SYSCALL_STUB NtUserMapWindowPoints,           0x1F03
+SYSCALL_STUB NtGdiReadUserBuffer,             0x1F04
 ; Svindows private USER ABI (numbers are not Windows-build syscall indices).
 SYSCALL_STUB NtUserGetKeyState,              0x1F00
 SYSCALL_STUB NtUserTrackMouseEvent,          0x1F01
@@ -485,3 +506,7 @@ align 8
 ntuser_pfn1: dq 0
 ntuser_pfn2: dq 0
 ntuser_pfn3: dq 0
+
+SYSCALL_STUB NtUserMenuBar,                  0x1F05
+
+SYSCALL_STUB NtUserWindowRelation,            0x1F06

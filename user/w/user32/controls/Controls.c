@@ -21,7 +21,7 @@ static SV_CONTROL *acquire(HWND hwnd)
 static void release(SV_CONTROL *c)
 {
     lock(); int dispose = !--c->refs && c->dead; unlock();
-    if (dispose) { CloseThemeData(c->theme); SvEditDispose(&c->model); SvControlFree(c); }
+    if (dispose) { if(c->kind==SV_COMBO)SvComboDispose(c); CloseThemeData(c->theme); SvEditDispose(&c->model); SvControlFree(c); }
 }
 void SvControlNotify(SV_CONTROL *c, UINT code)
 {
@@ -57,9 +57,9 @@ void SvControlFill(HDC dc, int x, int y, int w, int h, COLORREF color)
 }
 static int class_kind(const WCHAR *name)
 {
-    const WCHAR *names[] = {L"BUTTON", L"EDIT", L"STATIC"};
+    const WCHAR *names[] = {L"BUTTON", L"EDIT", L"STATIC", L"COMBOBOX"};
     if (IS_INTRESOURCE(name)) return 0;
-    for (int k = 0; k < 3; ++k) {
+    for (int k = 0; k < 4; ++k) {
         unsigned i = 0;
         for (;; ++i) {
             WCHAR ch = name[i];
@@ -82,9 +82,11 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (kind == SV_BUTTON && type != BS_PUSHBUTTON && type != BS_DEFPUSHBUTTON &&
             type != BS_CHECKBOX && type != BS_AUTOCHECKBOX && type != BS_RADIOBUTTON &&
             type != BS_GROUPBOX && type != BS_AUTORADIOBUTTON) return FALSE;
+        if(kind==SV_COMBO&&((cs->style&3)!=3||(cs->style&0x30)))return FALSE;
         if (kind == SV_EDIT && (cs->style & (ES_PASSWORD|ES_CENTER|ES_RIGHT))) return FALSE;
         if (kind == SV_STATIC && type != SS_LEFT && type != SS_CENTER &&
-            type != SS_RIGHT && type != SS_SIMPLE && type != SS_LEFTNOWORDWRAP) return FALSE;
+            type != SS_RIGHT && type != SS_SIMPLE && type != SS_LEFTNOWORDWRAP &&
+            type != SS_BITMAP && type != SS_ENHMETAFILE) return FALSE;
         SV_CONTROL *c = SvControlAlloc(sizeof(*c));
         if (!c) return FALSE;
         c->hwnd = hwnd; c->parent = cs->hwndParent;
@@ -93,7 +95,10 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         c->font = GetStockObject(DEFAULT_GUI_FONT);
         c->model.limit = kind == SV_EDIT && !(c->style & ES_MULTILINE) ? 32767 : 0x7FFFFFFE;
         c->theme = OpenThemeData(hwnd, kind == SV_BUTTON ? L"BUTTON" : kind == SV_EDIT ? L"EDIT" : L"STATIC");
-        if ((!c->theme && type != BS_GROUPBOX) || !SvEditSetText(&c->model, cs->lpszName)) {
+        BOOL image_static = kind == SV_STATIC &&
+                            (type == SS_BITMAP || type == SS_ENHMETAFILE);
+        if ((!c->theme && type != BS_GROUPBOX && !image_static) ||
+            !SvEditSetText(&c->model, image_static ? L"" : cs->lpszName)) {
             if (c->theme) CloseThemeData(c->theme);
             SvEditDispose(&c->model); SvControlFree(c); return FALSE;
         }
@@ -147,6 +152,7 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     default:
         if (c->kind == SV_BUTTON) result = SvButtonMessage(c, msg, wp, lp);
         else if (c->kind == SV_EDIT) result = SvEditMessage(c, msg, wp, lp);
+        else if(c->kind==SV_COMBO)result=SvComboMessage(c,msg,wp,lp);
         else result = SvStaticMessage(c, msg, wp, lp);
         break;
     }
@@ -155,13 +161,36 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 static LRESULT ButtonWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return ControlWndProc(SV_BUTTON, h, m, w, l); }
 static LRESULT EditWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return ControlWndProc(SV_EDIT, h, m, w, l); }
 static LRESULT StaticWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return ControlWndProc(SV_STATIC, h, m, w, l); }
+static LRESULT ComboWndProc(HWND h,UINT m,WPARAM w,LPARAM l){return ControlWndProc(SV_COMBO,h,m,w,l);}
+__declspec(dllimport) HANDLE GetModuleHandleA(const char*);
+__declspec(dllimport) HANDLE LoadLibraryA(const char*);
+__declspec(dllimport) void *GetProcAddress(HANDLE,const char*);
+static int register_common_control(const WCHAR *name)
+{
+    if(IS_INTRESOURCE(name))return 1;
+    static const struct {const WCHAR *name;DWORD flag;} classes[]={
+        {L"SysDateTimePick32",0x100},{L"SysMonthCal32",0x100},{L"msctls_updown32",0x10},
+        {L"msctls_progress32",0x2000},{L"msctls_statusbar32",4},{L"msctls_trackbar32",4},
+        {L"SysTabControl32",8},{L"SysListView32",1},{L"ToolbarWindow32",0x400}
+    };
+    for(UINT i=0;i<sizeof(classes)/sizeof(classes[0]);i++){
+        UINT j=0;while(name[j]&&classes[i].name[j]){
+            WCHAR a=name[j],b=classes[i].name[j];if(a>='a'&&a<='z')a-=32;if(b>='a'&&b<='z')b-=32;if(a!=b)break;j++;
+        }
+        if(name[j]||classes[i].name[j])continue;
+        HANDLE module=GetModuleHandleA("comctl32.dll");if(!module)module=LoadLibraryA("comctl32.dll");
+        BOOL (*init)(const void*)=module?(BOOL(*)(const void*))GetProcAddress(module,"InitCommonControlsEx"):0;
+        const DWORD request[2]={8,classes[i].flag};return init&&init(request);
+    }
+    return 1; /* An application class is resolved by the native class registry. */
+}
 int SvRegisterControl(const WCHAR *name)
 {
     int kind = class_kind(name);
-    if (!kind) return 1; /* Ordinary application class. */
+    if (!kind) return register_common_control(name);
     /* Registration itself is process scoped and idempotent in win32k. */
     WNDCLASSEXW cls = {0};
-    cls.cbSize = sizeof(cls); cls.lpfnWndProc = kind == SV_BUTTON ? ButtonWndProc : kind == SV_EDIT ? EditWndProc : StaticWndProc;
+    cls.cbSize = sizeof(cls); cls.lpfnWndProc = kind == SV_BUTTON ? ButtonWndProc : kind == SV_EDIT ? EditWndProc : kind==SV_COMBO?ComboWndProc:StaticWndProc;
     cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
     cls.lpszClassName = name;
     return RegisterClassExW(&cls) != 0;

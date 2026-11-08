@@ -27,6 +27,11 @@ __declspec(dllexport) LONG CoInitializeEx(void *reserved, DWORD flags)
     return 0; /* S_OK */
 }
 
+__declspec(dllexport) LONG CoInitialize(void *reserved)
+{
+    return CoInitializeEx(reserved, 2); /* COINIT_APARTMENTTHREADED */
+}
+
 __declspec(dllexport) void CoUninitialize(void)
 {
     /* Keep the apartment block alive for the lifetime of this TEB. Native COM

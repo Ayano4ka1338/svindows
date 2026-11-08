@@ -60,6 +60,7 @@ int qg_fflush(FILE *);
 int qg_is_file(FILE *);
 int qg_vsnprintf(char *, unsigned long long, const char *, __builtin_va_list);
 void qg_run_atexit(void);
+__declspec(dllexport) unsigned long long wcslen(const WCHAR *s);
 __declspec(dllexport) long strtol(const char *, char **, int);
 __declspec(dllexport) unsigned long strtoul(const char *, char **, int);
 __declspec(dllexport) FILE *fopen(const char *, const char *);

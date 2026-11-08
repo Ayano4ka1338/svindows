@@ -55,6 +55,62 @@ __declspec(dllexport) BOOL GetVersionExW(void *version_info)
     return 1;
 }
 
+__declspec(dllexport) BOOL GetVersionExA(void *version_info)
+{
+    if (!version_info)
+        return 0;
+    DWORD size = *(DWORD *)version_info;
+    if (size < 20)
+        return 0;
+    DWORD *v = (DWORD *)version_info;
+    v[1] = 10;
+    v[2] = 0;
+    v[3] = 14393;
+    v[4] = 2;
+    if (size >= 148) {
+        char *service_pack = (char *)version_info + 20;
+        service_pack[0] = 0;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL Wow64DisableWow64FsRedirection(void **old_value)
+{
+    /* The current kernel has no 32-bit WOW64 filesystem view to redirect. */
+    if (old_value) *old_value = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL Wow64RevertWow64FsRedirection(void *old_value)
+{
+    (void)old_value;
+    return 1;
+}
+
+__declspec(dllexport) BOOL IsWow64Process(HANDLE process, BOOL *is_wow64)
+{
+    (void)process;
+    if (!is_wow64) { SetLastError(87); return 0; }
+    *is_wow64 = 0;
+    return 1;
+}
+
+typedef LONG (*APP_RECOVERY_CALLBACK)(void *parameter);
+__declspec(dllexport) LONG RegisterApplicationRecoveryCallback(
+        APP_RECOVERY_CALLBACK callback, void *parameter,
+        DWORD ping_interval, DWORD flags)
+{
+    (void)callback; (void)parameter; (void)ping_interval; (void)flags;
+    return 0;
+}
+__declspec(dllexport) LONG ApplicationRecoveryInProgress(BOOL *cancelled)
+{
+    if (cancelled) *cancelled = 0;
+    return 0;
+}
+__declspec(dllexport) void ApplicationRecoveryFinished(BOOL success)
+{ (void)success; }
+
 __declspec(dllexport) BOOL GetProductInfo(DWORD major, DWORD minor,
                                            DWORD sp_major, DWORD sp_minor,
                                            DWORD *product)
@@ -501,6 +557,22 @@ __declspec(dllexport) int GetLocaleInfoA(DWORD locale, DWORD type,
     if (!buffer || capacity < length) { SetLastError(122); return 0; }
     for (int i = 0; i < length; i++) buffer[i] = field->Value[i];
     return length;
+}
+
+__declspec(dllexport) int GetLocaleInfoEx(const WCHAR *locale_name,
+                                           DWORD type, WCHAR *buffer,
+                                           int capacity)
+{
+    /* Svindows currently exposes the en-US NLS table as its process locale.
+     * NULL is LOCALE_NAME_USER_DEFAULT; accept the matching explicit name too. */
+    if (locale_name && locale_name[0] &&
+        !(locale_name[0] == 'e' && locale_name[1] == 'n' &&
+          locale_name[2] == '-' && locale_name[3] == 'U' &&
+          locale_name[4] == 'S' && !locale_name[5])) {
+        SetLastError(87);
+        return 0;
+    }
+    return GetLocaleInfoW(0x0409, type, buffer, capacity);
 }
 
 /* CompareString returns CSTR_LESS_THAN/EQUAL/GREATER_THAN (1/2/3), never

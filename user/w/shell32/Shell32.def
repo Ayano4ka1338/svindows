@@ -1,0 +1,7 @@
+LIBRARY SHELL32
+EXPORTS
+    SHGetSpecialFolderPathW
+    SHGetFolderPathW
+    ShellAboutW
+    SHCreateDirectory @165
+    ShellExecuteExW

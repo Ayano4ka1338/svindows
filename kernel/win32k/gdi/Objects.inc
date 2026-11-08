@@ -60,6 +60,7 @@ typedef struct _W32K_DC {
     W32K_SURFACE  DeviceSurface; /* screen DC or retained window drawing buffer */
     W32K_SURFACE  PresentedSurface; /* last completed window paint */
     void *WindowStorage;
+    BOOLEAN WindowPresented;
     BOOLEAN Painting;
     BOOLEAN Dirty;
     INT32 DirtyLeft, DirtyTop, DirtyRight, DirtyBottom;

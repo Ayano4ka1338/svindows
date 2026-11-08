@@ -21,6 +21,7 @@ typedef struct _USER_CLASS_LOCAL {
 } USER_CLASS_LOCAL;
 
 static USER_CLASS_LOCAL g_user_classes[USER_MAX_CLASSES];
+static USER_CLASS_LOCAL *g_window_classes[128];
 
 /* WNDCLASSEXW x64 offsets. */
 #define WNDCLASSEX_CBSIZE      0x00
@@ -228,6 +229,7 @@ static UINT64 NtUserRemoveProp(UINT64 *a)
  * hWndParent/+0x100, WndProc/+0x148, and the window bytes at +0x168. */
 #define WND_STYLE_OFF     0x30
 #define WND_EXSTYLE_OFF   0x34
+static UINT64 g_window_menus[128];
 #define WND_FNID_OFF      0x42
 #define WND_WND_EXTRA_OFF 0xE8
 #define WND_PARENT_OFF    0x100
@@ -316,12 +318,42 @@ static void KiPublishWindowState(UINT64 window, UINT32 style, UINT32 exstyle,
     *(UINT64 *)(window + WND_PARENT_OFF) = parent;
 }
 
+/* Private client contract: hwnd, class index, value, write flag. */
+static UINT64 NtUserClassLong(UINT64 *a)
+{
+    if (!KiUserWindowValid(a[0], TRUE)) return 0;
+    USER_CLASS_LOCAL *cls=g_window_classes[(UINT16)a[0]];
+    if (!cls) return 0;
+    INT32 index=(INT32)a[1]; UINT64 old=0;
+    switch(index) {
+    case -24: old=cls->WndProc; if(a[3])cls->WndProc=a[2]; break;
+    case -26: old=cls->Style; if(a[3])cls->Style=(UINT32)a[2]; break;
+    case -16: old=cls->WndExtra; if(a[3])cls->WndExtra=(UINT32)a[2]; break;
+    case -8: old=cls->Instance; if(a[3])cls->Instance=a[2]; break;
+    default: break;
+    }
+    return old;
+}
+
+static void W32kSetStyle(UINT16 slot, UINT32 style);
 static BOOLEAN KiSetWindowLong(UINT64 hwnd, INT32 index, INT64 value,
                                INT64 *old)
 {
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);
-    if (!KiUserWindowValid(hwnd, TRUE) || index >= 0 || index < -WINDOW_LONG_COUNT)
-        return FALSE;
+    if (!KiUserWindowValid(hwnd, TRUE)) return FALSE;
+    if (index == -16) {
+        UINT32 *style=(UINT32*)(PROCESS_USER_OBJECT_ARENA_VA+(UINT64)slot*0x200+WND_STYLE_OFF);
+        *old=*style;*style=(UINT32)value;W32kSetStyle(slot,(UINT32)value);return TRUE;
+    }
+    if (index == -4) { /* GWLP_WNDPROC: message dispatch must see subclassing. */
+        UINT64 *proc = (UINT64 *)(PROCESS_USER_OBJECT_ARENA_VA +
+                                  (UINT64)slot * 0x200 + WND_WNDPROC_OFF);
+        if (!MmProbeForWrite((UINT64)proc, 8)) return FALSE;
+        *old = (INT64)*proc;
+        *proc = (UINT64)value;
+        return TRUE;
+    }
+    if (index >= 0 || index < -WINDOW_LONG_COUNT) return FALSE;
     INT64 *longs = (INT64 *)(PROCESS_USER_OBJECT_ARENA_VA +
                              (UINT64)slot * 0x200 + WINDOW_LONG_BASE +
                              (UINT64)(-index - 1) * 8);
@@ -415,16 +447,17 @@ static UINT64 NtUserSetWindowPos(UINT64 *a)
         if (!(flags & 0x1)) { w = (UINT32)a[4]; h = (UINT32)a[5]; }
         W32kMoveWindow(a[0], x, y, w, h);
     }
-    /* HWND_TOP (0) and HWND_TOPMOST (-1) both mean "go to the top" here. */
-    if (!(flags & 0x4) && ((UINT64)a[1] == 0 || (UINT64)a[1] == (UINT64)-1))
-        W32kRaiseSlot(slot);
+    /* Keep compositor visibility in step with the shared style bits. */
+    if (flags & 0x80) W32kShowWindow(a[0], 0);
+    else if (flags & 0x40) W32kShowWindow(a[0], 5);
+    if (!(flags & 0x4)) W32kSetZOrder(slot, a[1]);
 
     /* Anything but a pure no-op move invalidates: a resized or newly shown
      * window has to repaint. SWP_NOREDRAW (0x8) is the caller opting out. */
     if (!(flags & 0x8) && (flags & 0x40 || !(flags & 0x3)))
         KiUserInvalidateWindow(slot);
-    KeLog("[user] SetWindowPos(HWND %p, %ld,%ld %lux%lu, flags 0x%lx)\n",
-          (void *)a[0], (long)(INT32)a[2], (long)(INT32)a[3],
+    KeLog("[user] SetWindowPos(HWND %p after %p, %ld,%ld %lux%lu, flags 0x%lx)\n",
+          (void *)a[0], (void *)a[1], (long)(INT32)a[2], (long)(INT32)a[3],
           (unsigned long)(UINT32)a[4], (unsigned long)(UINT32)a[5],
           (unsigned long)flags);
     return 1;
@@ -568,12 +601,13 @@ static UINT64 NtUserMessageCall(UINT64 *a)
     UINT32 type = (UINT32)a[5];
 
     static UINT8 logged;
-    if (logged < 32) {
+    if (logged < 32 || message == 0x111) {
         logged++;
         KeLog("[user] MessageCall(hwnd=%p, msg=0x%x, wp=%p, lp=%p, "
               "type=0x%lx)\n", (void *)hwnd, (unsigned)message, (void *)a[2],
               (void *)a[3], (unsigned long)type);
     }
+    if (message == 0x10) KiDumpUserStack(g_service_user_rsp);
     if (KiSendToWindowProc(hwnd, message, a[2], (INT64)a[3]))
         return 0; /* the WndProc's result is returned by NtCallbackReturn */
     return 0;
@@ -591,7 +625,18 @@ static UINT64 NtUserDispatchMessage(UINT64 *a)
         return 0;
     return 0;
 }
-static UINT64 NtUserTranslateMessage(UINT64 *a) { return 0; }
+static UINT64 NtUserTranslateMessage(UINT64 *a)
+{
+    const USER_MSG_LOCAL *msg = (const USER_MSG_LOCAL *)a[0];
+    if (!msg || !MmProbeForRead(a[0], sizeof(*msg))) return 0;
+    if (msg->Message != 0x100 && msg->Message != 0x104) return 0;
+    if (!(msg->Private & 0x10000)) return 0;
+    /* Deliver a translated character before the next raw key transition;
+     * otherwise an already queued Enter could run before pending digits. */
+    return KiUserEnqueueMessagePrivate(msg->Hwnd,
+        msg->Message == 0x104 ? 0x106 : WM_CHAR,
+        msg->Private & 0xffff, msg->LParam, msg->PtX, msg->PtY, 0, TRUE);
+}
 static UINT64 NtUserTranslateAccelerator(UINT64 *a) { return 0; }
 static UINT64 NtUserSetTimer(UINT64 *a) { (void)a; return 0; }
 static UINT64 NtUserKillTimer(UINT64 *a) { (void)a; return 0; }

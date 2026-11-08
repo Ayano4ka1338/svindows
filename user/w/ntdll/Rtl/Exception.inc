@@ -164,10 +164,37 @@ __declspec(dllexport) void *RtlVirtualUnwind(
     RUNTIME_FUNCTION64 *function, NT_CONTEXT64 *context,
     void **handler_data, U64 *establisher_frame, void *context_pointers)
 {
-    (void)handler_type; (void)control_pc; (void)context_pointers;
-    BYTE *info = (BYTE *)(image_base + function->UnwindData);
+    (void)handler_type; (void)context_pointers;
+    /* A malformed function-table entry must not turn exception reporting into
+     * a second fault. Verify the entry belongs to the image being unwound and
+     * that its unwind record fits inside that image before reading it. */
+    DWORD image_size = 0;
+    BYTE *image = rtl_image_for_address(control_pc, &image_size);
+    DWORD table_count = 0;
+    RUNTIME_FUNCTION64 *table = rtl_exception_table(image, image_size,
+                                                    &table_count);
+    U64 table_start = (U64)table;
+    U64 table_end = table_start + (U64)table_count * sizeof(*table);
+    if (!image || image_base != (U64)image || !table || !function ||
+        (U64)function < table_start || (U64)function + sizeof(*function) > table_end ||
+        function->UnwindData >= image_size || image_size - function->UnwindData < 4) {
+        context->Rip = *(U64 *)context->Rsp;
+        context->Rsp += 8;
+        if (handler_data) *handler_data = 0;
+        if (establisher_frame) *establisher_frame = context->Rsp - 8;
+        return 0;
+    }
+    BYTE *info = image + function->UnwindData;
     BYTE flags = info[0] >> 3;
     BYTE count = info[2];
+    DWORD aligned_count = ((DWORD)count + 1u) & ~1u;
+    if ((DWORD)function->UnwindData + 4u + aligned_count * 2u > image_size) {
+        context->Rip = *(U64 *)context->Rsp;
+        context->Rsp += 8;
+        if (handler_data) *handler_data = 0;
+        if (establisher_frame) *establisher_frame = context->Rsp - 8;
+        return 0;
+    }
     BYTE frame = info[3] & 15;
     BYTE frame_offset = info[3] >> 4;
     U64 *frame_value = rtl_context_register(context, frame);

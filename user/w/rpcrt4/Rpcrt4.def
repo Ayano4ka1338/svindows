@@ -1,0 +1,5 @@
+LIBRARY RPCRT4.dll
+EXPORTS
+    UuidToStringW
+    RpcStringFreeW
+    UuidCreate

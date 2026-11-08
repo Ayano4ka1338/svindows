@@ -51,13 +51,7 @@ USER32_API BOOL PeekMessageW(MSG *message, HWND hwnd, UINT first, UINT last,
 
 USER32_API BOOL TranslateMessage(const MSG *message)
 {
-    if (message)
-        NtUserTranslateMessage(message);
-    /* NtUserTranslateMessage is a stub that returns 0 without posting a
-     * character: this kernel generates WM_CHAR in the input thread
-     * (kernel/ke/KeMain.c -> KiUserQueueCharacter), not by translating
-     * WM_KEYDOWN. FALSE is the honest answer -- no message was posted. */
-    return FALSE;
+    return message && NtUserTranslateMessage(message) != 0;
 }
 
 USER32_API LRESULT DispatchMessageW(const MSG *message)
@@ -96,6 +90,7 @@ USER32_API void PostQuitMessage(int exit_code)
 USER32_API LRESULT DefWindowProcW(HWND hwnd, UINT message, WPARAM wparam,
                                   LPARAM lparam)
 {
+    if(message==WM_SYSCOMMAND&&((wparam&0xfff0)==0xf090||(wparam&0xfff0)==0xf100)&&sv_user_menu_command(hwnd,wparam,lparam))return 0;
     if (message == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
     if (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_CLOSE)
         return SendMessageW(hwnd, WM_CLOSE, 0, 0);

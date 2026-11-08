@@ -1,4 +1,5 @@
 /* Read and write legacy Win32 INI profile files. */
+__declspec(dllexport) DWORD GetTempPathW(DWORD capacity, WCHAR *buffer);
 typedef struct _PROFILE_TEXT {
     const BYTE *Bytes;
     DWORD Units;
@@ -179,4 +180,59 @@ __declspec(dllexport) DWORD GetPrivateProfileStringW(
     }
     HeapFree(GetProcessHeap(), 0, bytes);
     return result;
+}
+
+__declspec(dllexport) DWORD GetProfileStringW(const WCHAR *section,
+        const WCHAR *key, const WCHAR *fallback, WCHAR *output,
+        DWORD capacity)
+{
+    static const WCHAR filename[] = {'w','i','n','.','i','n','i',0};
+    return GetPrivateProfileStringW(section, key, fallback, output,
+                                    capacity, filename);
+}
+
+__declspec(dllexport) UINT GetTempFileNameW(const WCHAR *directory,
+        const WCHAR *prefix, UINT unique, WCHAR *output)
+{
+    static UINT next_unique = 1;
+    WCHAR path[260];
+    DWORD length = 0;
+    if (!directory || !directory[0]) {
+        length = GetTempPathW(260, path);
+        if (!length || length >= 260) return 0;
+    } else {
+        while (directory[length] && length + 1 < 260) {
+            path[length] = directory[length]; length++;
+        }
+        if (directory[length]) { SetLastError(206); return 0; }
+        if (length && path[length - 1] != '\\' && path[length - 1] != '/')
+            path[length++] = '\\';
+    }
+    DWORD base = length;
+    for (DWORD i = 0; i < 3; i++) {
+        WCHAR ch = prefix && prefix[i] ? prefix[i] : '0';
+        path[length++] = ch;
+    }
+    static const WCHAR hex[] = {'0','1','2','3','4','5','6','7',
+                                '8','9','A','B','C','D','E','F'};
+    for (DWORD attempt = 0; attempt < 256; attempt++) {
+        UINT id = unique ? unique : next_unique++;
+        DWORD p = base + 3;
+        for (int shift = 12; shift >= 0; shift -= 4)
+            path[p++] = hex[(id >> shift) & 15];
+        path[p++] = '.'; path[p++] = 'T'; path[p++] = 'M'; path[p++] = 'P';
+        path[p] = 0;
+        if (output) {
+            for (DWORD i = 0; i <= p; i++) output[i] = path[i];
+        }
+        if (unique) return id;
+        HANDLE file = CreateFileW(path, 0x40000000u, 0, 0, 1,
+                                  0x100u, 0);
+        if (file != NT_INVALID_HANDLE) {
+            CloseHandle(file);
+            return id;
+        }
+    }
+    SetLastError(80);
+    return 0;
 }

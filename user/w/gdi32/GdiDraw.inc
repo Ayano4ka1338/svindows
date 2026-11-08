@@ -99,8 +99,10 @@ GDI32_API BOOL BitBlt(HDC dst, int x, int y, int width, int height, HDC src,
      * BLACKNESS/WHITENESS fill. */
     if (rop != SRCCOPY && rop != BLACKNESS && rop != WHITENESS)
         return FALSE;
-    return NtGdiBitBlt(dst, x, y, width, height, src, src_x, src_y,
-                       (ULONG)rop, 0, 0) != 0;
+    sv_flush_dib(src);
+    if(dst!=src)sv_flush_dib(dst);
+    BOOL result=NtGdiBitBlt(dst,x,y,width,height,src,src_x,src_y,(ULONG)rop,0,0)!=0;
+    sv_read_dib(dst);return result;
 }
 
 GDI32_API COLORREF SetPixel(HDC hdc, int x, int y, COLORREF colour)
@@ -215,8 +217,9 @@ GDI32_API BOOL ExtTextOutW(HDC hdc, int x, int y, UINT options, const RECT *clip
      * clips every glyph to the DC rectangle anyway. The dx array is accepted and
      * ignored: the kernel's text is a fixed-cell bitmap font with no per-glyph
      * positioning (kernel/win32k/gdi/Drawing.inc). */
-    return NtGdiExtTextOutW(hdc, x, y, (ULONG)options, clip, text, (int)count, dx,
-                            0) != 0;
+    sv_flush_dib(hdc);
+    BOOL result=NtGdiExtTextOutW(hdc,x,y,(ULONG)options,clip,text,(int)count,dx,0)!=0;
+    sv_read_dib(hdc);return result;
 }
 
 GDI32_API BOOL TextOutW(HDC hdc, int x, int y, const WCHAR *text, int count)
@@ -228,8 +231,7 @@ GDI32_API BOOL TextOutW(HDC hdc, int x, int y, const WCHAR *text, int count)
     /* TextOut is ExtTextOut with the DC's background mode deciding whether the
      * background is painted. */
     UINT options = dc_bk_mode(hdc) == OPAQUE ? ETO_OPAQUE : 0u;
-    return NtGdiExtTextOutW(hdc, x, y, (ULONG)options, NULL, text, count, NULL,
-                            0) != 0;
+    return ExtTextOutW(hdc,x,y,options,NULL,text,(UINT)count,NULL);
 }
 
 GDI32_API BOOL GetTextExtentPoint32W(HDC hdc, const WCHAR *text, int count,
@@ -267,7 +269,7 @@ GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
         count = sv_wcslen(text);
     if (format & (0x00040000u /* PATH */ |
                   0x00000080u /* DT_TABSTOP */ | 0x00010000u /* WORD_ELLIPSIS */ |
-                  0x00100000u /* DT_HIDEPREFIX */))
+                  0u))
         return 0;
 
     TEXTMETRICW metrics;
@@ -340,8 +342,13 @@ GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
         }
         int line_length = line_end - index;
         if (!(format & DT_CALCRECT) && y + line_height > (int)rect->top &&
-            (y + line_height <= (int)rect->bottom || (format & DT_NOCLIP))) {
-            ExtTextOutW(hdc, (int)rect->left, y, ETO_CLIPPED, rect, text + index,
+            (y < (int)rect->bottom || (format & DT_NOCLIP))) {
+            SIZE line_extent={0,0};
+            GetTextExtentPoint32W(hdc,text+index,line_length,&line_extent);
+            int x=(int)rect->left;
+            if(format&DT_RIGHT)x=(int)rect->right-line_extent.cx;
+            else if(format&DT_CENTER)x+=(box_width-line_extent.cx)/2;
+            ExtTextOutW(hdc, x, y, ETO_CLIPPED, rect, text + index,
                         (UINT)line_length, NULL);
         }
         y += line_height;

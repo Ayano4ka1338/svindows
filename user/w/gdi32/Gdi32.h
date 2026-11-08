@@ -53,6 +53,11 @@ typedef struct _RECT { LONG left, top, right, bottom; } RECT, *LPRECT;
 typedef const RECT *LPCRECT;
 typedef struct _POINT { LONG x, y; } POINT, *LPPOINT;
 typedef struct _SIZE { LONG cx, cy; } SIZE, *LPSIZE;
+typedef struct _BITMAP {
+    LONG bmType, bmWidth, bmHeight, bmWidthBytes;
+    WORD bmPlanes, bmBitsPixel;
+    void *bmBits;
+} BITMAP, *LPBITMAP;
 
 #endif /* SVINDOWS_WIN32_BASE_TYPES */
 
@@ -178,6 +183,22 @@ GDI32_API HDC     CreateCompatibleDC(HDC reference);
 GDI32_API HBITMAP CreateCompatibleBitmap(HDC reference, int width, int height);
 GDI32_API HBITMAP CreateBitmap(int width, int height, UINT planes, UINT bits_per_pixel,
                                const void *bits);
+GDI32_API int     GetObjectW(HGDIOBJ object, int bytes, LPVOID out);
+GDI32_API HBITMAP CreateDIBSection(HDC dc, const void *bitmap_info,
+                                   UINT usage, void **bits, HANDLE section,
+                                   DWORD offset);
+GDI32_API HFONT   CreateFontIndirectW(const void *logical_font);
+GDI32_API HBRUSH  CreatePatternBrush(HBITMAP bitmap);
+GDI32_API HPEN    ExtCreatePen(DWORD style, DWORD width, const void *brush,
+                               DWORD style_count, const DWORD *styles);
+GDI32_API BOOL    GetTextExtentPointW(HDC dc, const WCHAR *text, int count,
+                                      LPSIZE size);
+GDI32_API HRGN    CreateRectRgn(int left, int top, int right, int bottom);
+GDI32_API HRGN    CreateRectRgnIndirect(const RECT *rect);
+GDI32_API BOOL    SetRectRgn(HRGN region, int left, int top, int right, int bottom);
+GDI32_API int     GetRgnBox(HRGN region, LPRECT rect);
+GDI32_API int     CombineRgn(HRGN dst, HRGN src1, HRGN src2, int mode);
+GDI32_API BOOL    EqualRgn(HRGN first, HRGN second);
 GDI32_API BOOL    DeleteDC(HDC hdc);
 
 /* Objects. */

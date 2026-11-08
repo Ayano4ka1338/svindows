@@ -8,6 +8,7 @@ static void dc_dispose_window(W32K_DC *dc)
 {
     void *storage = dc->WindowStorage;
     dc->WindowStorage = NULL;
+    dc->WindowPresented = FALSE;
     dc->DeviceSurface.Bits = NULL;
     dc->PresentedSurface.Bits = NULL;
     if (storage) ExFreePool(storage);
@@ -94,6 +95,7 @@ static void dc_present(W32K_DC *dc)
                        dc->DeviceSurface.Bits + offset, (SIZE_T)width);
     }
     dc->Dirty = FALSE;
+    dc->WindowPresented = TRUE;
     INT32 x, y, cw, ch;
     W32kClientOrigin((UINT16)dc->Hwnd, &x, &y, &cw, &ch);
     W32kScreenDamage(x + left, y + top, width, height);
@@ -130,7 +132,9 @@ void W32kCopyWindowClient(UINT16 slot, UINT32 *target, UINT32 stride,
     if (object->Type != GDI_TYPE_DC || object->Upper != (UINT16)(handle >> 16) ||
         (UINT16)object->u.Dc.Hwnd != slot) return;
     const W32K_SURFACE *surface = &object->u.Dc.PresentedSurface;
-    if (!surface->Bits) return;
+    /* Allocating a DC does not paint the window. An untouched retained
+     * buffer must not become an opaque white sibling overlay. */
+    if (!surface->Bits || !object->u.Dc.WindowPresented) return;
     INT32 cx, cy, cw, ch;
     W32kClientOrigin(slot, &cx, &cy, &cw, &ch);
     if (cw > (INT32)surface->Width) cw = (INT32)surface->Width;

@@ -12,6 +12,7 @@ typedef void              *LPVOID;
 typedef unsigned char      BYTE;
 typedef unsigned short     WORD;
 typedef unsigned long      DWORD;
+typedef long               LONG;
 typedef unsigned long long ULONGLONG;
 typedef unsigned long long SIZE_T;
 typedef unsigned long long DWORD_PTR;

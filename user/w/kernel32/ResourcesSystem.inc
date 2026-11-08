@@ -142,14 +142,11 @@ static BYTE *res_mui_base(BYTE *module)
     if (!n || n >= sizeof(path) - 5)
         return 0;
 
-    /* The filesystem is flat, so only the leaf name matters. */
-    DWORD leaf = 0;
-    for (DWORD i = 0; i < n; i++)
-        if (path[i] == '\\' || path[i] == '/')
-            leaf = i + 1;
+    /* Keep the executable's directory: localized resource files sit beside
+     * the image, including when the app lives outside the volume root. */
     char name[260];
     DWORD j = 0;
-    for (DWORD i = leaf; i < n && j < sizeof(name) - 5; i++)
+    for (DWORD i = 0; i < n && j < sizeof(name) - 5; i++)
         name[j++] = path[i];
     name[j++] = '.'; name[j++] = 'm'; name[j++] = 'u'; name[j++] = 'i';
     name[j] = 0;
@@ -337,6 +334,12 @@ __declspec(dllexport) void *GlobalFree(void *h)
     if (h)
         HeapFree(GetProcessHeap(), 0, h);
     return 0;
+}
+
+__declspec(dllexport) SIZE_T GlobalSize(void *h)
+{
+    if (!h) return 0;
+    return HeapSize(GetProcessHeap(), 0, h);
 }
 
 __declspec(dllexport) void *GlobalLock(void *h)
