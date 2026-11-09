@@ -94,6 +94,27 @@ USER32_API LRESULT DefWindowProcW(HWND hwnd, UINT message, WPARAM wparam,
     if (message == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
     if (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_CLOSE)
         return SendMessageW(hwnd, WM_CLOSE, 0, 0);
+    if (message == WM_ERASEBKGND) {
+        HDC dc = (HDC)wparam;
+        UINT_PTR brush_value = (UINT_PTR)GetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND);
+        HBRUSH brush = (HBRUSH)brush_value;
+        BOOL temporary = FALSE;
+        /* WNDCLASS permits COLOR_* + 1 as a system-color brush sentinel. */
+        if (brush_value > 0 && brush_value <= 31) {
+            brush = CreateSolidBrush(GetSysColor((int)brush_value - 1));
+            temporary = TRUE;
+        }
+        RECT client;
+        if (!brush || !GetClientRect(hwnd, &client)) {
+            if (temporary) DeleteObject(brush);
+            return 0;
+        }
+        HGDIOBJ old = SelectObject(dc, brush);
+        BOOL filled = PatBlt(dc, 0, 0, client.right, client.bottom, PATCOPY);
+        if (old) SelectObject(dc, old);
+        if (temporary) DeleteObject(brush);
+        return filled ? 1 : 0;
+    }
     if (message == WM_PAINT) {
         PAINTSTRUCT paint;
         if (BeginPaint(hwnd, &paint)) EndPaint(hwnd, &paint);

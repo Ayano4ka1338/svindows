@@ -52,7 +52,8 @@ static void InputWorker(PVOID context)
         /* One ordered hardware stream: make, translated character, break.
          * Win32 receives it when a window owns focus; Linux evdev gets its
          * independent mirror and suppresses the native-console fallback. */
-        BOOLEAN window_owns_keyboard = W32kKeyboardOwner();
+        BOOLEAN xorg_owns_win32_input = W32kXorgInputActive();
+        BOOLEAN window_owns_keyboard = W32kKeyboardOwner() && !xorg_owns_win32_input;
         BOOLEAN linux_owns_keyboard = LinuxInputKeyboardActive();
         UINT32 event;
         UINT16 pending_key = 0;
@@ -97,7 +98,7 @@ static void InputWorker(PVOID context)
         /* Forward pointer motion to the window manager, which hit-tests,
          * activates, drags and posts the mouse messages itself. */
         UINT32 seq = MouseState.Seq;
-        if (seq != last_seq) {
+        if (seq != last_seq && !xorg_owns_win32_input) {
             last_seq = seq;
             W32kInputMouse(MouseState.X, MouseState.Y, MouseState.Buttons);
         }
@@ -355,6 +356,10 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
         KiBootStepOk("Keyboard / mouse input");
     else
         KiBootStepFailed("Keyboard / mouse input", STATUS_NO_MEMORY);
+    if (KeCreateThread("Win32 Xorg mirror", W32kXorgWorker, NULL, 10))
+        KiBootStepOk("Win32 Xorg presentation");
+    else
+        KiBootStepFailed("Win32 Xorg presentation", STATUS_NO_MEMORY);
 
     /* IoInitialize created the process-visible console and cleared its screen
      * buffer. Replay the independently collected, real boot results there so

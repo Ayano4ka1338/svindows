@@ -5,7 +5,7 @@ The original calculator from `Win7Ultimate-Basic.vdi` is staged at
 `CALC.EXE.MUI`. The executable is PE32+ for AMD64 (Windows 6.1), so it uses
 Svindows' existing 64-bit process and PE loader path.
 
-Current status (2026-11-08): the original executable starts in Svindows under
+Current status (2026-11-09): the original executable starts in Svindows under
 QEMU, reaches an idle message loop, accepts mouse clicks, and visibly computes
 `2 + 2 = 4`, `9 * 9 = 81`, and `8 / 2 = 4`. Start a visible VM with
 `make run-gui`, then launch from the guest prompt with
@@ -13,8 +13,16 @@ QEMU, reaches an idle message loop, accepts mouse clicks, and visibly computes
 `build/windows7-calc-multiply.png`, and `build/windows7-calc-divide.png`.
 The executable and its MUI are original input files, not a replacement calculator.
 
-Compatibility remains partial: the UI lacks its original themed display
-and some symbol buttons, dialog units use approximate scaling, and the new WIC,
+The current Xorg-backed launch also paints the standard calculator buttons and
+their Backspace and square-root glyphs. GDI+ image scaling now calls the
+Win32 `StretchBlt` path, backed by `NtGdiStretchBlt`; missing UI glyphs are
+rasterized from the bundled DejaVu Sans fallback font rather than handcrafted
+pixel patterns. The calculator's standard-mode layout was checked in QEMU
+after rebuilding the ISO. This check does not establish complete compatibility
+for its other modes or every input path.
+
+Compatibility remains partial: the UI lacks its original themed display,
+dialog units use approximate scaling, and the new WIC,
 GDI+ and COM support implements a subset. The scientific panel now opens and computes factorial; date calculation still
 fails. Programmer/statistics modes and the complete API behavior are not verified.
 Keyboard arithmetic and memory shortcuts have now been checked as described below. The notes below are

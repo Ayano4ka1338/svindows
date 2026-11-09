@@ -13,12 +13,17 @@ the agent exits quietly and the normal Windows desktop stays fullscreen.
 Program Manager, application windows, icons and dialogs become separate X
 clients. The temporary DOS startup window disappears when the agent attaches.
 
+Visible Win32 top-level windows are exported as regular managed Xorg clients.
+TWM owns their title bars, placement, focus and stacking. Win32k updates their
+images from its retained compositor and forwards X keyboard and pointer events
+to the matching HWND. Start a Win32 app before Xorg with
+`start C:\\WINDOWS7\\CALC.EXE`, then run `start startx.elf`; `START` leaves the
+command prompt available while the app and Xorg run.
+
 Each top-level HWND owns its X window and an independent RGB backing image.
-Moving the X window changes only its host position: a window can move beyond
-the guest's 640×480 desktop without losing its image. Host focus changes are
-forwarded to Win3 before keyboard/button input is released. Mouse motion is
-coalesced while button transitions remain ordered. Native cursor rendering
-avoids copying the guest pointer into each window's snapshot.
+Moving the X window changes its host position. X focus, key, button, motion,
+exposure, resize and close events are routed back through Win32k; the hardware
+input worker suppresses duplicate PS/2 delivery while Xorg has Win32 clients.
 
 `WM_DELETE_WINDOW` returns a close command to the owning HWND. The program
 still gets its normal close handling and can open a save dialog. Host resize
@@ -50,7 +55,8 @@ limited to its existing VGA screen; host positions are independent. Child
 controls stay inside the parent X window. The original Win3 frame remains
 inside the X window manager's frame. Host title encoding, custom guest cursor
 shapes, clipboard sharing, XIM and guest display-resolution changes are not
-integrated.
+integrated. Xorg draws its normal visible pointer above both Win16 and Win32
+clients.
 
 The backend targets the repository's local unauthenticated Xorg `:0` session,
 24-bit RGB root visual, 32-bit little-endian ZPixmap storage, and bundled

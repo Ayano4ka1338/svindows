@@ -147,6 +147,7 @@ EXPORTS
     NtGdiCreateSolidBrush
     NtGdiCreatePen
     NtGdiHfontCreate
+    NtGdiStretchBlt
     NtGdiSelectBrush
     NtGdiSelectPen
     NtGdiSelectFont

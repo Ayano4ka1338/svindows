@@ -76,5 +76,6 @@ UINT64 LinuxInetSendMessage(struct _LINUX_SOCKET *socket, const void *buffer, UI
 UINT64 LinuxInetReceiveMessage(struct _LINUX_SOCKET *socket, void *buffer, UINT64 length, UINT64 flags, UINT64 address, UINT64 address_length);
 
 LINUX_SOCKET *LinuxLocalConnect(const char *name, UINT16 length);
+BOOLEAN LinuxLocalConnectable(const char *name, UINT16 length);
 UINT64 LinuxLocalTransfer(LINUX_SOCKET *socket, BOOLEAN write, void *data, UINT64 length, UINT64 flags);
 #endif

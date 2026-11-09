@@ -84,6 +84,11 @@ typedef struct _W32K_BRUSH {
     BOOLEAN Hollow;
 } W32K_BRUSH;
 
+typedef struct _W32K_FONT {
+    INT32 Height, Width, Weight;
+    UINT8 Italic, Underline, StrikeOut, CharSet;
+} W32K_FONT;
+
 typedef struct _W32K_BITMAP {
     W32K_SURFACE Surface;
     void *Storage;
@@ -99,6 +104,7 @@ typedef struct _W32K_OBJECT {
         W32K_DC     Dc;
         W32K_BRUSH  Brush;
         W32K_BITMAP Bitmap;
+        W32K_FONT   Font;
     } u;
 } W32K_OBJECT;
 
@@ -334,14 +340,18 @@ static void dc_glyph(W32K_DC *dc, INT32 x, INT32 y, UINT32 codepoint,
                      UINT32 fg, UINT32 bg, BOOLEAN opaque)
 {
     UINT32 fg_pixel = gdi_pixel(fg), bg_pixel = gdi_pixel(bg);
-    const GFX_FONT_GLYPH *glyph = GfxUiGlyph(codepoint);
-    INT32 baseline = y + GfxUiAscent();
-    INT32 advance = (INT32)GfxUiCharWidth(codepoint);
+    W32K_OBJECT *font_object = dc->SelectedFont ?
+        gdi_object(dc->SelectedFont, GDI_TYPE_FONT) : NULL;
+    const GFX_FONT_FACE *face = GfxUiFontForHeight(
+        font_object ? font_object->u.Font.Height : SvUiFontUiFace.EmPixels);
+    const GFX_FONT_GLYPH *glyph = GfxUiGlyphForFace(face, codepoint);
+    INT32 baseline = y + face->Ascent;
+    INT32 advance = (INT32)GfxUiCharWidthForFace(face, codepoint);
 
     if (opaque) {
         /* The background fills the whole cell, as Windows does, so a cleared
          * line has no gaps between glyphs. */
-        for (INT32 row = 0; row < GFX_FONT_H; ++row) {
+        for (INT32 row = 0; row < face->LineHeight; ++row) {
             INT32 px = x, py = y + row, pw = advance, ph = 1;
             if (!dc_clip(dc, &px, &py, &pw, &ph))
                 continue;
@@ -351,7 +361,7 @@ static void dc_glyph(W32K_DC *dc, INT32 x, INT32 y, UINT32 codepoint,
     }
     if (!glyph || !glyph->Width || !glyph->Height)
         return;
-    const UINT8 *bits = SvUiFontUiFace.Pixels + glyph->Offset;
+    const UINT8 *bits = face->Pixels + glyph->Offset;
     INT32 left = x + glyph->BearingX;
     INT32 top = baseline - glyph->BearingY;
     for (UINT32 row = 0; row < glyph->Height; ++row) {

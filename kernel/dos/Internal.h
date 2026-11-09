@@ -19,6 +19,7 @@ typedef UINT64 U64;
 #define DOS_XMS_CAPACITY (16u * 1024u * 1024u)
 #define DOS_XMS_BASE 0x00110000u /* Above the HMA reserved by XMS. */
 #define DOS_XMS_MAX_HANDLES 64u
+#define DOS_MAX_HANDLES 64u
 #define DOS_HW_POLL_INTERVAL 128u
 #define DOS_CPU_BATCH_SIZE 4096u
 /* DOS 3.1-3.3 compatibility data used by INT 21h/34h, 52h and 5D06h. */
@@ -29,7 +30,7 @@ typedef UINT64 U64;
 #define DOS_DPB_OFFSET 0x0a40u
 #define DOS_SFT_OFFSET 0x0b00u
 #define DOS_SFT_ENTRY_SIZE 0x35u
-#define DOS_SFT_ENTRY_COUNT 20u
+#define DOS_SFT_ENTRY_COUNT DOS_MAX_HANDLES
 #define DOS_CDS_OFFSET 0x1200u
 #define DOS_CDS_ENTRY_SIZE 0x45u
 #define DOS_DEVICE_CLOCK_OFFSET 0x1600u
@@ -158,7 +159,7 @@ typedef struct _DOS_VM {
   U8 PendingException;
   U16 PendingExceptionError;
   U8 Cpl; /* Real-to-protected entry starts at ring zero regardless of CS bits. */
-  DOS_FILE *Files[20];
+  DOS_FILE *Files[DOS_MAX_HANDLES];
   DOS_BLOCK Blocks[DOS_MAX_BLOCKS];
   U16 InitialParagraphs;
   U16 DosAllocationStrategy;

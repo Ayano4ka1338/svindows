@@ -140,6 +140,17 @@ static LINUX_SOCKET *linux_find_bound(const char *name, UINT16 length)
     return NULL;
 }
 
+BOOLEAN LinuxLocalConnectable(const char *name, UINT16 length)
+{
+    UINT64 irq = KiIrqSave();
+    LINUX_SOCKET *listener = linux_find_bound(name, length);
+    BOOLEAN ready = listener && !listener->Closed &&
+                    listener->State == LINUX_SOCKET_LISTENING &&
+                    listener->PendingCount < listener->Backlog;
+    KiIrqRestore(irq);
+    return ready;
+}
+
 static UINT64 linux_socket_dos_path(const char *name, char result[260])
 {
     char path[260] = "C:";

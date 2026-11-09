@@ -397,6 +397,7 @@ __declspec(dllimport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
 #define COLOR_3DHIGHLIGHT   COLOR_BTNHIGHLIGHT
 #define COLOR_3DDKSHADOW    21
 #define COLOR_3DLIGHT       22
+#define GCLP_HBRBACKGROUND  (-10)
 #define COLOR_INFOTEXT      23
 #define COLOR_INFOBK        24
 #define COLOR_HOTLIGHT      26
@@ -421,6 +422,7 @@ __declspec(dllimport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
 USER32_API ATOM      RegisterClassExW(const WNDCLASSEXW *wndclass);
 USER32_API ATOM      RegisterClassW(const WNDCLASSW *wndclass);
 USER32_API BOOL      UnregisterClassW(const WCHAR *class_name, HINSTANCE instance);
+USER32_API LONG_PTR  GetClassLongPtrW(HWND hwnd, int index);
 USER32_API HWND      CreateWindowExW(DWORD ex_style, const WCHAR *class_name,
                                      const WCHAR *window_name, DWORD style,
                                      int x, int y, int width, int height,

@@ -105,6 +105,21 @@ GDI32_API BOOL BitBlt(HDC dst, int x, int y, int width, int height, HDC src,
     sv_read_dib(dst);return result;
 }
 
+GDI32_API BOOL StretchBlt(HDC dst, int x, int y, int width, int height,
+                          HDC src, int src_x, int src_y, int src_width,
+                          int src_height, DWORD rop)
+{
+    if (rop != SRCCOPY || width == 0 || height == 0 ||
+        src_width == 0 || src_height == 0)
+        return FALSE;
+    sv_flush_dib(src);
+    if (dst != src) sv_flush_dib(dst);
+    BOOL result = NtGdiStretchBlt(dst, x, y, width, height, src, src_x,
+                                  src_y, src_width, src_height, rop) != 0;
+    sv_read_dib(dst);
+    return result;
+}
+
 GDI32_API COLORREF SetPixel(HDC hdc, int x, int y, COLORREF colour)
 {
     /* NtGdiSetPixel returns the colour it stored, or (UINT64)-1 when the point

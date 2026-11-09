@@ -837,6 +837,7 @@ typedef UINT64 (*KI_SERVICE)(UINT64 *args);
 /* Last: the window manager needs the window records, the message queue and the
  * callback machinery of the parts above. */
 #include "../win32k/UserScreen.inc"
+#include "../win32k/XorgMirror.inc"
 
 /*
  * The system service table, indexed by NT x64 syscall numbers
@@ -1019,6 +1020,7 @@ static KI_SERVICE KiServiceTable[SVINDOWS_MAX_SYSCALL];
 #define SN_NtGdiCreateSolidBrush          0x10BA
 #define SN_NtGdiCreatePen                 0x1059
 #define SN_NtGdiHfontCreate               0x105F
+#define SN_NtGdiStretchBlt                0x1062
 #define SN_NtGdiCreateRectRgn             0x1086
 #define SN_NtGdiSelectBrush               0x12F6
 #define SN_NtGdiSelectPen                 0x12F8
@@ -1228,6 +1230,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtGdiCreateSolidBrush] = NtGdiCreateSolidBrush;
     KiServiceTable[SN_NtGdiCreatePen] = NtGdiCreatePen;
     KiServiceTable[SN_NtGdiHfontCreate] = NtGdiHfontCreate;
+    KiServiceTable[SN_NtGdiStretchBlt] = NtGdiStretchBlt;
     KiServiceTable[SN_NtGdiCreateRectRgn] = NtGdiCreateRectRgn;
     KiServiceTable[SN_NtGdiSelectBrush] = NtGdiSelectBrush;
     KiServiceTable[SN_NtGdiSelectPen] = NtGdiSelectPen;

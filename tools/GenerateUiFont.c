@@ -27,6 +27,7 @@ typedef struct {
 
 static const FACE Faces[] = {
     {12, "Ui"},    /* 9pt at 96 DPI: window frames and application text */
+    {16, "Ui16"}, {20, "Ui20"}, {24, "Ui24"}, {32, "Ui32"}, {48, "Ui48"},
 };
 
 /* Codepoint set: ASCII, Latin-1, Cyrillic, and the punctuation/symbols the
@@ -36,7 +37,8 @@ static const unsigned int Ranges[][2] = {
     {0x2010, 0x2015}, {0x2018, 0x201E}, {0x2020, 0x2022},
     {0x2026, 0x2026}, {0x2030, 0x2030}, {0x2039, 0x203A},
     {0x20AC, 0x20AC}, {0x20BD, 0x20BD}, {0x2116, 0x2116},
-    {0x2190, 0x2193}, {0x2264, 0x2265},
+    {0x2190, 0x2193}, {0x221A, 0x221A}, {0x2264, 0x2265},
+    {0x232B, 0x232B},
 };
 
 typedef struct {
@@ -70,10 +72,13 @@ static int Compare(const void *left, const void *right)
     return a < b ? -1 : a > b ? 1 : 0;
 }
 
-static void WriteFace(FILE *out, const stbtt_fontinfo *font, const FACE *face,
+static void WriteFace(FILE *out, const stbtt_fontinfo *font,
+                      const stbtt_fontinfo *fallback_font, const FACE *face,
                       double gamma)
 {
     float scale = stbtt_ScaleForMappingEmToPixels(font, (float)face->Size);
+    float fallback_scale = fallback_font ?
+        stbtt_ScaleForMappingEmToPixels(fallback_font, (float)face->Size) : 0;
     int ascent, descent, lineGap;
     stbtt_GetFontVMetrics(font, &ascent, &descent, &lineGap);
     int ascent_px = (int)floor(ascent * scale + 0.5);
@@ -90,21 +95,28 @@ static void WriteFace(FILE *out, const stbtt_fontinfo *font, const FACE *face,
         int present = 0, wanted = 0;
         for (unsigned int cp = Ranges[range][0]; cp <= Ranges[range][1]; ++cp) {
             ++wanted;
+            const stbtt_fontinfo *glyph_font = font;
+            float glyph_scale = scale;
             int index = stbtt_FindGlyphIndex(font, (int)cp);
+            if (!index && fallback_font) {
+                index = stbtt_FindGlyphIndex(fallback_font, (int)cp);
+                if (index) { glyph_font = fallback_font; glyph_scale = fallback_scale; }
+            }
             if (!index) continue;
             ++present;
             int advance, bearing;
-            stbtt_GetGlyphHMetrics(font, index, &advance, &bearing);
+            stbtt_GetGlyphHMetrics(glyph_font, index, &advance, &bearing);
             int x0, y0, x1, y1;
-            stbtt_GetGlyphBitmapBox(font, index, scale, scale, &x0, &y0, &x1, &y1);
+            stbtt_GetGlyphBitmapBox(glyph_font, index, glyph_scale, glyph_scale,
+                                    &x0, &y0, &x1, &y1);
             int width = x1 - x0, height = y1 - y0;
             unsigned int offset = (unsigned int)PoolUsed;
             if (width > 0 && height > 0) {
                 if (width > 255 || height > 255) continue;
                 unsigned char *bitmap = malloc((size_t)width * height);
                 if (!bitmap) { fprintf(stderr, "out of memory\n"); exit(1); }
-                stbtt_MakeGlyphBitmap(font, bitmap, width, height, width,
-                                      scale, scale, index);
+                stbtt_MakeGlyphBitmap(glyph_font, bitmap, width, height, width,
+                                      glyph_scale, glyph_scale, index);
                 if (gamma != 1.0) {
                     for (int i = 0; i < width * height; ++i) {
                         double value = bitmap[i] / 255.0;
@@ -127,7 +139,7 @@ static void WriteFace(FILE *out, const stbtt_fontinfo *font, const FACE *face,
             glyph->Height = (unsigned char)height;
             glyph->BearingX = (signed char)x0;
             glyph->BearingY = (signed char)-y0;
-            int step = (int)floor(advance * scale + 0.5);
+            int step = (int)floor(advance * glyph_scale + 0.5);
             glyph->Advance = (unsigned char)(step > 255 ? 255 : step);
         }
         if (present != wanted)
@@ -166,11 +178,13 @@ static void WriteFace(FILE *out, const stbtt_fontinfo *font, const FACE *face,
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <regular.ttf> <output.c> [--gamma N]\n", argv[0]);
+        fprintf(stderr, "usage: %s <regular.ttf> <output.c> [fallback.ttf] [--gamma N]\n", argv[0]);
         return 2;
     }
     double gamma = 1.0;
-    for (int i = 3; i + 1 < argc; ++i)
+    const char *fallback_path = argc > 3 && strcmp(argv[3], "--gamma") ? argv[3] : NULL;
+    int option_start = fallback_path ? 4 : 3;
+    for (int i = option_start; i + 1 < argc; ++i)
         if (!strcmp(argv[i], "--gamma")) gamma = atof(argv[i + 1]);
     if (gamma < 0.35 || gamma > 3.0) {
         fprintf(stderr, "gamma out of range\n");
@@ -195,20 +209,44 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    unsigned char *fallback_data = NULL;
+    stbtt_fontinfo fallback_font, *fallback = NULL;
+    if (fallback_path) {
+        FILE *file = fopen(fallback_path, "rb");
+        if (!file) { perror(fallback_path); return 1; }
+        fseek(file, 0, SEEK_END);
+        long fallback_length = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        fallback_data = malloc((size_t)fallback_length);
+        if (!fallback_data || fread(fallback_data, 1, (size_t)fallback_length, file) != (size_t)fallback_length) {
+            fprintf(stderr, "cannot read %s\n", fallback_path);
+            return 1;
+        }
+        fclose(file);
+        if (!stbtt_InitFont(&fallback_font, fallback_data,
+                            stbtt_GetFontOffsetForIndex(fallback_data, 0))) {
+            fprintf(stderr, "%s: not a usable TrueType fallback font\n", fallback_path);
+            return 1;
+        }
+        fallback = &fallback_font;
+    }
+
     FILE *out = fopen(argv[2], "w");
     if (!out) { perror(argv[2]); return 1; }
     fprintf(out,
             "/* Generated by tools/GenerateUiFont.c from Selawik Regular.\n"
             " * Selawik is distributed under the SIL Open Font License 1.1 and is\n"
-            " * metric-compatible with Segoe UI; see tools/third_party/.\n"
+            " * metric-compatible with Segoe UI; missing glyphs use DejaVu Sans.\n"
+            " * Both font licenses are in tools/third_party/.\n"
             " * Do not edit: run `make ui-font` instead.\n"
             " *\n"
             " * win32k uses this atlas for GDI text and window frames. */\n"
             "#include <svindows/UiFont.h>\n");
     for (size_t i = 0; i < sizeof(Faces) / sizeof(Faces[0]); ++i)
-        WriteFace(out, &font, &Faces[i], gamma);
+        WriteFace(out, &font, fallback, &Faces[i], gamma);
     fclose(out);
     free(data);
+    free(fallback_data);
     free(Pool);
     return 0;
 }

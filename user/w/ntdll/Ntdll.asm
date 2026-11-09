@@ -481,6 +481,7 @@ SYSCALL_STUB NtGdiGetEntry,                  0x12AE
 SYSCALL_STUB NtGdiCreateSolidBrush,          0x10BA
 SYSCALL_STUB NtGdiCreatePen,                 0x1059
 SYSCALL_STUB NtGdiHfontCreate,               0x105F
+SYSCALL_STUB NtGdiStretchBlt,                0x1062
 SYSCALL_STUB NtGdiSelectBrush,               0x12F6
 SYSCALL_STUB NtGdiSelectPen,                 0x12F8
 SYSCALL_STUB NtGdiSelectFont,                0x103C

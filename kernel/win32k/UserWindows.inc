@@ -13,6 +13,7 @@ typedef struct _USER_CLASS_LOCAL {
     WCHAR Name[32];
     UINT64 WndProc;
     UINT64 Instance;
+    UINT64 BackgroundBrush;
     UINT32 Style;
     UINT32 WndExtra;
     UINT16 Atom;
@@ -28,6 +29,7 @@ static USER_CLASS_LOCAL *g_window_classes[128];
 #define WNDCLASSEX_STYLE       0x04
 #define WNDCLASSEX_WNDPROC     0x08
 #define WNDCLASSEX_HINSTANCE   0x18
+#define WNDCLASSEX_BACKGROUND  0x30
 #define WNDCLASSEX_CLASSNAME   0x40
 
 static UINT64 NtUserRegisterClassExWOW(UINT64 *a)
@@ -86,6 +88,8 @@ static UINT64 NtUserRegisterClassExWOW(UINT64 *a)
             *(const UINT64 *)(wcex + WNDCLASSEX_WNDPROC);
         g_user_classes[i].Instance =
             *(const UINT64 *)(wcex + WNDCLASSEX_HINSTANCE);
+        g_user_classes[i].BackgroundBrush =
+            *(const UINT64 *)(wcex + WNDCLASSEX_BACKGROUND);
         /* The class name is interned in the station atom table, so
          * GetAtomName/FindAtom answer for it and no registered window message
          * can be handed the same number. */
@@ -151,6 +155,8 @@ static UINT64 NtUserGetClassInfoEx(UINT64 *a)
         *(UINT32 *)(out + WNDCLASSEX_STYLE) = g_user_classes[i].Style;
         *(UINT64 *)(out + WNDCLASSEX_WNDPROC) = g_user_classes[i].WndProc;
         *(UINT64 *)(out + WNDCLASSEX_HINSTANCE) = g_user_classes[i].Instance;
+        *(UINT64 *)(out + WNDCLASSEX_BACKGROUND) =
+            g_user_classes[i].BackgroundBrush;
         *(const WCHAR **)(out + WNDCLASSEX_CLASSNAME) = ustr->Buffer;
         return g_user_classes[i].Atom;
     }
@@ -327,6 +333,7 @@ static UINT64 NtUserClassLong(UINT64 *a)
     INT32 index=(INT32)a[1]; UINT64 old=0;
     switch(index) {
     case -24: old=cls->WndProc; if(a[3])cls->WndProc=a[2]; break;
+    case -10: old=cls->BackgroundBrush; if(a[3])cls->BackgroundBrush=a[2]; break;
     case -26: old=cls->Style; if(a[3])cls->Style=(UINT32)a[2]; break;
     case -16: old=cls->WndExtra; if(a[3])cls->WndExtra=(UINT32)a[2]; break;
     case -8: old=cls->Instance; if(a[3])cls->Instance=a[2]; break;

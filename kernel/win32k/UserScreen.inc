@@ -91,6 +91,7 @@ static UINT16 g_w32k_capture;    /* window holding the mouse capture       */
 static UINT16 g_w32k_drag;       /* caption drag keeps its owner across hit tests */
 static BOOLEAN g_w32k_shift, g_w32k_ctrl, g_w32k_alt;
 static INT32 g_w32k_cascade;     /* CW_USEDEFAULT placement walk           */
+static volatile UINT32 g_w32k_xorg_frame_sequence;
 
 static void W32kComposeRect(INT32 x, INT32 y, INT32 width, INT32 height);
 static void W32kInvalidateWindow(UINT16 slot);
@@ -648,6 +649,7 @@ static void W32kComposeRect(INT32 x, INT32 y, INT32 width, INT32 height)
     }
 
     W32kPresentDamage(x, y, width, height);
+    __sync_add_and_fetch(&g_w32k_xorg_frame_sequence, 1);
     KiIrqRestore(flags);
 }
 

@@ -23,7 +23,13 @@ USER32_API HDC BeginPaint(HWND hwnd, PAINTSTRUCT *paint)
      * update region is whole-window, so rcPaint is the entire client area) and
      * hands back the window's cached device context over its client raster.
      * EndPaint publishes the completed paint to the compositor. */
-    return (HDC)(UINT_PTR)NtUserBeginPaint(hwnd, paint);
+    HDC dc = (HDC)(UINT_PTR)NtUserBeginPaint(hwnd, paint);
+    /* BeginPaint opens a retained window-surface transaction. Erase through
+     * the class/application procedure now, before the caller draws its paint
+     * content; EndPaint will publish both together. */
+    if (dc && paint->fErase)
+        (void)SendMessageW(hwnd, WM_ERASEBKGND, (WPARAM)dc, 0);
+    return dc;
 }
 
 USER32_API BOOL EndPaint(HWND hwnd, const PAINTSTRUCT *paint)

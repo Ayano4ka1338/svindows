@@ -12,9 +12,13 @@ typedef struct { HBRUSH brush; } GP_BRUSH;
 typedef struct { LONG bmType, bmWidth, bmHeight; LONG bmWidthBytes;
                  WORD bmPlanes, bmBitsPixel; void *bmBits; } SV_BITMAP;
 
+int _fltused = 0;
+
 __declspec(dllimport) void *GlobalAlloc(unsigned int flags, SIZE_T bytes);
 __declspec(dllimport) void *GlobalFree(void *memory);
 __declspec(dllimport) int GetObjectW(HGDIOBJ object, int bytes, void *out);
+__declspec(dllimport) double sin(double angle);
+__declspec(dllimport) double cos(double angle);
 
 __declspec(dllimport) HANDLE GetModuleHandleA(const char*);
 __declspec(dllimport) void *GetProcAddress(HANDLE,const char*);
@@ -287,7 +291,11 @@ __declspec(dllexport) GpStatus GdipFillRectangleI(HANDLE graphics,
     GP_GRAPHICS *g = gp_graphics(graphics); GP_BRUSH *b = (GP_BRUSH *)brush;
     if (!g || !b || !b->brush) return GP_INVALID_PARAMETER;
     HGDIOBJ old = SelectObject(g->hdc, b->brush);
-    (void)Rectangle(g->hdc, x, y, x + width, y + height);
+    if (width < 0 || height < 0) {
+        if (old) (void)SelectObject(g->hdc, old);
+        return GP_INVALID_PARAMETER;
+    }
+    (void)PatBlt(g->hdc, x, y, width, height, 0x00F00021);
     if (old) (void)SelectObject(g->hdc, old);
     return GP_OK;
 }
@@ -307,10 +315,28 @@ __declspec(dllexport) GpStatus GdipDrawArcI(HANDLE graphics, HANDLE pen,
         int x, int y, int width, int height, float start, float sweep)
 {
     GP_GRAPHICS *g = gp_graphics(graphics); GP_PEN *p = (GP_PEN *)pen;
-    (void)start; (void)sweep;
-    if (!g || !p || !p->pen) return GP_INVALID_PARAMETER;
+    if (!g || !p || !p->pen || width <= 0 || height <= 0)
+        return GP_INVALID_PARAMETER;
+    if (sweep == 0.0f) return GP_OK;
     HGDIOBJ old = SelectObject(g->hdc, p->pen);
-    (void)Ellipse(g->hdc, x, y, x + width, y + height);
+    /* GDI+ angles are measured clockwise from the positive x axis. Sample
+     * the ellipse densely enough to keep the rasterized arc smooth at UI
+     * sizes while bounding work for unusually large sweeps. */
+    double radians = 3.14159265358979323846 / 180.0;
+    int steps = (int)(sweep < 0.0f ? -sweep / 5.0f : sweep / 5.0f) + 1;
+    if (steps > 720) steps = 720;
+    double cx = x + width / 2.0, cy = y + height / 2.0;
+    double rx = width / 2.0, ry = height / 2.0;
+    double angle = (double)start * radians;
+    int px = (int)(cx + cos(angle) * rx + 0.5);
+    int py = (int)(cy + sin(angle) * ry + 0.5);
+    (void)MoveToEx(g->hdc, px, py, 0);
+    for (int i = 1; i <= steps; ++i) {
+        angle = ((double)start + (double)sweep * i / steps) * radians;
+        px = (int)(cx + cos(angle) * rx + 0.5);
+        py = (int)(cy + sin(angle) * ry + 0.5);
+        (void)LineTo(g->hdc, px, py);
+    }
     if (old) (void)SelectObject(g->hdc, old);
     return GP_OK;
 }
@@ -319,14 +345,16 @@ __declspec(dllexport) GpStatus GdipDrawImageRectI(HANDLE graphics,
         HANDLE image, int x, int y, int width, int height)
 {
     GP_GRAPHICS *g = gp_graphics(graphics); GP_IMAGE *im = gp_image(image);
-    if (!g || !im || width <= 0 || height <= 0) {gp_trace(!g?"[gp] draw graphics invalid":!im?"[gp] draw image invalid":"[gp] draw size invalid");return GP_INVALID_PARAMETER;}
+    if (!g || !im || width <= 0 || height <= 0 ||
+        width > 4096 || height > 4096 || (unsigned long long)width * height > 4194304) {
+        gp_trace(!g?"[gp] draw graphics invalid":!im?"[gp] draw image invalid":"[gp] draw size invalid");
+        return GP_INVALID_PARAMETER;
+    }
     HDC src = CreateCompatibleDC(0);
     if (!src) return GP_OUT_OF_MEMORY;
     (void)SelectObject(src, im->bitmap);
-    int copy_width = width < im->width ? width : im->width;
-    int copy_height = height < im->height ? height : im->height;
-    (void)BitBlt(g->hdc, x, y, copy_width, copy_height,
-                 src, 0, 0, 0x00CC0020);
+    (void)StretchBlt(g->hdc, x, y, width, height, src, 0, 0,
+                     im->width, im->height, 0x00CC0020);
     (void)DeleteDC(src);
     return GP_OK;
 }

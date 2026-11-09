@@ -4,7 +4,7 @@
 #include <Uxtheme.h>
 #include "EditModel.h"
 enum { SV_BUTTON = 1, SV_EDIT, SV_STATIC, SV_COMBO };
-#define SV_CONTROL_SURFACE RGB(255,255,255)
+#define SV_CONTROL_SURFACE GetSysColor(COLOR_BTNFACE)
 typedef struct SV_CONTROL {
     struct SV_CONTROL *next;
     HWND hwnd, parent;

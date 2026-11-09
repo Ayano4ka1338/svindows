@@ -125,9 +125,12 @@ BOOLEAN W32kGetRect(UINT64 hwnd, INT32 *rect, BOOLEAN client);
 /* Input arrives from the HAL through the kernel input worker. */
 void W32kInputMouse(INT32 x, INT32 y, UINT8 buttons);
 void W32kInputKey(UINT16 event, UINT16 character);
+void W32kXorgWorker(PVOID context);
 void W32kPostCharacter(UINT16 character);
 /* TRUE when the focused window manager should receive keyboard events. */
 BOOLEAN W32kKeyboardOwner(void);
+BOOLEAN W32kXorgInputActive(void);
+BOOLEAN W32kXorgConnected(void);
 
 /* The win32k system services, dispatched from KiServiceTable. */
 UINT64 NtGdiGetEntry(UINT64 *args);
@@ -155,6 +158,7 @@ UINT64 NtGdiCreateBitmap(UINT64 *args);
 UINT64 NtGdiGetDCObject(UINT64 *args);
 UINT64 NtGdiFlush(UINT64 *args);
 UINT64 NtGdiHfontCreate(UINT64 *args);
+UINT64 NtGdiStretchBlt(UINT64 *args);
 UINT64 NtGdiCreateRectRgn(UINT64 *args);
 UINT64 NtGdiCreatePen(UINT64 *args);
 UINT64 NtGdiGetDeviceCaps(UINT64 *args);

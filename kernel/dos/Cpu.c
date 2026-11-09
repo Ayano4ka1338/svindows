@@ -7,6 +7,8 @@ static U32 pm_register(DOS_VM *vm, unsigned index, unsigned width);
 static void pm_set_register(DOS_VM *vm, unsigned index, unsigned width, U32 value);
 static U16 dpmi_make_descriptor(U32 base, U32 limit, U8 access, U8 desc_flags);
 static U16 dpmi_copy_descriptor(U16 function);
+static void x87_apply_control(DOS_VM *vm);
+static void x87_initialize(DOS_VM *vm);
 static int dpmi_simulate_real_interrupt(U8 vector, U32 structure,
                                         int force_builtin_dos);
 static int dos_has_guest_interrupt_handler(U8 vector) {
@@ -77,6 +79,13 @@ static int read_descriptor_impl(U16 selector, DOS_DESCRIPTOR *out, int require_p
     return !require_present || out->Valid;
   }
   DOS_TABLE_REGISTER *table = &current()->Gdtr;
+  /* DOS/4GW 1.x retains the conventional real-mode BIOS data selector when
+   * restoring protected-mode segment registers.  Expose selector 0040h as
+   * the 64 KiB view of the BIOS data area used by that compatibility path. */
+  if (index == 0x40u && (!table || table->Limit < 0x47u)) {
+    *out = (DOS_DESCRIPTOR){0x400u, 0xffffu, 0xf2u, 0u, TRUE};
+    return 1;
+  }
   if (!table || index > table->Limit || table->Limit - index < 7)
     return 0;
   if (table->Base > 0xffffffffu - index)
@@ -335,6 +344,36 @@ static void dpmi_interrupt(void) {
     if (!handle || handle > DOS_DPMI_MAX_BLOCKS || !vm->DpmiBlocks[handle - 1].Used)
       error = 0x8023;
     else memset(&vm->DpmiBlocks[handle - 1], 0, sizeof(DOS_DPMI_BLOCK));
+  } else if (function == 0x0506) {
+    /* DPMI 1.0 Get Page Attributes. This VM keeps its DOS/DPMI pages
+     * resident and writable, so every page in an allocated linear block is
+     * committed (page type 1, read/write). We do not track accessed/dirty
+     * bits, so bit 4 remains clear. */
+    U32 handle = r32[SI];
+    U32 offset = r32[BX];
+    U32 count = r32[CX];
+    U32 block_slot = handle && handle <= DOS_DPMI_MAX_BLOCKS ? handle - 1u : DOS_DPMI_MAX_BLOCKS;
+    U32 bytes = count * 2u, buffer_linear = 0;
+    if (!count || count > 0x7fffffffu ||
+        block_slot >= DOS_DPMI_MAX_BLOCKS || !vm->DpmiBlocks[block_slot].Used)
+      error = 0x8023;
+    else if (offset > vm->DpmiBlocks[block_slot].Size ||
+             count > (vm->DpmiBlocks[block_slot].Size - offset + 4095u) / 4096u ||
+             offset > 0xffffffffu - vm->DpmiBlocks[block_slot].Base ||
+             !protected_linear(vm, ES, r32[DX], bytes, 1, 0, &buffer_linear))
+      error = 0x8025;
+    else {
+      U32 first_page = offset / 4096u;
+      for (U32 i = 0; i < count; i++) {
+        U32 page_offset = (first_page + i) * 4096u;
+        if (page_offset >= vm->DpmiBlocks[block_slot].Size) {
+          error = 0x8025;
+          break;
+        }
+        vm->Memory[buffer_linear + i * 2u] = 0x09u;
+        vm->Memory[buffer_linear + i * 2u + 1u] = 0;
+      }
+    }
   } else if (function == 0x0100) {
     U16 paragraphs = (U16)r32[BX];
     U16 segment = dos_alloc(paragraphs), selector = 0;
@@ -692,8 +731,15 @@ static __attribute__((always_inline)) inline int protected_linear(
     U32 upper = (d->Flags & 4u) ? 0xffffffffu : 0xffffu;
     if (offset < lower || last > upper)
       return 0;
-  } else if (last > d->Limit)
-    return 0;
+  } else if (last > d->Limit) {
+    /* DOS/4GW 1.x's LE loader probes its short object-table descriptors past
+     * the declared limit while walking the table. Preserve a small read-only
+     * compatibility tail; writes and instruction fetches still obey the
+     * descriptor exactly, and every translated address remains VM-bounded. */
+    if (!vm->DpmiHostSelector || write_access || execute_access ||
+        offset > d->Limit + 0x100u || last - d->Limit > 0x100u)
+      return 0;
+  }
   if (d->Base > 0xffffffffu - offset)
     return 0;
   *linear = d->Base + offset;
@@ -1629,6 +1675,10 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   int operand32 = default32, address32 = default32;
   int segment_override = -1, rep = 0;
   U8 op = (U8)protected_fetch(vm, 1);
+  /* WAIT is a standalone x87 synchronization instruction. The DOS VM
+   * executes x87 operations synchronously, so there is no pending hardware
+   * queue to drain here. */
+  if (op == 0x9bu) return;
   for (unsigned count = 0; count < 15 && vm->Running; count++) {
     if (op == 0x26) segment_override = ES;
     else if (op == 0x2e) segment_override = CS;
@@ -1900,6 +1950,74 @@ static __attribute__((always_inline)) inline void step_protected(DOS_VM *vm) {
   }
   if (op == 0xd9) {
     PM_MOD m = pm_decode(vm, segment_override, address32);
+    if (m.is_reg) {
+      if (!vm->FpuInitialized) x87_initialize(vm);
+      x87_apply_control(vm);
+      if (m.reg == 0) {
+        switch (m.rm) {
+#define PM_D9_ST_LOAD(n) case n: __asm__ volatile("fld %%st(" #n ")" : : : "memory"); break
+          PM_D9_ST_LOAD(0); PM_D9_ST_LOAD(1); PM_D9_ST_LOAD(2); PM_D9_ST_LOAD(3);
+          PM_D9_ST_LOAD(4); PM_D9_ST_LOAD(5); PM_D9_ST_LOAD(6); PM_D9_ST_LOAD(7);
+#undef PM_D9_ST_LOAD
+        }
+      } else if (m.reg == 1) {
+        switch (m.rm) {
+#define PM_D9_ST_XCH(n) case n: __asm__ volatile("fxch %%st(" #n ")" : : : "memory"); break
+          PM_D9_ST_XCH(0); PM_D9_ST_XCH(1); PM_D9_ST_XCH(2); PM_D9_ST_XCH(3);
+          PM_D9_ST_XCH(4); PM_D9_ST_XCH(5); PM_D9_ST_XCH(6); PM_D9_ST_XCH(7);
+#undef PM_D9_ST_XCH
+        }
+      } else if (m.reg == 2 && m.rm == 0) {
+        __asm__ volatile("fnop" : : : "memory");
+      } else if (m.reg == 4) {
+        switch (m.rm) {
+        case 0: __asm__ volatile("fchs" : : : "memory"); break;
+        case 1: __asm__ volatile("fabs" : : : "memory"); break;
+        case 4: __asm__ volatile("ftst" : : : "memory"); break;
+        case 5: __asm__ volatile("fxam" : : : "memory"); break;
+        default: goto unsupported_pm_d9;
+        }
+      } else if (m.reg == 5) {
+        switch (m.rm) {
+        case 0: __asm__ volatile("fld1" : : : "memory"); break;
+        case 1: __asm__ volatile("fldl2t" : : : "memory"); break;
+        case 2: __asm__ volatile("fldl2e" : : : "memory"); break;
+        case 3: __asm__ volatile("fldpi" : : : "memory"); break;
+        case 4: __asm__ volatile("fldlg2" : : : "memory"); break;
+        case 5: __asm__ volatile("fldln2" : : : "memory"); break;
+        case 6: __asm__ volatile("fldz" : : : "memory"); break;
+        default: goto unsupported_pm_d9;
+        }
+      } else if (m.reg == 6) {
+        switch (m.rm) {
+        case 0: __asm__ volatile("f2xm1" : : : "memory"); break;
+        case 1: __asm__ volatile("fyl2x" : : : "memory"); break;
+        case 2: __asm__ volatile("fptan" : : : "memory"); break;
+        case 3: __asm__ volatile("fpatan" : : : "memory"); break;
+        case 4: __asm__ volatile("fxtract" : : : "memory"); break;
+        case 5: __asm__ volatile("fprem1" : : : "memory"); break;
+        case 6: __asm__ volatile("fdecstp" : : : "memory"); break;
+        case 7: __asm__ volatile("fincstp" : : : "memory"); break;
+        }
+      } else if (m.reg == 7) {
+        switch (m.rm) {
+        case 0: __asm__ volatile("fprem" : : : "memory"); break;
+        case 1: __asm__ volatile("fyl2xp1" : : : "memory"); break;
+        case 2: __asm__ volatile("fsqrt" : : : "memory"); break;
+        case 3: __asm__ volatile("fsincos" : : : "memory"); break;
+        case 4: __asm__ volatile("frndint" : : : "memory"); break;
+        case 5: __asm__ volatile("fscale" : : : "memory"); break;
+        case 6: __asm__ volatile("fsin" : : : "memory"); break;
+        case 7: __asm__ volatile("fcos" : : : "memory"); break;
+        }
+      } else {
+unsupported_pm_d9:
+        KeLog("[dos] unsupported protected x87 D9 /%u rm=%u at CS=%04x EIP=%08x\n",
+              m.reg, m.rm, vm->Segments[CS], vm->CurrentInstructionIp);
+        fail("DOSVM: unsupported x87 instruction\r\n");
+      }
+      return;
+    }
     U16 control = vm->FpuControl ? vm->FpuControl : 0x037fu;
     if (!m.is_reg && m.reg == 5) { /* FLDCW m16 */
       vm->FpuControl = (U16)pm_read_rm(vm, m, 16);
@@ -3785,9 +3903,9 @@ static __attribute__((always_inline)) inline void step_vm_body(DOS_VM *vm) {
       __builtin_memcpy(vm->Segments, saved_segments, sizeof(saved_segments));
       __builtin_memcpy(vm->SegmentCache, saved_cache, sizeof(saved_cache));
       vm->Eip = saved_ip; vm->Eflags = saved_flags; vm->Flags = (U16)saved_flags; vm->Cpl = saved_cpl;
+      KeLog("[dos] guest exception %u error=%04x at %04x:%08x\n",vector,error,seg[CS],saved_ip);
       U8 access = vm->Memory[vm->Idtr.Base + (U32)vector * 8u + 5u];
       unsigned frame_width = access & 8u ? 32u : 16u;
-      KeLog("[dos] guest exception %u error=%04x at %04x:%08x\n",vector,error,seg[CS],saved_ip);
       int has_error = vector == 8 || (vector >= 10 && vector <= 14) || vector == 17;
       if (!protected_interrupt(vector, 0, frame_width) ||
           (has_error && !pm_push(vm, error, frame_width))) {

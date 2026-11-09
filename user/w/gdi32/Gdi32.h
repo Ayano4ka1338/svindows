@@ -103,6 +103,13 @@ typedef struct _TEXTMETRICW {
     BYTE  tmCharSet;
 } TEXTMETRICW, *LPTEXTMETRICW;
 
+typedef struct _LOGFONTW {
+    LONG lfHeight, lfWidth, lfEscapement, lfOrientation, lfWeight;
+    BYTE lfItalic, lfUnderline, lfStrikeOut, lfCharSet, lfOutPrecision;
+    BYTE lfClipPrecision, lfQuality, lfPitchAndFamily;
+    WCHAR lfFaceName[32];
+} LOGFONTW, *LPLOGFONTW;
+
 /* CreatePen styles and the ROPs and flags the kernel understands. */
 #define PS_SOLID   0
 #define PS_DASH    1
@@ -187,7 +194,7 @@ GDI32_API int     GetObjectW(HGDIOBJ object, int bytes, LPVOID out);
 GDI32_API HBITMAP CreateDIBSection(HDC dc, const void *bitmap_info,
                                    UINT usage, void **bits, HANDLE section,
                                    DWORD offset);
-GDI32_API HFONT   CreateFontIndirectW(const void *logical_font);
+GDI32_API HFONT   CreateFontIndirectW(const LOGFONTW *logical_font);
 GDI32_API HBRUSH  CreatePatternBrush(HBITMAP bitmap);
 GDI32_API HPEN    ExtCreatePen(DWORD style, DWORD width, const void *brush,
                                DWORD style_count, const DWORD *styles);
@@ -214,6 +221,9 @@ GDI32_API BOOL    Ellipse(HDC hdc, int left, int top, int right, int bottom);
 GDI32_API BOOL    PatBlt(HDC hdc, int x, int y, int width, int height, DWORD rop);
 GDI32_API BOOL    BitBlt(HDC dst, int x, int y, int width, int height,
                          HDC src, int src_x, int src_y, DWORD rop);
+GDI32_API BOOL    StretchBlt(HDC dst, int x, int y, int width, int height,
+                             HDC src, int src_x, int src_y, int src_width,
+                             int src_height, DWORD rop);
 GDI32_API COLORREF SetPixel(HDC hdc, int x, int y, COLORREF colour);
 GDI32_API BOOL    MoveToEx(HDC hdc, int x, int y, LPPOINT previous);
 GDI32_API BOOL    LineTo(HDC hdc, int x, int y);

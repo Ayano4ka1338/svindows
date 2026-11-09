@@ -44,7 +44,7 @@ __declspec(dllimport) long NtFreeVirtualMemory(HANDLE process,
 __declspec(dllimport) UINT64 NtGdiCreateSolidBrush(COLORREF colour, ULONG unused);
 __declspec(dllimport) UINT64 NtGdiCreatePen(int style, int width, COLORREF colour,
                                             ULONG unused);
-__declspec(dllimport) UINT64 NtGdiHfontCreate(void);
+__declspec(dllimport) UINT64 NtGdiHfontCreate(const LOGFONTW *logical_font);
 __declspec(dllimport) UINT64 NtGdiSelectBrush(HDC hdc, HBRUSH brush);
 __declspec(dllimport) UINT64 NtGdiSelectPen(HDC hdc, HPEN pen);
 __declspec(dllimport) UINT64 NtGdiSelectFont(HDC hdc, HFONT font);
@@ -55,6 +55,9 @@ __declspec(dllimport) UINT64 NtGdiPatBlt(HDC hdc, int x, int y, int width, int h
 __declspec(dllimport) UINT64 NtGdiBitBlt(HDC dst, int x, int y, int width, int height,
                                          HDC src, int src_x, int src_y, ULONG rop,
                                          ULONG background, ULONG flags);
+__declspec(dllimport) UINT64 NtGdiStretchBlt(HDC dst, int x, int y, int width,
+    int height, HDC src, int src_x, int src_y, int src_width, int src_height,
+    ULONG rop);
 __declspec(dllimport) UINT64 NtGdiExtTextOutW(HDC hdc, int x, int y, ULONG options,
                                               const RECT *clip, const WCHAR *text,
                                               int count, const int *dx,
@@ -274,10 +277,9 @@ GDI32_API HBITMAP CreateDIBSection(HDC dc, const void *info, UINT usage,
     return bitmap;
 }
 
-GDI32_API HFONT CreateFontIndirectW(const void *logical_font)
+GDI32_API HFONT CreateFontIndirectW(const LOGFONTW *logical_font)
 {
-    (void)logical_font;
-    return (HFONT)(ULONG_PTR)NtGdiHfontCreate();
+    return (HFONT)(ULONG_PTR)NtGdiHfontCreate(logical_font);
 }
 
 GDI32_API HBRUSH CreatePatternBrush(HBITMAP bitmap)
@@ -497,7 +499,7 @@ GDI32_API HGDIOBJ GetStockObject(int index)
         /* One bitmap font exists in the kernel, so every logical font handle
          * selects it. Always a real object: SelectObject must accept it. */
         if (!cache[index])
-            cache[index] = remember_stock((HGDIOBJ)(ULONG_PTR)NtGdiHfontCreate());
+            cache[index] = remember_stock((HGDIOBJ)(ULONG_PTR)NtGdiHfontCreate(NULL));
         return cache[index];
     default:
         /* NULL_BRUSH/HOLLOW_BRUSH: the kernel's brush object has no hollow flag

@@ -1,6 +1,5 @@
 #include "Control.h"
 #include <SvImageList.h>
-__declspec(dllimport) long NtDisplayString(const char *);
 static int inside(SV_CONTROL *c, LPARAM lp)
 {
     RECT r; GetClientRect(c->hwnd, &r);
@@ -98,9 +97,6 @@ LRESULT SvButtonMessage(SV_CONTROL *c, UINT msg, WPARAM wp, LPARAM lp)
         const BUTTON_IMAGES *images=(const BUTTON_IMAGES*)lp;
         if(!images)return FALSE;
         c->image_list=images->Images;c->image_margin=images->Margin;c->image_align=images->Align;
-        static UINT trace_count;
-        if(trace_count++<3){SV_IMAGELIST *l=(SV_IMAGELIST*)images->Images;
-            NtDisplayString(!l?"[button] image list NULL":l->Magic!=SV_IMAGE_LIST_MAGIC?"[button] image list invalid":!l->Count?"[button] image list empty":"[button] image list ready");}
         SvControlInvalidate(c);return TRUE;
     }
     case WM_PAINT: paint(c); return 0;

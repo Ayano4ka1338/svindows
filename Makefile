@@ -160,6 +160,7 @@ WINDOWS_FILES := $(sort $(wildcard user/w/windows/*))
 WINDOWS_NAMES := $(sort $(WINDOWS1_NAMES) $(WINDOWS3_NAMES))
 # Filter the Windows names as well, so stale copies cannot leak under C:\DOOM.
 DOOM_FILES  := $(filter-out $(addprefix user/d/doom/,$(WINDOWS_NAMES)),$(sort $(wildcard user/d/doom/*)))
+DOOM_NESTED_FILES := $(shell find user/d/doom -mindepth 2 -type f -print | sort)
 LLDLINK    := lld-link
 CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
               -fno-stack-protector -fno-stack-check -funwind-tables \
@@ -187,11 +188,21 @@ QEMUFLAGS            := -machine $(QEMU_MACHINE),accel=$(QEMU_ACCEL) -cpu $(QEMU
                         -audiodev $(QEMU_AUDIO_BACKEND),id=svaudio0 \
                         -device sb16,audiodev=svaudio0,irq=5,dma=1,dma16=5 \
                         $(QEMU_EXTRA_ARGS)
-.PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check dos-x11-check dos-performance-check win16-agent lwip-port-check network-check feh-path-check feh-fs-check .FORCE
+.PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check dos-x11-check dos-performance-check win16-agent lwip-port-check network-check feh-path-check feh-fs-check ui-font .FORCE
 
 .FORCE:
 
 all: $(ISO) $(INITRD)
+
+$(BUILD)/GenerateUiFont: tools/GenerateUiFont.c tools/third_party/stb_truetype.h tools/third_party/DejaVuSans.ttf
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -Wall -Wextra -Itools/third_party -o $@ $< -lm
+
+build/fontcache/selawk.ttf: tools/FetchUiFont.py
+	python3 tools/FetchUiFont.py $@
+
+ui-font: $(BUILD)/GenerateUiFont build/fontcache/selawk.ttf
+	$< build/fontcache/selawk.ttf kernel/hal/UiFontData.c tools/third_party/DejaVuSans.ttf
 
 $(STARTX): user/l/startx/StartX.c user/l/runtime/Memory.c
 	@mkdir -p $(dir $@)
@@ -428,12 +439,12 @@ $(SHLWAPI): user/w/shlwapi/Shlwapi.c user/w/shlwapi/Shlwapi.def
 	           /def:user/w/shlwapi/Shlwapi.def /out:$@ $(BUILD)/shlwapi.obj
 	@echo "  DLL   $@"
 
-$(GDIPLUS): user/w/gdiplus/Gdiplus.c user/w/gdiplus/Gdiplus.def $(GDI32) $(KERNEL32)
+$(GDIPLUS): user/w/gdiplus/Gdiplus.c user/w/gdiplus/Gdiplus.def $(GDI32) $(KERNEL32) $(MSVCRT)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -Iuser/w/gdi32 -c user/w/gdiplus/Gdiplus.c -o $(BUILD)/gdiplus.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x280000000 \
 	           /def:user/w/gdiplus/Gdiplus.def /out:$@ /implib:$(BUILD)/gdiplus.lib \
-	           $(BUILD)/gdiplus.obj $(GDI32LIB) $(KERNEL32LIB)
+	           $(BUILD)/gdiplus.obj $(GDI32LIB) $(KERNEL32LIB) $(MSVCRTLIB)
 	@echo "  DLL   $@"
 
 $(OLEAUT32): user/w/oleaut32/Oleaut32.c user/w/oleaut32/Oleaut32.def $(KERNEL32)
@@ -498,8 +509,9 @@ $(CMDUTIL): user/w/cmdutils/Cmdutils.c $(CRT0) $(KERNEL32)
 $(COMMAND_BINS): $(CMDUTIL)
 	cp $(CMDUTIL) $@
 
-# FAT32 initrd holding the user-space executables, read through the kernel's
-# memory-backed block device and FAT driver at runtime.
+# FAT32 initrd holding user-space executables and Mesa's software GL runtime.
+# LLVM's llvmpipe library needs the enlarged image; default QEMU RAM remains
+# sufficient to boot and run the demo.
 $(ALPINE_XORG): tools/StageAlpineXorg.py tools/alpine-xorg.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-xorg
 
@@ -518,9 +530,9 @@ $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFe
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(wildcard user/d/windows1) $(WINDOWS1_FILES) $(wildcard user/d/windows3) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/xwin/XWIN.EXE other/Logo.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
-	dd if=/dev/zero of=$(INITRD) bs=1M count=200 status=none
+	dd if=/dev/zero of=$(INITRD) bs=1M count=450 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
 	mcopy -i $(INITRD) $(CMD) ::CMD.EXE
 	mcopy -i $(INITRD) $(KERNEL32) ::KERNEL32.DLL
@@ -572,6 +584,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT
 	mcopy -i $(INITRD) user/d/win3.bat ::WIN3.BAT
 	mcopy -i $(INITRD) user/d/win3x.bat ::WIN3X.BAT
+	mcopy -i $(INITRD) user/d/win7x.bat ::WIN7X.BAT
 	mcopy -i $(INITRD) user/d/xwin/XWIN.EXE ::WINDOWS3/XWIN.EXE
 	mcopy -i $(INITRD) $(STARTX) ::STARTX.ELF
 	mmd -i $(INITRD) ::TESTS
@@ -620,7 +633,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mmd -i $(INITRD) ::DEV ::DEV/PTS
 	mmd -i $(INITRD) ::TMP ::TEMP
 	# Provide a known-good image for the first feh smoke test.
-	mcopy -i $(INITRD) other/Logo.png ::LOGO.PNG
+	mcopy -i $(INITRD) other/Logo_small.png ::LOGO.PNG
 	# Give POSIX programs a real HOME rather than leaving HOME unset.
 	mmd -i $(INITRD) ::HOME ::HOME/USER ::HOME/USER/.CONFIG ::HOME/USER/.CONFIG/FEH
 	if [ -n "$(DOOM_FILES)" ]; then \

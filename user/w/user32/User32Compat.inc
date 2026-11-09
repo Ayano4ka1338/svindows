@@ -394,8 +394,12 @@ USER32_API HBITMAP LoadImageW(HINSTANCE instance,const WCHAR *name,UINT type,
 USER32_API BOOL MessageBeep(UINT type) { (void)type; return TRUE; }
 USER32_API BOOL FillRect(HDC dc,const RECT *rect,HBRUSH brush)
 {
-    if(!dc||!rect||!brush)return FALSE;HGDIOBJ old=SelectObject(dc,brush);
-    BOOL ok=Rectangle(dc,rect->left,rect->top,rect->right,rect->bottom);
+    if(!dc||!rect||!brush||rect->right<rect->left||rect->bottom<rect->top)return FALSE;
+    HGDIOBJ old=SelectObject(dc,brush);
+    /* FillRect is a brush operation. Rectangle also strokes with the selected
+     * pen, which adds an unrelated outline to every filled area. */
+    BOOL ok=PatBlt(dc,rect->left,rect->top,rect->right-rect->left,
+                   rect->bottom-rect->top,PATCOPY);
     if(old)SelectObject(dc,old);return ok;
 }
 USER32_API int DrawTextW(HDC dc,const WCHAR *text,int count,LPRECT rect,UINT format)

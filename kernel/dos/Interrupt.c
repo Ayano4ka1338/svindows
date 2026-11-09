@@ -1292,7 +1292,7 @@ static U16 dos_exec(void) {
     DosDestroyVm(child);
     return 10;
   }
-  for (unsigned i = 5; i < 20; i++)
+  for (unsigned i = 5; i < DOS_MAX_HANDLES; i++)
     if (parent->Files[i]) {
       child->Files[i] = parent->Files[i];
       child->Files[i]->References++;
@@ -2074,7 +2074,7 @@ static void dos_int_dispatch(U8 n) {
       flags |= CF;
     } else if (handle < 3) {
       r[DX] = 0x80u | (handle == 0 ? 1u : 2u);
-    } else if (handle >= 5 && handle < 20 && files[handle]) {
+    } else if (handle >= 5 && handle < DOS_MAX_HANDLES && files[handle]) {
       r[DX] = 2; /* file on drive C: (zero-based drive number 2) */
     } else {
       r[AX] = 6;
@@ -2169,9 +2169,9 @@ static void dos_int_dispatch(U8 n) {
       break;
     }
     unsigned slot = 5;
-    while (slot < 20 && files[slot])
+    while (slot < DOS_MAX_HANDLES && files[slot])
       slot++;
-    if (slot == 20) {
+    if (slot == DOS_MAX_HANDLES) {
       r[AX] = 4;
       flags |= CF;
       break;
@@ -2226,7 +2226,7 @@ static void dos_int_dispatch(U8 n) {
     break;
   }
   case 0x3e:
-    if (r[BX] < 5 || r[BX] >= 20 || !files[r[BX]]) {
+    if (r[BX] < 5 || r[BX] >= DOS_MAX_HANDLES || !files[r[BX]]) {
       r[AX] = 6;
       flags |= CF;
     } else {
@@ -2238,7 +2238,7 @@ static void dos_int_dispatch(U8 n) {
   case 0x3f:
   case 0x40: {
     U16 h = r[BX], count = r[CX];
-    if (h >= 20 || (h >= 5 && !files[h]) || h == 3 || h == 4) {
+    if (h >= DOS_MAX_HANDLES || (h >= 5 && !files[h]) || h == 3 || h == 4) {
       r[AX] = 6;
       flags |= CF;
       break;
@@ -2260,7 +2260,7 @@ static void dos_int_dispatch(U8 n) {
   }
   case 0x42: {
     U16 h = r[BX];
-    if (h < 5 || h >= 20 || !files[h] || get8(0) > 2) {
+    if (h < 5 || h >= DOS_MAX_HANDLES || !files[h] || get8(0) > 2) {
       r[AX] = 6;
       flags |= CF;
       break;
@@ -2283,7 +2283,7 @@ static void dos_int_dispatch(U8 n) {
   }
   case 0x57: {
     U16 h = r[BX];
-    if (h < 5 || h >= 20 || !files[h]) {
+    if (h < 5 || h >= DOS_MAX_HANDLES || !files[h]) {
       r[AX] = 6;
       flags |= CF;
       break;
@@ -2459,6 +2459,41 @@ static void dos_int_dispatch(U8 n) {
   case 0x62:
     r[BX] = current()->CurrentPsp;
     break;
+  case 0x63: /* Get DBCS lead-byte table; this DOS locale is single-byte. */
+    if ((r[AX] & 0xffu) == 0) {
+      r[AX] &= 0xff00u; /* AL=0, success; preserve DS:SI as US DOS 3.30 does. */
+      flags &= (U16)~CF;
+    } else {
+      r[AX] = 1;
+      flags |= CF;
+    }
+    break;
+  case 0x67: { /* Set handle count (DOS 3.3+). */
+    U16 count = (U8)r[AX];
+    U16 psp = current()->CurrentPsp;
+    if (count < 5u || count > DOS_MAX_HANDLES) {
+      r[AX] = 4; /* too many open files / invalid count */
+      flags |= CF;
+      break;
+    }
+    if (count > 20u) {
+      const U16 jft = 0x2000u;
+      for (U16 i = 0; i < count; i++)
+        wb(DOS_SYSTEM_DATA_SEGMENT, (U16)(jft + i),
+           i < 3u ? (U8)i : current()->Files[i] ? (U8)i : 0xffu);
+      ww(psp, 0x32u, count);
+      ww(psp, 0x34u, jft);
+      ww(psp, 0x36u, DOS_SYSTEM_DATA_SEGMENT);
+    } else {
+      for (U16 i = 0; i < 20u; i++)
+        wb(psp, (U16)(0x18u + i),
+           i < 3u ? (U8)i : i < count && current()->Files[i] ? (U8)i : 0xffu);
+      ww(psp, 0x32u, count);
+      ww(psp, 0x34u, 0x18u);
+      ww(psp, 0x36u, psp);
+    }
+    break;
+  }
   case 0x26:
   case 0x55: { /* Create PSP; AH=55h also switches the current PSP. */
     U16 parent = current()->CurrentPsp, child = r[DX];

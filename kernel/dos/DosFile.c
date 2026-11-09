@@ -58,7 +58,7 @@ BOOLEAN transfer(U16 slot, void *buffer, U32 length, U32 *done,
     *done = (U32)count;
     return NT_SUCCESS(status);
   }
-  if (slot < 5 || slot >= 20 || !files[slot])
+  if (slot < 5 || slot >= DOS_MAX_HANDLES || !files[slot])
     return FALSE;
   DOS_FILE *f = files[slot];
   if (write) {

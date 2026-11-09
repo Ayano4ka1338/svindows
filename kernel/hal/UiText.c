@@ -19,7 +19,38 @@ int GfxUiLineHeight(void) { return SvUiFontUiFace.LineHeight; }
  * into a device context instead of straight onto the framebuffer. */
 const GFX_FONT_GLYPH *GfxUiGlyph(UINT32 codepoint)
 {
-    const GFX_FONT_FACE *face = &SvUiFontUiFace;
+    return GfxUiGlyphForFace(&SvUiFontUiFace, codepoint);
+}
+
+const GFX_FONT_FACE *GfxUiFontForHeight(INT32 height)
+{
+    if (height < 0) height = -height;
+    if (height <= 0) height = SvUiFontUiFace.EmPixels;
+    const GFX_FONT_FACE *faces[] = {
+        &SvUiFontUiFace, &SvUiFontUi16Face, &SvUiFontUi20Face,
+        &SvUiFontUi24Face, &SvUiFontUi32Face, &SvUiFontUi48Face,
+    };
+    const GFX_FONT_FACE *best = faces[0];
+    INT32 distance = best->EmPixels - height;
+    if (distance < 0) distance = -distance;
+    for (UINT32 i = 1; i < sizeof(faces) / sizeof(faces[0]); ++i) {
+        INT32 candidate = faces[i]->EmPixels - height;
+        if (candidate < 0) candidate = -candidate;
+        if (candidate < distance) { best = faces[i]; distance = candidate; }
+    }
+    return best;
+}
+
+const GFX_FONT_GLYPH *GfxUiGlyphForFace(const GFX_FONT_FACE *face,
+                                        UINT32 codepoint)
+{
+    if (!face) face = &SvUiFontUiFace;
+    /* Segoe UI Symbol's private-use backspace slot maps to the standard
+     * left-arrow glyph when the chosen face has no private-use glyph. The
+     * returned glyph remains part of the shared
+     * text path used by GDI, measurement and window chrome. */
+    if (codepoint == 0xF013)
+        codepoint = 0x2190;
     INT32 low = 0, high = face->GlyphCount - 1;
     while (low <= high) {
         INT32 middle = (low + high) / 2;
@@ -32,6 +63,37 @@ const GFX_FONT_GLYPH *GfxUiGlyph(UINT32 codepoint)
             high = middle - 1;
     }
     return NULL;
+}
+
+UINT32 GfxUiCharWidthForFace(const GFX_FONT_FACE *face, UINT32 codepoint)
+{
+    const GFX_FONT_GLYPH *glyph = GfxUiGlyphForFace(face, codepoint);
+    return glyph ? glyph->Advance : (UINT32)((face ? face : &SvUiFontUiFace)->EmPixels / 2);
+}
+
+UINT32 GfxUiTextWidthCountForFace(const GFX_FONT_FACE *face,
+                                  const UINT16 *text, UINT32 count)
+{
+    UINT32 width = 0;
+    if (text)
+        for (UINT32 i = 0; i < count && text[i]; ++i)
+            width += GfxUiCharWidthForFace(face, text[i]);
+    return width;
+}
+
+UINT32 GfxUiTextFitCountForFace(const GFX_FONT_FACE *face,
+                                const UINT16 *text, UINT32 count,
+                                UINT32 max_width, UINT32 *width_out)
+{
+    UINT32 width = 0, fit = 0;
+    if (text)
+        for (; fit < count && text[fit]; ++fit) {
+            UINT32 advance = GfxUiCharWidthForFace(face, text[fit]);
+            if (width + advance > max_width) break;
+            width += advance;
+        }
+    if (width_out) *width_out = width;
+    return fit;
 }
 
 UINT32 GfxUiCharWidth(UINT32 codepoint)

@@ -223,7 +223,7 @@ static int load(const U8 *image, U32 size, const char *tail) {
   wb(PSP, 0x50, 0xcd);
   wb(PSP, 0x51, 0x21);
   wb(PSP, 0x52, 0xcb);
-  for (unsigned i = 0; i < 20; i++)
+  for (unsigned i = 0; i < DOS_MAX_HANDLES; i++)
     wb(PSP, (U16)(0x18 + i), i < 3 ? (U8)i : 0xff);
   ww(PSP, 0x32, 20);
   ww(PSP, 0x34, 0x18);
@@ -450,7 +450,7 @@ void DosDestroyVm(PVOID context) {
   DOS_VM *vm = (DOS_VM *)context;
   if (!vm)
     return;
-  for (unsigned i = 5; i < 20; i++)
+  for (unsigned i = 5; i < DOS_MAX_HANDLES; i++)
     dos_file_release(vm->Files[i]);
   DosJitDestroy(vm);
   DosVideoStop(vm);

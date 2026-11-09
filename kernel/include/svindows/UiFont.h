@@ -30,7 +30,21 @@ typedef struct _GFX_FONT_FACE {
 
 /* 12px em (9pt): window captions, menus, lists, taskbar. */
 extern const GFX_FONT_FACE SvUiFontUiFace;
+extern const GFX_FONT_FACE SvUiFontUi16Face;
+extern const GFX_FONT_FACE SvUiFontUi20Face;
+extern const GFX_FONT_FACE SvUiFontUi24Face;
+extern const GFX_FONT_FACE SvUiFontUi32Face;
+extern const GFX_FONT_FACE SvUiFontUi48Face;
 const GFX_FONT_GLYPH *GfxUiGlyph(UINT32 codepoint);
+const GFX_FONT_FACE *GfxUiFontForHeight(INT32 height);
+const GFX_FONT_GLYPH *GfxUiGlyphForFace(const GFX_FONT_FACE *face,
+                                         UINT32 codepoint);
+UINT32 GfxUiCharWidthForFace(const GFX_FONT_FACE *face, UINT32 codepoint);
+UINT32 GfxUiTextWidthCountForFace(const GFX_FONT_FACE *face,
+                                   const UINT16 *text, UINT32 count);
+UINT32 GfxUiTextFitCountForFace(const GFX_FONT_FACE *face,
+                                 const UINT16 *text, UINT32 count,
+                                 UINT32 max_width, UINT32 *width_out);
 
 
 #endif /* _SVINDOWS_UIFONT_H_ */

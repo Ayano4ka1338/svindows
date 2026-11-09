@@ -109,6 +109,10 @@ static void W32kRasterText(INT32 x, INT32 baseline, const WCHAR *text,
 
 static void W32kPresentDamage(INT32 x, INT32 y, INT32 width, INT32 height)
 {
+    /* Once Xorg is connected it owns the physical framebuffer. Win32 windows
+     * are presented only through their managed X11 clients. */
+    if (W32kXorgConnected())
+        return;
     for (INT32 row = y; row < y + height; ++row)
         W32kCopyPixels(GfxFramebuffer.Base + (UINT64)row * (GfxFramebuffer.Pitch / 4) + x,
                g_w32k_composite + (UINT64)row * g_w32k_composite_w + x,

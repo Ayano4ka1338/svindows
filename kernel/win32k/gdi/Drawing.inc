@@ -48,12 +48,36 @@ UINT64 NtGdiCreatePen(UINT64 *a)
     return handle;
 }
 
-/* HFONT NtGdiHfontCreate(...): one bitmap font exists, so every logical font
- * maps to it. The handle still has to be a real GDI object, because gdi32
- * validates it before every text call. */
+/* HFONT NtGdiHfontCreate(LOGFONTW *): preserve the logical font metrics on
+ * the GDI object. The rasterizer selects the closest generated atlas size, so
+ * drawing and text measurement use the same font height. */
 UINT64 NtGdiHfontCreate(UINT64 *a)
 {
-    return gdi_allocate(GDI_TYPE_FONT, 0, NULL);
+    W32K_OBJECT *object = NULL;
+    UINT64 handle = gdi_allocate(GDI_TYPE_FONT, 0, &object);
+    if (!handle) return 0;
+    object->u.Font.Height = 12;
+    object->u.Font.Width = 0;
+    object->u.Font.Weight = 400;
+    if (a[0]) {
+        struct { INT32 Height, Width, Escapement, Orientation, Weight;
+                 UINT8 Italic, Underline, StrikeOut, CharSet, OutPrecision;
+                 UINT8 ClipPrecision, Quality, PitchAndFamily;
+                 UINT16 FaceName[32]; } font;
+        if (!MmProbeForRead(a[0], sizeof(font))) {
+            gdi_free(handle);
+            return 0;
+        }
+        memcpy(&font, (const void *)a[0], sizeof(font));
+        object->u.Font.Height = font.Height;
+        object->u.Font.Width = font.Width;
+        object->u.Font.Weight = font.Weight ? font.Weight : 400;
+        object->u.Font.Italic = font.Italic;
+        object->u.Font.Underline = font.Underline;
+        object->u.Font.StrikeOut = font.StrikeOut;
+        object->u.Font.CharSet = font.CharSet;
+    }
+    return handle;
 }
 
 UINT64 NtGdiCreateRectRgn(UINT64 *a)
@@ -301,6 +325,56 @@ UINT64 NtGdiBitBlt(UINT64 *a)
     return 1;
 }
 
+/* BOOL NtGdiStretchBlt(HDC dst, int x, int y, int w, int h, HDC src,
+ *                      int sx, int sy, int sw, int sh, DWORD rop)
+ * COLORONCOLOR is the default stretch mode: sample the corresponding source
+ * pixel for each destination pixel and apply normal DC clipping/composition. */
+UINT64 NtGdiStretchBlt(UINT64 *a)
+{
+    W32K_DC *dst = dc_from_handle(a[0]);
+    W32K_DC *src = dc_from_handle(a[5]);
+    INT32 x = (INT32)a[1], y = (INT32)a[2];
+    INT32 width = (INT32)a[3], height = (INT32)a[4];
+    INT32 sx = (INT32)a[6], sy = (INT32)a[7];
+    INT32 source_width = (INT32)a[8], source_height = (INT32)a[9];
+    if (!dst || !dst->Surface || !src || !src->Surface ||
+        width <= 0 || height <= 0 || source_width <= 0 || source_height <= 0 ||
+        width > 8192 || height > 8192 || source_width > 8192 ||
+        source_height > 8192 || (UINT32)a[10] != 0x00CC0020)
+        return 0;
+
+    INT32 clipped_x = x, clipped_y = y, clipped_width = width,
+          clipped_height = height;
+    if (!dc_clip(dst, &clipped_x, &clipped_y, &clipped_width,
+                 &clipped_height))
+        return 1;
+    INT32 origin_x = dst->OrgX + x, origin_y = dst->OrgY + y;
+    for (INT32 row = 0; row < clipped_height; ++row) {
+        INT32 dest_y = clipped_y + row;
+        INT32 original_y = dest_y - origin_y;
+        INT32 source_y = src->OrgY + sy +
+            (INT32)((INT64)original_y * source_height / height);
+        if (source_y < 0 || source_y >= (INT32)src->Surface->Height) continue;
+        for (INT32 col = 0; col < clipped_width; ++col) {
+            INT32 dest_x = clipped_x + col;
+            INT32 original_x = dest_x - origin_x;
+            INT32 source_x = src->OrgX + sx +
+                (INT32)((INT64)original_x * source_width / width);
+            if (source_x < 0 || source_x >= (INT32)src->Surface->Width ||
+                (dst->Surface->IsScreen && dst->Hwnd &&
+                 !W32kScreenPixelVisible(dst->Hwnd, dest_x, dest_y)))
+                continue;
+            UINT32 pixel = src->Surface->Bits[(UINT32)source_y *
+                                               src->Surface->Stride +
+                                               (UINT32)source_x];
+            surface_pixel(dst->Surface, dest_x, dest_y, pixel);
+        }
+    }
+    dc_damage(dst, clipped_x, clipped_y, clipped_width, clipped_height);
+    dc_present(dst);
+    return 1;
+}
+
 /* Copy an RGB software surface into a DC's client rectangle. The service is
  * fast path for copying a user RGB surface into a window DC. */
 /* Private readback for a DIB section after native raster operations. */
@@ -450,7 +524,13 @@ UINT64 NtGdiRectangle(UINT64 *a)
 /* Services: text                                                      */
 /* ------------------------------------------------------------------ */
 
-#define GDI_FONT_HEIGHT GFX_FONT_H
+static const GFX_FONT_FACE *dc_font_face(const W32K_DC *dc)
+{
+    W32K_OBJECT *font = dc && dc->SelectedFont ?
+        gdi_object(dc->SelectedFont, GDI_TYPE_FONT) : NULL;
+    return GfxUiFontForHeight(font ? font->u.Font.Height :
+                              SvUiFontUiFace.EmPixels);
+}
 
 /* BOOL NtGdiExtTextOutW(HDC, int x, int y, UINT flags, const RECT *clip,
  *                       const WCHAR *text, int count, const INT *dx,
@@ -480,10 +560,12 @@ UINT64 NtGdiExtTextOutW(UINT64 *a)
     UINT32 bg = dc_bk_color(a[0]);
     BOOLEAN opaque = (flags & 0x0002) != 0;
     const INT32 *dx = (const INT32 *)a[7];
+    const GFX_FONT_FACE *face = dc_font_face(dc);
 
     if (opaque)
-        dc_fill(dc, x, y, (INT32)GfxUiTextWidthCountW(text, (UINT32)count),
-                GDI_FONT_HEIGHT, bg);
+        dc_fill(dc, x, y,
+                (INT32)GfxUiTextWidthCountForFace(face, text, (UINT32)count),
+                face->LineHeight, bg);
 
     INT32 pen = x;
     for (INT32 i = 0; i < count; i++) {
@@ -491,7 +573,7 @@ UINT64 NtGdiExtTextOutW(UINT64 *a)
          * is how DrawText aligns and letter-spaces runs. */
         INT32 step = (dx && MmProbeForRead((UINT64)(dx + i), sizeof(INT32)))
                          ? dx[i]
-                         : (INT32)GfxUiCharWidth(text[i]);
+                         : (INT32)GfxUiCharWidthForFace(face, text[i]);
         dc_glyph(dc, pen, y, text[i], fg, bg, opaque);
         pen += step;
     }
@@ -506,7 +588,8 @@ UINT64 NtGdiExtTextOutW(UINT64 *a)
  * instead of a placeholder. */
 UINT64 NtGdiGetTextMetricsW(UINT64 *a)
 {
-    if (!dc_from_handle(a[0]))
+    W32K_DC *dc = dc_from_handle(a[0]);
+    if (!dc)
         return 0;
     UINT8 *out = (UINT8 *)a[1];
     UINT32 size = (UINT32)a[2];
@@ -516,16 +599,19 @@ UINT64 NtGdiGetTextMetricsW(UINT64 *a)
         return 0;
     memset(out, 0, size);
 
-    INT32 ascent = GfxUiAscent(), descent = GfxUiDescent();
+    const GFX_FONT_FACE *face = dc_font_face(dc);
+    W32K_OBJECT *font = dc->SelectedFont ?
+        gdi_object(dc->SelectedFont, GDI_TYPE_FONT) : NULL;
+    INT32 ascent = face->Ascent, descent = face->Descent;
     INT32 *metrics = (INT32 *)out;
-    metrics[0] = ascent + descent;     /* tmHeight            */
+    metrics[0] = face->LineHeight;     /* tmHeight            */
     metrics[1] = ascent;               /* tmAscent            */
     metrics[2] = descent;              /* tmDescent           */
     metrics[3] = 0;                    /* tmInternalLeading   */
     metrics[4] = 0;                    /* tmExternalLeading   */
-    metrics[5] = GfxUiCharWidth('x');  /* tmAveCharWidth      */
-    metrics[6] = GfxUiCharWidth('W');  /* tmMaxCharWidth      */
-    metrics[7] = 400;                  /* tmWeight (normal)   */
+    metrics[5] = GfxUiCharWidthForFace(face, 'x'); /* tmAveCharWidth */
+    metrics[6] = GfxUiCharWidthForFace(face, 'W'); /* tmMaxCharWidth */
+    metrics[7] = font ? font->u.Font.Weight : 400;
     metrics[8] = 0;                    /* tmOverhang          */
     metrics[9] = 96;                   /* tmDigitizedAspectX  */
     metrics[10] = 96;                  /* tmDigitizedAspectY  */
@@ -537,20 +623,29 @@ UINT64 NtGdiGetTextMetricsW(UINT64 *a)
      * family: what the atlas actually is. */
     out[0x37] = 0x21;                  /* tmPitchAndFamily    */
     out[0x38] = 0x01;                  /* tmCharSet: DEFAULT  */
+    if (font) {
+        out[0x34] = font->u.Font.Italic;
+        out[0x35] = font->u.Font.Underline;
+        out[0x36] = font->u.Font.StrikeOut;
+        out[0x38] = font->u.Font.CharSet;
+    }
     return 1;
 }
 
-static void gdi_text_size(const UINT16 *text, INT32 count, INT32 *width,
+static void gdi_text_size(const W32K_DC *dc, const UINT16 *text, INT32 count, INT32 *width,
                           INT32 *height)
 {
-    *width = (INT32)GfxUiTextWidthCountW(text, (UINT32)(count < 0 ? 0 : count));
-    *height = GfxUiAscent() + GfxUiDescent();
+    const GFX_FONT_FACE *face = dc_font_face(dc);
+    *width = (INT32)GfxUiTextWidthCountForFace(face, text,
+                                               (UINT32)(count < 0 ? 0 : count));
+    *height = face->LineHeight;
 }
 
 /* BOOL NtGdiGetTextExtent(HDC, const WCHAR *, int count, SIZE *out, UINT) */
 UINT64 NtGdiGetTextExtent(UINT64 *a)
 {
-    if (!dc_from_handle(a[0]))
+    W32K_DC *dc = dc_from_handle(a[0]);
+    if (!dc)
         return 0;
     const UINT16 *text = (const UINT16 *)a[1];
     INT32 count = (INT32)a[2];
@@ -562,7 +657,7 @@ UINT64 NtGdiGetTextExtent(UINT64 *a)
     if (count && (!text || !MmProbeForRead((UINT64)text,
                                            (SIZE_T)count * sizeof(UINT16))))
         return 0;
-    gdi_text_size(text, count, &out[0], &out[1]);
+    gdi_text_size(dc, text, count, &out[0], &out[1]);
     return 1;
 }
 
@@ -570,7 +665,8 @@ UINT64 NtGdiGetTextExtent(UINT64 *a)
  *                           ULONG *fit, ULONG *dx, SIZE *size, FLONG) */
 UINT64 NtGdiGetTextExtentExW(UINT64 *a)
 {
-    if (!dc_from_handle(a[0]))
+    W32K_DC *dc = dc_from_handle(a[0]);
+    if (!dc)
         return 0;
     const UINT16 *text = (const UINT16 *)a[1];
     UINT32 count = (UINT32)a[2];
@@ -584,18 +680,20 @@ UINT64 NtGdiGetTextExtentExW(UINT64 *a)
     UINT32 *dx = (UINT32 *)a[5];
     INT32 *size = (INT32 *)a[6];
 
+    const GFX_FONT_FACE *face = dc_font_face(dc);
     UINT32 partial = 0;
-    UINT32 fitting = GfxUiTextFitCountW(text, count, max_extent, &partial);
+    UINT32 fitting = GfxUiTextFitCountForFace(face, text, count,
+                                               max_extent, &partial);
     if (dx && MmProbeForWrite((UINT64)dx, (SIZE_T)count * sizeof(UINT32))) {
         UINT32 pen = 0;
         for (UINT32 i = 0; i < count; i++) {
-            pen += GfxUiCharWidth(text[i]);
+            pen += GfxUiCharWidthForFace(face, text[i]);
             dx[i] = pen;
         }
     }
     if (fit && MmProbeForWrite((UINT64)fit, sizeof(UINT32)))
         *fit = fitting;
     if (size && MmProbeForWrite((UINT64)size, 8))
-        gdi_text_size(text, (INT32)count, &size[0], &size[1]);
+        gdi_text_size(dc, text, (INT32)count, &size[0], &size[1]);
     return 1;
 }
