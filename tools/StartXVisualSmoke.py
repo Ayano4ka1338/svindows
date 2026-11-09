@@ -49,16 +49,16 @@ def qmp_screendump(path, screenshot, timeout, keyboard_probe=False):
              "arguments": {"filename": str(screenshot)}})
         if not keyboard_probe:
             return
-        # Move to the upper-left corner, then into the xterm client area
+        # Move to the upper-right corner, then into the xterm client area
         # before clicking. A click at (0, 0) lands on the root window, so
         # following it with key events would never exercise the shell.
-        for _ in range(5):
+        for _ in range(12):
             run({"execute": "input-send-event", "arguments": {"events": [
-                {"type": "rel", "data": {"axis": "x", "value": -100}},
-                {"type": "rel", "data": {"axis": "y", "value": -60}},
+                {"type": "rel", "data": {"axis": "x", "value": 100}},
+                {"type": "rel", "data": {"axis": "y", "value": -100}},
             ]}})
         run({"execute": "input-send-event", "arguments": {"events": [
-            {"type": "rel", "data": {"axis": "x", "value": 80}},
+            {"type": "rel", "data": {"axis": "x", "value": -80}},
             {"type": "rel", "data": {"axis": "y", "value": 80}},
         ]}})
         for down in (True, False):
@@ -141,9 +141,9 @@ def main():
                                args.keyboard_probe)
                 if args.keyboard_probe:
                     read_until(r"loaded 'C:\\usr\\bin\\xeyes'", 20)
-            root_dark = ppm_pixel(screenshot, 1000, 100)
-            root_light = ppm_pixel(screenshot, 1001, 101)
-            terminal = ppm_pixel(screenshot, 100, 100)
+            root_dark = ppm_pixel(screenshot, 100, 100)
+            root_light = ppm_pixel(screenshot, 101, 101)
+            terminal = ppm_pixel(screenshot, 1100, 100)
             rendered = output.decode("utf-8", errors="replace")
             if (root_dark != (160, 160, 160) or
                     root_light != (192, 192, 192) or

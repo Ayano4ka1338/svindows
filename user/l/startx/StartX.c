@@ -172,9 +172,14 @@ static long start_xterm(void)
     if (x11_hold_fd >= 0) linux_syscall3(3, x11_hold_fd, 0, 0);
 
     static const char path[] = "/usr/bin/xterm";
+    /* Leave room for Win32 clients that were mapped during Xorg startup. */
+    static const char geometry_option[] = "-geometry";
+    static const char geometry[] = "80x24-0+0";
     static const char exec_option[] = "-e";
     static const char shell[] = "/usr/bin/cmd";
-    static const char *const arguments[] = {path, exec_option, shell, 0};
+    static const char *const arguments[] = {
+        path, geometry_option, geometry, exec_option, shell, 0
+    };
     static const char display[] = "DISPLAY=:0";
     static const char home[] = "HOME=/";
     static const char search_path[] = "PATH=/usr/bin:/bin";
