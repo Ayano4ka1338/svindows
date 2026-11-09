@@ -200,6 +200,7 @@ __declspec(dllimport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
 #define WM_GETTEXT     0x000Du
 #define WM_GETTEXTLENGTH 0x000Eu
 #define WM_PAINT       0x000Fu
+#define WM_CTLCOLORSTATIC 0x0138u
 #define WM_CLOSE       0x0010u
 #define WM_QUIT        0x0012u
 #define WM_ERASEBKGND  0x0014u

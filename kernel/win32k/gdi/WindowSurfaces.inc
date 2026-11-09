@@ -9,6 +9,7 @@ static void dc_dispose_window(W32K_DC *dc)
     void *storage = dc->WindowStorage;
     dc->WindowStorage = NULL;
     dc->WindowPresented = FALSE;
+    dc->HasTransparentPixels = FALSE;
     dc->DeviceSurface.Bits = NULL;
     dc->PresentedSurface.Bits = NULL;
     if (storage) ExFreePool(storage);
@@ -30,7 +31,8 @@ static BOOLEAN dc_prepare_window(W32K_DC *dc)
     UINT32 *storage = pixels ? ExAllocatePoolWithTag(NonPagedPool,
                                   pixels * sizeof(UINT32) * 2, 'fniW') : NULL;
     if (pixels && !storage) return FALSE;
-    UINT32 background = gdi_pixel(0x00FFFFFF);
+    UINT32 background = dc->HasTransparentPixels ? gdi_inverse_alpha_mask() :
+                                                  gdi_pixel(0x00FFFFFF);
     for (SIZE_T i = 0; i < pixels * 2; ++i) storage[i] = background;
     W32K_SURFACE drawing = {storage, (UINT32)width, (UINT32)height,
                             (UINT32)width, FALSE};
@@ -119,6 +121,19 @@ BOOLEAN W32kEndWindowPaint(UINT64 hdc, UINT64 hwnd)
     return TRUE;
 }
 
+UINT64 NtGdiClearWindowBackground(UINT64 *a)
+{
+    W32K_DC *dc = dc_from_handle(a[0]);
+    UINT32 mask = gdi_inverse_alpha_mask();
+    if (!dc || !dc->Hwnd || !dc->Painting || !dc->Surface->Bits ||
+        !mask || (mask >> __builtin_ctz(mask)) != 255)
+        return 0;
+    dc->HasTransparentPixels = TRUE;
+    surface_fill(dc->Surface, 0, 0, dc->ClipW, dc->ClipH, mask);
+    dc_damage(dc, 0, 0, dc->ClipW, dc->ClipH);
+    return 1;
+}
+
 /* Composition runs on the input worker as well as the owner process. Access
  * kernel rasters directly; never dereference a foreign process's DC_ATTR. */
 void W32kCopyWindowClient(UINT16 slot, UINT32 *target, UINT32 stride,
@@ -143,8 +158,22 @@ void W32kCopyWindowClient(UINT16 slot, UINT32 *target, UINT32 stride,
     INT32 right = x + width < cx + cw ? x + width : cx + cw;
     INT32 bottom = y + height < cy + ch ? y + height : cy + ch;
     if (right <= left || bottom <= top) return;
-    for (INT32 row = top; row < bottom; ++row)
-        W32kCopyPixels(target + (UINT64)row * stride + left,
-               surface->Bits + (UINT64)(row - cy) * surface->Stride + left - cx,
-               (SIZE_T)(right - left));
+    BOOLEAN transparent = object->u.Dc.HasTransparentPixels;
+    UINT32 mask = gdi_inverse_alpha_mask();
+    UINT32 shift = transparent ? __builtin_ctz(mask) : 0;
+    for (INT32 row = top; row < bottom; ++row) {
+        UINT32 *dst = target + (UINT64)row * stride + left;
+        const UINT32 *src = surface->Bits +
+            (UINT64)(row - cy) * surface->Stride + left - cx;
+        if (!transparent) {
+            W32kCopyPixels(dst, src, (SIZE_T)(right - left));
+            continue;
+        }
+        for (INT32 col = 0; col < right - left; ++col) {
+            UINT32 inverse = (src[col] & mask) >> shift;
+            if (!inverse) dst[col] = src[col];
+            else if (inverse < 255)
+                dst[col] = blend_pixel(src[col], dst[col], (UINT8)(255 - inverse));
+        }
+    }
 }

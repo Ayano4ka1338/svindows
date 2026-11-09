@@ -512,3 +512,4 @@ SYSCALL_STUB NtUserMenuBar,                  0x1F05
 
 SYSCALL_STUB NtUserWindowRelation,            0x1F06
 SYSCALL_STUB NtGdiCreatePatternBrush,         0x1F07
+SYSCALL_STUB NtGdiClearWindowBackground,     0x1F08

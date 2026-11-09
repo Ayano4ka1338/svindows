@@ -42,6 +42,7 @@ __declspec(dllimport) long NtAllocateVirtualMemory(HANDLE process,
 __declspec(dllimport) long NtFreeVirtualMemory(HANDLE process,
     void **base, ULONGLONG *size, ULONG free_type);
 __declspec(dllimport) UINT64 NtGdiCreatePatternBrush(HBITMAP bitmap);
+__declspec(dllimport) UINT64 NtGdiClearWindowBackground(HDC dc);
 __declspec(dllimport) UINT64 NtGdiCreateSolidBrush(COLORREF colour, ULONG unused);
 __declspec(dllimport) UINT64 NtGdiCreatePen(int style, int width, COLORREF colour,
                                             ULONG unused);
@@ -283,6 +284,11 @@ GDI32_API HFONT CreateFontIndirectW(const LOGFONTW *logical_font)
     return (HFONT)(ULONG_PTR)NtGdiHfontCreate(logical_font);
 }
 
+__declspec(dllexport) BOOL SvGdiClearWindowBackground(HDC dc)
+{
+    return NtGdiClearWindowBackground(dc) != 0;
+}
+
 GDI32_API HBRUSH CreatePatternBrush(HBITMAP bitmap)
 {
     if (object_type(bitmap) != SV_GDI_TYPE_BITMAP) return NULL;
@@ -488,6 +494,10 @@ GDI32_API HGDIOBJ GetStockObject(int index)
             cache[index] = remember_stock(CreateSolidBrush(colours[index]));
         }
         return cache[index];
+    case NULL_BRUSH:
+        if (!cache[index])
+            cache[index] = remember_stock((HGDIOBJ)(ULONG_PTR)NtGdiCreatePatternBrush(NULL));
+        return cache[index];
     case WHITE_PEN:
     case BLACK_PEN:
     case NULL_PEN:
@@ -510,10 +520,7 @@ GDI32_API HGDIOBJ GetStockObject(int index)
             cache[index] = remember_stock((HGDIOBJ)(ULONG_PTR)NtGdiHfontCreate(NULL));
         return cache[index];
     default:
-        /* NULL_BRUSH/HOLLOW_BRUSH: the kernel's brush object has no hollow flag
-         * (only a PS_NULL pen is hollow), so a hollow brush cannot be expressed
-         * and NULL is returned. DEFAULT_PALETTE, DC_BRUSH and DC_PEN have no
-         * object type in this build either. */
+        /* DEFAULT_PALETTE, DC_BRUSH and DC_PEN are not represented. */
         return NULL;
     }
 }

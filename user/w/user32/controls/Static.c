@@ -1,4 +1,7 @@
 #include "Control.h"
+
+__declspec(dllimport) BOOL SvGdiClearWindowBackground(HDC dc);
+
 LRESULT SvStaticMessage(SV_CONTROL *c, UINT msg, WPARAM wp, LPARAM lp)
 {
     if((msg==WM_LBUTTONDOWN||msg==0x203)&&(c->style&0x100)){SvControlNotify(c,msg==WM_LBUTTONDOWN?0:1);return 0;}
@@ -18,9 +21,19 @@ LRESULT SvStaticMessage(SV_CONTROL *c, UINT msg, WPARAM wp, LPARAM lp)
     PAINTSTRUCT ps; HDC dc = BeginPaint(c->hwnd, &ps);
     if (!dc) return 0;
     RECT r; GetClientRect(c->hwnd, &r);
-    SvControlFill(dc, 0, 0, r.right, r.bottom, SV_CONTROL_SURFACE);
     SelectObject(dc, c->font); SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, c->style & WS_DISABLED ? RGB(131,131,131) : RGB(0,0,0));
+    HBRUSH brush = (HBRUSH)SendMessageW(c->parent, WM_CTLCOLORSTATIC,
+                                      (WPARAM)dc, (LPARAM)c->hwnd);
+    if (!brush) {
+        SvControlFill(dc, 0, 0, r.right, r.bottom, SV_CONTROL_SURFACE);
+    } else if (brush == GetStockObject(NULL_BRUSH)) {
+        SvGdiClearWindowBackground(dc);
+    } else {
+        HGDIOBJ previous = SelectObject(dc, brush);
+        PatBlt(dc, 0, 0, r.right, r.bottom, PATCOPY);
+        if (previous) SelectObject(dc, previous);
+    }
     UINT flags = (c->style & 31) == SS_CENTER ? DT_CENTER : (c->style & 31) == SS_RIGHT ? DT_RIGHT : DT_LEFT;
     flags |= (c->style & 31) == SS_LEFTNOWORDWRAP || (c->style & 31) == SS_SIMPLE ? DT_SINGLELINE : DT_WORDBREAK;
     if (c->style & SS_NOPREFIX) flags |= DT_NOPREFIX;

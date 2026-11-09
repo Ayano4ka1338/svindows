@@ -61,6 +61,7 @@ typedef struct _W32K_DC {
     W32K_SURFACE  PresentedSurface; /* last completed window paint */
     void *WindowStorage;
     BOOLEAN WindowPresented;
+    BOOLEAN HasTransparentPixels;
     BOOLEAN Painting;
     BOOLEAN Dirty;
     INT32 DirtyLeft, DirtyTop, DirtyRight, DirtyBottom;
@@ -314,6 +315,13 @@ static void dc_pixel(W32K_DC *dc, INT32 x, INT32 y, UINT32 pixel)
         surface_pixel(dc->Surface, x, y, pixel);
 }
 
+/* Window pixels use the unused byte for inverse opacity; ordinary GDI
+ * pixels have zero there, so existing opaque raster operations still work. */
+static UINT32 gdi_inverse_alpha_mask(void)
+{
+    return ~GfxColor(255, 255, 255);
+}
+
 static UINT32 blend_pixel(UINT32 fg, UINT32 bg, UINT8 alpha)
 {
     UINT32 fr = (fg >> GfxFramebuffer.RedShift) & 0xff;
@@ -383,8 +391,18 @@ static void dc_glyph(W32K_DC *dc, INT32 x, INT32 y, UINT32 codepoint,
             UINT32 under = dc->Surface->Bits[(UINT32)clip_y *
                                              dc->Surface->Stride +
                                              (UINT32)px];
-            dc_pixel(dc, px, clip_y,
-                      blend_pixel(fg_pixel, under, (UINT8)coverage));
+            UINT32 pixel;
+            if (dc->HasTransparentPixels) {
+                UINT32 mask = gdi_inverse_alpha_mask();
+                UINT32 shift = __builtin_ctz(mask);
+                UINT32 old_alpha = 255 - ((under & mask) >> shift);
+                UINT32 alpha = coverage + (old_alpha * (255 - coverage) + 127) / 255;
+                pixel = blend_pixel(fg_pixel, under, (UINT8)(coverage * 255 / alpha));
+                pixel |= (255 - alpha) << shift;
+            } else {
+                pixel = blend_pixel(fg_pixel, under, (UINT8)coverage);
+            }
+            dc_pixel(dc, px, clip_y, pixel);
         }
     }
 }

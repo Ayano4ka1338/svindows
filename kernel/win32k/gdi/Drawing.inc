@@ -39,6 +39,12 @@ UINT64 NtGdiCreateSolidBrush(UINT64 *a)
 /* A pattern brush owns a snapshot. Its source bitmap can be deleted. */
 UINT64 NtGdiCreatePatternBrush(UINT64 *a)
 {
+    if (!a[0]) { /* Private ABI: the stock hollow brush has no bitmap. */
+        W32K_OBJECT *brush;
+        UINT64 handle = gdi_allocate(GDI_TYPE_BRUSH, 0, &brush);
+        if (handle) brush->u.Brush.Hollow = TRUE;
+        return handle;
+    }
     W32K_OBJECT *bitmap = gdi_object(a[0], GDI_TYPE_BITMAP);
     if (!bitmap) return 0;
     const W32K_SURFACE *source = &bitmap->u.Bitmap.Surface;

@@ -136,6 +136,7 @@ EXPORTS
     NtUserQueryWindow
     NtGdiReadUserBuffer
     NtGdiCreatePatternBrush
+    NtGdiClearWindowBackground
     NtUserMapWindowPoints
     NtUserClassLong
     NtUserSetWindowLongPtr
