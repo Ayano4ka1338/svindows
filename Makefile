@@ -535,21 +535,6 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	dd if=/dev/zero of=$(INITRD) bs=1M count=450 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
 	mcopy -i $(INITRD) $(CMD) ::CMD.EXE
-	mcopy -i $(INITRD) $(KERNEL32) ::KERNEL32.DLL
-	mcopy -i $(INITRD) $(NTDLL) ::NTDLL.DLL
-	mcopy -i $(INITRD) $(ADVAPI32) ::ADVAPI32.DLL
-	mcopy -i $(INITRD) $(MSVCRT) ::MSVCRT.DLL
-	mcopy -i $(INITRD) $(USER32) ::USER32.DLL
-	mcopy -i $(INITRD) $(GDI32) ::GDI32.DLL
-	mcopy -i $(INITRD) $(UXTHEME) ::UXTHEME.DLL
-	mcopy -i $(INITRD) $(COMCTL32) ::COMCTL32.DLL
-	mcopy -i $(INITRD) $(SHELL32) ::SHELL32.DLL
-	mcopy -i $(INITRD) $(SHLWAPI) ::SHLWAPI.DLL
-	mcopy -i $(INITRD) $(GDIPLUS) ::GDIPLUS.DLL
-	mcopy -i $(INITRD) $(OLEAUT32) ::OLEAUT32.DLL
-	mcopy -i $(INITRD) $(RPCRT4) ::RPCRT4.DLL
-	mcopy -i $(INITRD) $(WINMM) ::WINMM.DLL
-	mcopy -i $(INITRD) $(WINDOWSCODECS) ::WINDOWSCODECS.DLL
 	mmd -i $(INITRD) ::WINDOWS ::WINDOWS/SYSTEM32
 	if [ -n "$(WINDOWS_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS_FILES) ::WINDOWS/; fi
 	mcopy -i $(INITRD) $(KERNEL32) ::WINDOWS/SYSTEM32/KERNEL32.DLL

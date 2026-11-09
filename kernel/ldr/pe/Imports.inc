@@ -567,9 +567,27 @@ static UINT64 LdrpLoadModuleWorker(const char *name)
     if (existing)
         return existing;
 
-    void *buf;
-    SIZE_T size;
-    if (!NT_SUCCESS(FatLoadFile(name, &buf, &size, NULL))) {
+    void *buf = NULL;
+    SIZE_T size = 0;
+    NTSTATUS file_status = FatLoadFile(name, &buf, &size, NULL);
+    BOOLEAN has_path_separator = FALSE;
+    for (SIZE_T i = 0; name[i]; i++)
+        if (name[i] == '/' || name[i] == '\\')
+            has_path_separator = TRUE;
+    if (!NT_SUCCESS(file_status) && !has_path_separator) {
+        /* System DLLs live under the standard Windows system directory. Keep
+         * root lookup first for compatibility with legacy flat installations. */
+        static const char system_dir[] = "C:\\Windows\\System32\\";
+        char system_path[sizeof(system_dir) + 32];
+        SIZE_T name_length = strlen(name);
+        if (name_length < 32) {
+            memcpy(system_path, system_dir, sizeof(system_dir) - 1);
+            memcpy(system_path + sizeof(system_dir) - 1, name,
+                   name_length + 1);
+            file_status = FatLoadFile(system_path, &buf, &size, NULL);
+        }
+    }
+    if (!NT_SUCCESS(file_status)) {
         KeLog("[ldr]  dependency '%s' not found on disk\n", name);
         LdrpCurrentContext()->LoadStatus = STATUS_DLL_NOT_FOUND;
         return 0;
