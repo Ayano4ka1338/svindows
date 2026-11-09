@@ -176,9 +176,9 @@ def stage(destination: Path) -> None:
     if not binary.is_file():
         raise RuntimeError("Alpine curl package did not contain /usr/bin/curl")
     binary.chmod(0o755)
-    if not (root / "LIB/ld-musl-x86_64.so.1").is_file():
+    if not (root / "lib/ld-musl-x86_64.so.1").is_file():
         raise RuntimeError("Alpine musl interpreter was not staged")
-    if not (root / "LIB/libcurl.so.4").is_file():
+    if not (root / "lib/libcurl.so.4").is_file():
         raise RuntimeError("Alpine libcurl.so.4 was not staged")
     if not (root / "etc/ssl/cert.pem").is_file() and not (
             root / "etc/ssl/certs/ca-certificates.crt").is_file():
