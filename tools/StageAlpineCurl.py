@@ -165,7 +165,7 @@ def stage(destination: Path) -> None:
                     output = root / "usr/bin/curl"
                 elif ((path.startswith("lib/") or path.startswith("usr/lib/"))
                       and path.count("/") <= 2 and ".so" in Path(path).name):
-                    output = root / "LIB" / Path(path).name
+                    output = root / "lib" / Path(path).name
                 elif path in ("etc/ssl/cert.pem", "etc/ssl/certs/ca-certificates.crt"):
                     output = root / path
                 if output is not None:

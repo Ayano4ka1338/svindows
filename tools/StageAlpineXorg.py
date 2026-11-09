@@ -77,7 +77,7 @@ def stage(destination: Path) -> None:
                     output = root / path
                 elif ((path.startswith("lib/") or path.startswith("usr/lib/"))
                       and path.count("/") <= 2 and ".so" in Path(path).name):
-                    output = root / "LIB" / Path(path).name
+                    output = root / "lib" / Path(path).name
                 elif path.startswith(
                         "usr/lib/xorg/modules/") and path.endswith(".so"):
                     output = root / path
@@ -151,8 +151,8 @@ def stage(destination: Path) -> None:
     # unpack-only image needs the same index for xterm's core bitmap font.
     font_dir = root / "usr/share/fonts/misc"
     environment = os.environ.copy()
-    environment["LD_LIBRARY_PATH"] = str(root / "LIB")
-    loader = root / "LIB/ld-musl-x86_64.so.1"
+    environment["LD_LIBRARY_PATH"] = str(root / "lib")
+    loader = root / "lib/ld-musl-x86_64.so.1"
     font_indexer = destination / "tools/mkfontscale"
     loader.chmod(0o755)
     font_indexer.chmod(0o755)
@@ -161,7 +161,7 @@ def stage(destination: Path) -> None:
     if not (font_dir / "fonts.dir").is_file():
         raise ValueError("bitmap font index was not generated")
 
-    if not (root / "usr/bin/xorg").is_file() or not (root / "LIB" /
+    if not (root / "usr/bin/xorg").is_file() or not (root / "lib" /
             "ld-musl-x86_64.so.1").is_file():
         raise ValueError("Xorg or the musl interpreter is missing")
     (destination / ".ready").write_text("Alpine v3.22 x86_64 Xorg ELF\n")
