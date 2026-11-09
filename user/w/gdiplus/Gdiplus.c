@@ -6,7 +6,7 @@ typedef int GpStatus;
 typedef struct { ULONG Version; void *DebugEventCallback; BOOL SuppressBackgroundThread;
                  BOOL SuppressExternalCodecs; } GdiplusStartupInput;
 typedef struct { int type; HBITMAP bitmap; int width, height, owns_bitmap; } GP_IMAGE;
-typedef struct { HDC hdc; } GP_GRAPHICS;
+typedef struct { HDC hdc; BOOL owns_dc; } GP_GRAPHICS;
 typedef struct { HPEN pen; } GP_PEN;
 typedef struct { HBRUSH brush; } GP_BRUSH;
 typedef struct { LONG bmType, bmWidth, bmHeight; LONG bmWidthBytes;
@@ -78,6 +78,7 @@ __declspec(dllexport) GpStatus GdipCreateFromHDC(HDC hdc, HANDLE *out)
     GP_GRAPHICS *g = (GP_GRAPHICS *)gp_alloc(sizeof(*g));
     if (!g) return GP_OUT_OF_MEMORY;
     g->hdc = hdc;
+    g->owns_dc = 0;
     *out = g;
     return GP_OK;
 }
@@ -93,6 +94,7 @@ __declspec(dllexport) GpStatus GdipGetImageGraphicsContext(HANDLE image,
     GP_GRAPHICS *g = (GP_GRAPHICS *)gp_alloc(sizeof(*g));
     if (!g) { (void)DeleteDC(dc); return GP_OUT_OF_MEMORY; }
     g->hdc = dc;
+    g->owns_dc = 1;
     gp_trace("[gp] graphics ready");
     *out = g;
     return GP_OK;
@@ -102,7 +104,7 @@ __declspec(dllexport) GpStatus GdipDeleteGraphics(HANDLE graphics)
 {
     GP_GRAPHICS *g = gp_graphics(graphics);
     if (!g) return GP_INVALID_PARAMETER;
-    (void)DeleteDC(g->hdc);
+    if (g->owns_dc) (void)DeleteDC(g->hdc);
     (void)GlobalFree(g);
     return GP_OK;
 }
