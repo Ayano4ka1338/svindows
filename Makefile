@@ -613,12 +613,12 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(PING) ::USR/BIN/PING
 	mcopy -i $(INITRD) $(PING) ::USR/BIN/PING.ELF
 	mcopy -i $(INITRD) $(CURL_HTTP) ::USR/BIN/CURLHTTP.ELF
-	mmd -i $(INITRD) ::DEV ::DEV/PTS
-	mmd -i $(INITRD) ::TMP ::TEMP
+	mmd -i $(INITRD) ::dev ::dev/pts
+	mmd -i $(INITRD) ::tmp ::temp
 	# Give POSIX programs a real HOME rather than leaving HOME unset.
-	mmd -i $(INITRD) ::HOME ::HOME/USER ::HOME/USER/.CONFIG ::HOME/USER/.CONFIG/FEH
+	mmd -i $(INITRD) ::home ::home/user ::home/user/.config ::home/user/.config/feh
 	# Keep the feh smoke-test image in the user's home directory.
-	mcopy -i $(INITRD) other/Logo_small.png ::HOME/USER/LOGO.PNG
+	mcopy -i $(INITRD) other/Logo_small.png ::home/user/LOGO.PNG
 	if [ -n "$(DOOM_FILES)" ]; then \
 	    mmd -i $(INITRD) ::DOOM && \
 	    mcopy -i $(INITRD) $(DOOM_FILES) ::DOOM/ && \
@@ -627,7 +627,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	# Xorg writes its default log to /var/log/Xorg.0.log; the Alpine package
 	# owns /var/log, so the emulated C: root must provide it. FAT mirrors the
 	# Linux path /var/log as C:\var\log.
-	for d in VAR VAR/LOG VAR/CACHE VAR/CACHE/APK; do \
+	for d in var var/log var/cache var/cache/apk; do \
 	    mdir -i $(INITRD) "::$$d" >/dev/null 2>&1 || mmd -i $(INITRD) "::$$d"; \
 	done
 	if [ -n "$(IMAGE_PROGRAM)" ]; then mcopy -i $(INITRD) $(IMAGE_PROGRAM) ::$(PROGRAM); fi
