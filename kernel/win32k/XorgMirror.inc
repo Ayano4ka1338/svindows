@@ -471,7 +471,6 @@ void W32kXorgWorker(PVOID context)
     W32K_XORG *x = &g_w32k_xorg;
     UINT32 last_sequence = (UINT32)-1;
     UINT64 retry_at = 0;
-    UINT64 present_after = 0;
     for (;;) {
         if (!LinuxLocalConnectable(display, sizeof(display) - 1)) {
             if (x->Socket)
@@ -492,15 +491,10 @@ void W32kXorgWorker(PVOID context)
                 continue;
             }
             last_sequence = (UINT32)-1;
-            /* Xorg becomes connectable before startx launches TWM and xterm.
-             * Let those clients map first so the Win32 clients start above
-             * them in the root stacking order. */
-            present_after = KeGetTickCount() + 600;
         }
         W32kXEvents(x);
         UINT32 sequence = __sync_fetch_and_add(&g_w32k_xorg_frame_sequence, 0);
-        UINT64 now = KeGetTickCount();
-        if (now >= present_after && sequence != last_sequence) {
+        if (sequence != last_sequence) {
             if (!W32kXPresent(x)) {
                 KeLog("[win32k-x11] Xorg presentation stopped\n");
                 W32kXClose(x);
