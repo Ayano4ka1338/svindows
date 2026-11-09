@@ -353,6 +353,22 @@ __declspec(dllexport) BOOL GlobalUnlock(void *h)
     return 1;
 }
 
+/* LocalAlloc currently exposes fixed heap blocks for all allocation flags. */
+__declspec(dllexport) void *LocalLock(void *h)
+{
+    if (!h || !HeapValidate(GetProcessHeap(), 0, h)) {
+        SetLastError(6);
+        return 0;
+    }
+    return h;
+}
+
+__declspec(dllexport) BOOL LocalUnlock(void *h)
+{
+    SetLastError(LocalLock(h) ? 158 : 6); /* ERROR_NOT_LOCKED or INVALID_HANDLE */
+    return 0;
+}
+
 __declspec(dllexport) void *LocalReAlloc(void *h, SIZE_T bytes, UINT flags)
 {
     if (!h)
