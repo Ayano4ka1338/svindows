@@ -658,6 +658,115 @@ __declspec(dllexport) int FindStringOrdinal(DWORD find_flags,
     return -1;
 }
 
+/* Search flags used by the Win32 editor. Comparison shares the same
+ * case mapping as CompareStringW; locale-specific collation is unavailable. */
+__declspec(dllexport) int FindNLSString(DWORD locale, DWORD flags,
+                                        const WCHAR *source, int source_len,
+                                        const WCHAR *value, int value_len,
+                                        int *found_len)
+{
+    enum { STARTS_WITH = 0x100000, ENDS_WITH = 0x200000,
+           FROM_START = 0x400000, FROM_END = 0x800000 };
+    DWORD direction = flags & 0xf00000;
+    if (flags & ~0xf00001u ||
+        (direction && (direction & (direction - 1)))) {
+        SetLastError(1004); /* ERROR_INVALID_FLAGS */
+        return -1;
+    }
+    if (!source || !value || source_len < -1 || value_len < -1 ||
+        !source_len || !value_len) {
+        SetLastError(87);
+        return -1;
+    }
+    if (source_len == -1) source_len = lstrlenW(source);
+    if (value_len == -1) value_len = lstrlenW(value);
+    SetLastError(0);
+    if (value_len == 0 || value_len > source_len) return -1;
+    int last = source_len - value_len;
+    int backward = direction == FROM_END || direction == ENDS_WITH;
+    for (int pos = backward ? last : 0; ; pos += backward ? -1 : 1) {
+        if (CompareStringW(locale, flags & 1, source + pos, value_len,
+                           value, value_len) == 2) {
+            if (found_len) *found_len = value_len;
+            return pos;
+        }
+        if (direction == STARTS_WITH || direction == ENDS_WITH ||
+            pos == (backward ? 0 : last)) return -1;
+    }
+}
+
+static DWORD fold_decimal_digit(DWORD codepoint)
+{
+    /* Each Unicode decimal digit set contains ten consecutive code points. */
+    static const DWORD zeroes[] = {
+        0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66,
+        0x0be6, 0x0c66, 0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20,
+        0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+        0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0,
+        0xa9f0, 0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x10d40, 0x11066,
+        0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0, 0x11650, 0x116c0,
+        0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50,
+        0x11da0, 0x11de0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70,
+        0x1ccf0, 0x1d7ce, 0x1d7d8, 0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0,
+        0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+    };
+    if (codepoint < 128) return codepoint;
+    for (unsigned i = 0; i < sizeof(zeroes) / sizeof(*zeroes); ++i)
+        if (codepoint - zeroes[i] < 10)
+            return '0' + codepoint - zeroes[i];
+    return codepoint;
+}
+
+__declspec(dllexport) int FoldStringW(DWORD flags, const WCHAR *source,
+                                      int length, WCHAR *dest, int capacity)
+{
+    if (flags != 0x80) { /* MAP_FOLDDIGITS */
+        SetLastError(1004);
+        return 0;
+    }
+    if (!source || length < -1 || !length || capacity < 0 ||
+        (!dest && capacity)) {
+        SetLastError(87);
+        return 0;
+    }
+    if (length == -1) length = lstrlenW(source) + 1;
+
+    /* First determine the output size. Folding supplementary digits can
+     * shorten the string, so a forward in-place copy is safe. */
+    int written = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        written = 0;
+        for (int i = 0; i < length; ) {
+            DWORD ch = source[i];
+            int units = 1;
+            if (ch >= 0xd800 && ch <= 0xdbff && i + 1 < length &&
+                source[i + 1] >= 0xdc00 && source[i + 1] <= 0xdfff) {
+                ch = 0x10000 + ((ch - 0xd800) << 10) + (source[i + 1] - 0xdc00);
+                units = 2;
+            }
+            DWORD folded = fold_decimal_digit(ch);
+            if (folded == ch && units == 2) {
+                WCHAR trail = source[i + 1];
+                if (pass) {
+                    dest[written] = source[i];
+                    dest[written + 1] = trail;
+                }
+                written += 2;
+            } else {
+                if (pass) dest[written] = (WCHAR)folded;
+                ++written;
+            }
+            i += units;
+        }
+        if (!capacity) return written;
+        if (written > capacity) {
+            SetLastError(122);
+            return 0;
+        }
+    }
+    return written;
+}
+
 static int wide_ieq(const WCHAR *a, const WCHAR *b)
 {
     while (*a && *b) {
