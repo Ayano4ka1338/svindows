@@ -7,7 +7,7 @@ HOSTCC  ?= clang
 CONFIG ?= release
 FAT_FAULT_AFTER ?= -1
 ifeq ($(CONFIG),release)
-KERNEL_OPT := -O2
+KERNEL_OPT := -O2 -DSVINDOWS_RELEASE
 USER_OPT   := -O2
 else ifeq ($(CONFIG),debug)
 KERNEL_OPT := -Og

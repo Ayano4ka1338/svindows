@@ -74,6 +74,13 @@ static ALWAYS_INLINE void KiRestoreFpuState(const void *area)
 void KeLogInit(void);
 int  KeVLog(const char *fmt, va_list ap);
 int  KeLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* High frequency diagnostics must not stall release builds on the UART. */
+#ifdef SVINDOWS_RELEASE
+#define KeTrace(...) do { if (0) KeLog(__VA_ARGS__); } while (0)
+#else
+#define KeTrace KeLog
+#endif
+
 
 /* Familiar spellings used throughout NT-style code. */
 #define DbgPrint  KeLog

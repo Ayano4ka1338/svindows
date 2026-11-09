@@ -525,7 +525,7 @@ static UINT64 NtAllocateVirtualMemory(UINT64 *a)
     *base_ptr = (PVOID)base;
     *size_ptr = size;
 
-    KeLog("[user] NtAllocateVirtualMemory(%lu) -> %p\n",
+    KeTrace("[user] NtAllocateVirtualMemory(%lu) -> %p\n",
           (unsigned long)size, (void *)base);
     return (UINT64)STATUS_SUCCESS;
 }
@@ -1286,7 +1286,7 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
         !seen_services[number]) {
         seen_services[number] = 1;
         PKTHREAD caller = KeGetCurrentThread();
-        KeLog("[user] first win32u service 0x%lx (tid %lu)\n",
+        KeTrace("[user] first win32u service 0x%lx (tid %lu)\n",
               (unsigned long)number,
               caller ? (unsigned long)caller->ThreadId : 0ul);
     }

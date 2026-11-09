@@ -166,7 +166,7 @@ static BOOLEAN pool_grow(SIZE_T need)
         return FALSE;
     }
     g_heap_end += want;
-    KeLog("[ex]   grow +%lu KiB -> arena %lu KiB (in-use %lu)\n",
+    KeTrace("[ex]   grow +%lu KiB -> arena %lu KiB (in-use %lu)\n",
           (unsigned long)(want >> 10),
           (unsigned long)((g_heap_end - MM_KERNEL_HEAP_BASE) >> 10),
           (unsigned long)g_bytes_in_use);

@@ -1799,7 +1799,7 @@ NTSTATUS FatStoreFile(const char *name, const void *buffer, SIZE_T size,
         KeLog("[io]   warning: old FAT chain cleanup failed for '%s'\n", name);
     if (clusters)
         ExFreePool(clusters);
-    KeLog("[io]   stored '%s' (%lu bytes) on FAT32\n", name,
+    KeTrace("[io]   stored '%s' (%lu bytes) on FAT32\n", name,
           (unsigned long)size);
     return STATUS_SUCCESS;
 }

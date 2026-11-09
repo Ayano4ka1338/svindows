@@ -46,7 +46,7 @@ static UINT64 NtUserRegisterClassExWOW(UINT64 *a)
     if (!caller || !caller->Process || !wcex ||
         !MmProbeForRead((UINT64)wcex, 80)) return 0;
 
-    KeLog("[user] RegisterClassExWOW(wcex=%p, name_ustr=%p, fnid=%lu, "
+    KeTrace("[user] RegisterClassExWOW(wcex=%p, name_ustr=%p, fnid=%lu, "
           "flags=%lx)\n", (void *)wcex, (void *)ustr,
           (unsigned long)(UINT32)a[3], (unsigned long)(UINT32)a[4]);
 
@@ -101,7 +101,7 @@ static UINT64 NtUserRegisterClassExWOW(UINT64 *a)
         for (; j < n; j++)
             ascii[j] = (char)local[j];
         ascii[j] = 0;
-        KeLog("[user] RegisterClass('%s') -> atom 0x%x\n", ascii,
+        KeTrace("[user] RegisterClass('%s') -> atom 0x%x\n", ascii,
               g_user_classes[i].Atom);
         return g_user_classes[i].Atom;
     }
@@ -411,7 +411,7 @@ static UINT64 NtUserShowWindow(UINT64 *a)
     else
         KiUserInvalidateWindow(slot);
     W32kShowWindow(a[0], cmd);
-    KeLog("[user] ShowWindow(HWND %p, cmd %lu)\n", (void *)a[0],
+    KeTrace("[user] ShowWindow(HWND %p, cmd %lu)\n", (void *)a[0],
           (unsigned long)cmd);
     return 1;
 }
@@ -463,7 +463,7 @@ static UINT64 NtUserSetWindowPos(UINT64 *a)
      * window has to repaint. SWP_NOREDRAW (0x8) is the caller opting out. */
     if (!(flags & 0x8) && (flags & 0x40 || !(flags & 0x3)))
         KiUserInvalidateWindow(slot);
-    KeLog("[user] SetWindowPos(HWND %p after %p, %ld,%ld %lux%lu, flags 0x%lx)\n",
+    KeTrace("[user] SetWindowPos(HWND %p after %p, %ld,%ld %lux%lu, flags 0x%lx)\n",
           (void *)a[0], (void *)a[1], (long)(INT32)a[2], (long)(INT32)a[3],
           (unsigned long)(UINT32)a[4], (unsigned long)(UINT32)a[5],
           (unsigned long)flags);
@@ -610,7 +610,7 @@ static UINT64 NtUserMessageCall(UINT64 *a)
     static UINT8 logged;
     if (logged < 32 || message == 0x111) {
         logged++;
-        KeLog("[user] MessageCall(hwnd=%p, msg=0x%x, wp=%p, lp=%p, "
+        KeTrace("[user] MessageCall(hwnd=%p, msg=0x%x, wp=%p, lp=%p, "
               "type=0x%lx)\n", (void *)hwnd, (unsigned)message, (void *)a[2],
               (void *)a[3], (unsigned long)type);
     }

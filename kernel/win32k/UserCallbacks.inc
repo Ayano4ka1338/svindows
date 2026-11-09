@@ -172,7 +172,7 @@ static UINT64 NtUserBeginPaint(UINT64 *a)
     if (!hdc || !W32kBeginWindowPaint(hdc, a[0])) return 0;
     KiUserValidateWindow(slot);
     *(UINT64 *)(ps + 0) = hdc;
-    KeLog("[user] BeginPaint(HWND %p) client %ld,%ld %ldx%ld -> hdc %p\n",
+    KeTrace("[user] BeginPaint(HWND %p) client %ld,%ld %ldx%ld -> hdc %p\n",
           (void *)a[0], (long)x, (long)y, (long)w, (long)h, (void *)hdc);
     return hdc;
 }
@@ -379,7 +379,7 @@ static BOOLEAN KiStartUserCallback(UINT64 target, UINT64 a1, UINT64 a2,
     t->CallbackMsg = msg;
     t->CallbackLParam = lparam;
     t->RedirectPending = 1;
-    KeLog("[user]   callback -> proc %p msg 0x%lx hwnd %p (thunk %p rsp %p, "
+    KeTrace("[user]   callback -> proc %p msg 0x%lx hwnd %p (thunk %p rsp %p, "
           "caller %p)\n", (void *)target, (unsigned long)a2, (void *)a1,
           (void *)thunk, (void *)t->CallbackRsp, (void *)t->OrigRip);
     return TRUE;
@@ -493,7 +493,7 @@ static UINT64 NtCallbackReturn(UINT64 *a)
         KiFinishCallbackToCaller(t, 0);
         return 0;
     }
-    KeLog("[user]   callback return: msg 0x%lx -> %p (cont %lu)\n",
+    KeTrace("[user]   callback return: msg 0x%lx -> %p (cont %lu)\n",
           (unsigned long)t->CallbackMsg, (void *)result,
           (unsigned long)t->CallbackContinue);
 
@@ -584,7 +584,7 @@ static UINT64 KiBuildCreateStruct(const UINT64 *a, UINT64 hwnd)
         class_name = *(const UINT64 *)(class_name + 8);
     *(UINT64 *)(cs + 0x40) = class_name; /* class string or atom, never LARGE_STRING */
     *(UINT32 *)(cs + 0x48) = (UINT32)a[0]; /* dwExStyle     */
-    KeLog("[user]   CREATESTRUCT @ %p for HWND %p\n", (void *)p,
+    KeTrace("[user]   CREATESTRUCT @ %p for HWND %p\n", (void *)p,
           (void *)hwnd);
     return p;
 }
@@ -612,7 +612,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
 
     /* Modern win32u passes class-version separately from the window name:
      * exStyle, class, classVersion, name, style, x, y, cx, cy, ... */
-    KeLog("[user] NtUserCreateWindowEx(exStyle=0x%lx, class=%p, version=%p, name=%p, style=0x%lx, xy=%ld,%ld size=%ldx%ld)\n",
+    KeTrace("[user] NtUserCreateWindowEx(exStyle=0x%lx, class=%p, version=%p, name=%p, style=0x%lx, xy=%ld,%ld size=%ldx%ld)\n",
           (unsigned long)a[0], (void *)a[1], (void *)a[2], (void *)a[3],
           (unsigned long)a[4], (long)a[5], (long)a[6], (long)a[7],
           (long)a[8]);
@@ -670,7 +670,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
             for (; j < 32 && cls->Name[j]; j++)
                 ascii[j] = (char)cls->Name[j];
         ascii[j] = 0;
-        KeLog("[user]   created HWND %p head %p class '%s' atom 0x%x "
+        KeTrace("[user]   created HWND %p head %p class '%s' atom 0x%x "
               "wndproc %p extra %lu\n", (void *)hwnd, (void *)window,
               cls ? ascii : "<unresolved>", cls ? cls->Atom : 0,
               (void *)(cls ? cls->WndProc : 0),
@@ -936,7 +936,7 @@ static UINT64 NtUserGetMessage(UINT64 *a)
         while (!KiUserTakeMessage(&msg, TRUE));
     }
     *user_msg = msg;
-    KeLog("[user] GetMessage -> msg 0x%x hwnd %p (tid %lu)\n",
+    KeTrace("[user] GetMessage -> msg 0x%x hwnd %p (tid %lu)\n",
           (unsigned)msg.Message, (void *)msg.Hwnd, (unsigned long)tid);
     return msg.Message == 0x0012 /* WM_QUIT */ ? 0 : 1;
 }

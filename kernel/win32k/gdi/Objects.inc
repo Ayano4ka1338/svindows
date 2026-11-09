@@ -444,7 +444,7 @@ UINT64 W32kCreateWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
     *(UINT32 *)(attr + DCATTR_CRBRUSH) = 0x00FFFFFF;
     *(UINT32 *)(attr + DCATTR_ULBRUSH) = 0x00FFFFFF;
 
-    KeLog("[w32k] DC %p for HWND %p at %ld,%ld %ldx%ld (attr 0x%lx)\n",
+    KeTrace("[w32k] DC %p for HWND %p at %ld,%ld %ldx%ld (attr 0x%lx)\n",
           (void *)hdc, (void *)hwnd, (long)x, (long)y, (long)width,
           (long)height, (unsigned long)attr);
     return hdc;
