@@ -219,3 +219,215 @@ invalid:
     SetLastError(1336); /* ERROR_INVALID_ACL */
     return FALSE_K;
 }
+
+/* SECURITY_DESCRIPTOR stores pointers in absolute form and offsets in
+ * self-relative form. Both layouts begin with the same four bytes. */
+typedef struct {
+    BYTE Revision, Sbz1;
+    unsigned short Control;
+    void *Owner, *Group, *Sacl, *Dacl;
+} ABSOLUTE_SD;
+
+typedef struct {
+    BYTE Revision, Sbz1;
+    unsigned short Size, Count, Sbz2;
+} ACL_HEADER;
+
+enum {
+    SD_OWNER_DEFAULTED = 1, SD_GROUP_DEFAULTED = 2,
+    SD_DACL_PRESENT = 4, SD_DACL_DEFAULTED = 8,
+    SD_SACL_PRESENT = 16, SD_SACL_DEFAULTED = 32,
+    SD_SELF_RELATIVE = 0x8000
+};
+
+static void *sd_component(const ABSOLUTE_SD *sd, unsigned part)
+{
+    if (sd->Control & SD_SELF_RELATIVE) {
+        const DWORD *offsets = (const DWORD *)((const BYTE *)sd + 4);
+        return offsets[part] ? (void *)((const BYTE *)sd + offsets[part]) : 0;
+    }
+    switch (part) {
+    case 0: return sd->Owner;
+    case 1: return sd->Group;
+    case 2: return sd->Sacl;
+    default: return sd->Dacl;
+    }
+}
+
+static BOOL_K sd_check(const ABSOLUTE_SD *sd, BOOL_K absolute)
+{
+    if (!sd || (absolute && (sd->Control & SD_SELF_RELATIVE))) {
+        SetLastError(87);
+        return FALSE_K;
+    }
+    if (sd->Revision != 1) {
+        SetLastError(1305); /* ERROR_UNKNOWN_REVISION */
+        return FALSE_K;
+    }
+    return TRUE_K;
+}
+
+__declspec(dllexport) BOOL_K InitializeSecurityDescriptor(ABSOLUTE_SD *sd,
+                                                           DWORD revision)
+{
+    if (!sd || revision != 1) {
+        SetLastError(revision != 1 ? 1305 : 87);
+        return FALSE_K;
+    }
+    *sd = (ABSOLUTE_SD){.Revision = 1};
+    return TRUE_K;
+}
+
+__declspec(dllexport) BOOL_K GetSecurityDescriptorControl(const ABSOLUTE_SD *sd,
+    unsigned short *control, DWORD *revision)
+{
+    if (revision) *revision = sd ? sd->Revision : 0;
+    if (!control || !revision) {
+        SetLastError(87);
+        return FALSE_K;
+    }
+    if (!sd_check(sd, FALSE_K)) return FALSE_K;
+    *control = sd->Control;
+    return TRUE_K;
+}
+
+static BOOL_K sd_get_sid(const ABSOLUTE_SD *sd, void **sid,
+                         BOOL_K *defaulted, unsigned group)
+{
+    if (!sid || !defaulted) {
+        SetLastError(87);
+        return FALSE_K;
+    }
+    if (!sd_check(sd, FALSE_K)) return FALSE_K;
+    *sid = sd_component(sd, group);
+    *defaulted = (sd->Control & (group ? SD_GROUP_DEFAULTED : SD_OWNER_DEFAULTED)) != 0;
+    return TRUE_K;
+}
+
+static BOOL_K sd_set_sid(ABSOLUTE_SD *sd, void *sid,
+                         BOOL_K defaulted, unsigned group)
+{
+    if (!sd_check(sd, TRUE_K)) return FALSE_K;
+    if (sid && !sid_valid(sid)) {
+        SetLastError(1337); /* ERROR_INVALID_SID */
+        return FALSE_K;
+    }
+    unsigned flag = group ? SD_GROUP_DEFAULTED : SD_OWNER_DEFAULTED;
+    if (group) sd->Group = sid;
+    else sd->Owner = sid;
+    sd->Control = (sd->Control & ~flag) | (defaulted ? flag : 0);
+    return TRUE_K;
+}
+
+__declspec(dllexport) BOOL_K GetSecurityDescriptorOwner(const ABSOLUTE_SD *sd,
+    void **sid, BOOL_K *defaulted)
+{ return sd_get_sid(sd, sid, defaulted, 0); }
+
+__declspec(dllexport) BOOL_K GetSecurityDescriptorGroup(const ABSOLUTE_SD *sd,
+    void **sid, BOOL_K *defaulted)
+{ return sd_get_sid(sd, sid, defaulted, 1); }
+
+__declspec(dllexport) BOOL_K SetSecurityDescriptorOwner(ABSOLUTE_SD *sd,
+    void *sid, BOOL_K defaulted)
+{ return sd_set_sid(sd, sid, defaulted, 0); }
+
+__declspec(dllexport) BOOL_K SetSecurityDescriptorGroup(ABSOLUTE_SD *sd,
+    void *sid, BOOL_K defaulted)
+{ return sd_set_sid(sd, sid, defaulted, 1); }
+
+static BOOL_K acl_valid(const ACL_HEADER *acl)
+{
+    if ((acl->Revision < 2 || acl->Revision > 4) || acl->Size < sizeof(*acl))
+        return FALSE_K;
+    DWORD offset = sizeof(*acl);
+    for (DWORD i = 0; i < acl->Count; ++i) {
+        if (acl->Size - offset < 4) return FALSE_K;
+        const BYTE *ace = (const BYTE *)acl + offset;
+        DWORD size = ace[2] | ((DWORD)ace[3] << 8);
+        if (size < 4 || (size & 3) || size > acl->Size - offset)
+            return FALSE_K;
+        offset += size;
+    }
+    return TRUE_K;
+}
+
+__declspec(dllexport) BOOL_K InitializeAcl(ACL_HEADER *acl, DWORD bytes,
+                                           DWORD revision)
+{
+    if (!acl || bytes < sizeof(*acl) || bytes > 0xffff ||
+        revision < 2 || revision > 4) {
+        SetLastError(87);
+        return FALSE_K;
+    }
+    *acl = (ACL_HEADER){.Revision = (BYTE)revision,
+                        .Size = (unsigned short)(bytes & ~3u)};
+    return TRUE_K;
+}
+
+static BOOL_K sd_get_acl(const ABSOLUTE_SD *sd, BOOL_K *present, void **acl,
+                         BOOL_K *defaulted, unsigned sacl)
+{
+    if (!present || !acl || !defaulted) {
+        SetLastError(87);
+        return FALSE_K;
+    }
+    if (!sd_check(sd, FALSE_K)) return FALSE_K;
+    *present = (sd->Control & (sacl ? SD_SACL_PRESENT : SD_DACL_PRESENT)) != 0;
+    if (*present) {
+        *acl = sd_component(sd, sacl ? 2 : 3);
+        *defaulted = (sd->Control & (sacl ? SD_SACL_DEFAULTED : SD_DACL_DEFAULTED)) != 0;
+    }
+    return TRUE_K;
+}
+
+static BOOL_K sd_set_acl(ABSOLUTE_SD *sd, BOOL_K present, void *acl,
+                         BOOL_K defaulted, unsigned sacl)
+{
+    if (!sd_check(sd, TRUE_K)) return FALSE_K;
+    unsigned present_flag = sacl ? SD_SACL_PRESENT : SD_DACL_PRESENT;
+    unsigned default_flag = sacl ? SD_SACL_DEFAULTED : SD_DACL_DEFAULTED;
+    if (!present) {
+        sd->Control &= ~present_flag;
+        return TRUE_K;
+    }
+    if (sacl) sd->Sacl = acl;
+    else sd->Dacl = acl;
+    sd->Control = (sd->Control & ~default_flag) | present_flag |
+                  (defaulted ? default_flag : 0);
+    return TRUE_K;
+}
+
+__declspec(dllexport) BOOL_K GetSecurityDescriptorDacl(const ABSOLUTE_SD *sd,
+    BOOL_K *present, void **acl, BOOL_K *defaulted)
+{ return sd_get_acl(sd, present, acl, defaulted, 0); }
+
+__declspec(dllexport) BOOL_K GetSecurityDescriptorSacl(const ABSOLUTE_SD *sd,
+    BOOL_K *present, void **acl, BOOL_K *defaulted)
+{ return sd_get_acl(sd, present, acl, defaulted, 1); }
+
+__declspec(dllexport) BOOL_K SetSecurityDescriptorDacl(ABSOLUTE_SD *sd,
+    BOOL_K present, void *acl, BOOL_K defaulted)
+{ return sd_set_acl(sd, present, acl, defaulted, 0); }
+
+__declspec(dllexport) BOOL_K SetSecurityDescriptorSacl(ABSOLUTE_SD *sd,
+    BOOL_K present, void *acl, BOOL_K defaulted)
+{ return sd_set_acl(sd, present, acl, defaulted, 1); }
+
+__declspec(dllexport) BOOL_K IsValidSecurityDescriptor(const ABSOLUTE_SD *sd)
+{
+    if (!sd_check(sd, FALSE_K)) return FALSE_K;
+    for (unsigned part = 0; part < 4; ++part) {
+        if (part == 2 && !(sd->Control & SD_SACL_PRESENT)) continue;
+        if (part == 3 && !(sd->Control & SD_DACL_PRESENT)) continue;
+        if (sd->Control & SD_SELF_RELATIVE) {
+            const DWORD *offsets = (const DWORD *)((const BYTE *)sd + 4);
+            DWORD offset = offsets[part];
+            if (offset && (offset < sizeof(SDDL_RELATIVE_SD) || (offset & 3)))
+                return FALSE_K;
+        }
+        const void *component = sd_component(sd, part);
+        if (component && !(part < 2 ? sid_valid(component) : acl_valid(component)))
+            return FALSE_K;
+    }
+    return TRUE_K;
+}
