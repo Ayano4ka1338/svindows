@@ -79,16 +79,35 @@ static UINT16 W32kChildAt(UINT16 parent, INT32 x, INT32 y, unsigned depth)
     return parent;
 }
 
+static BOOLEAN W32kChildrenUseClipping(UINT16 parent)
+{
+    for (UINT16 slot = g_w32k_top; slot; slot = g_w32k[slot].ZPrev) {
+        const W32K_WINDOW_STATE *window = &g_w32k[slot];
+        if (window->Parent == parent && window->Visible &&
+            (window->Style & 0x04000000u)) /* WS_CLIPSIBLINGS */
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static void W32kPaintChildren(UINT16 parent, INT32 x, INT32 y, INT32 w, INT32 h,
                               unsigned unused)
 {
     (void)unused;
     /* Iterative DFS keeps the kernel stack bounded even for 127 descendants. */
-    struct FRAME { UINT16 parent, next; INT32 x, y, w, h; } frames[W32K_SLOTS];
+    struct FRAME {
+        UINT16 parent, next;
+        BOOLEAN clipped_siblings;
+        INT32 x, y, w, h;
+    } frames[W32K_SLOTS];
     unsigned depth = 0;
     UINT16 bottom = g_w32k_top;
     while (bottom && g_w32k[bottom].ZPrev) bottom = g_w32k[bottom].ZPrev;
-    frames[0] = (struct FRAME){parent, bottom, x, y, w, h};
+    /* Classic child windows paint in Z order. Without WS_CLIPSIBLINGS,
+     * a lower child can paint over a sibling that was painted earlier. */
+    BOOLEAN clipped = W32kChildrenUseClipping(parent);
+    frames[0] = (struct FRAME){parent, clipped ? bottom : g_w32k_top,
+                              clipped, x, y, w, h};
     for (;;) {
         struct FRAME *f = &frames[depth];
         INT32 cx, cy, cw, ch;
@@ -101,15 +120,17 @@ static void W32kPaintChildren(UINT16 parent, INT32 x, INT32 y, INT32 w, INT32 h,
         UINT16 child = f->next;
         while (child && (g_w32k[child].Parent != f->parent ||
                !g_w32k[child].Visible || g_w32k[child].Minimized))
-            child = g_w32k[child].ZNext;
+            child = f->clipped_siblings ? g_w32k[child].ZNext : g_w32k[child].ZPrev;
         if (!child || f->w <= 0 || f->h <= 0 || depth + 1 >= W32K_SLOTS) {
             if (!depth) return;
             --depth; continue;
         }
-        f->next = g_w32k[child].ZNext;
+        f->next = f->clipped_siblings ? g_w32k[child].ZNext : g_w32k[child].ZPrev;
         W32kCopyWindowClient(child, g_w32k_composite, g_w32k_composite_w,
                              f->x, f->y, f->w, f->h);
-        frames[depth+1] = (struct FRAME){child, bottom, f->x, f->y, f->w, f->h};
+        clipped = W32kChildrenUseClipping(child);
+        frames[depth+1] = (struct FRAME){child, clipped ? bottom : g_w32k_top,
+                                       clipped, f->x, f->y, f->w, f->h};
         ++depth;
     }
 }
