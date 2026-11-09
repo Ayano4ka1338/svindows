@@ -41,6 +41,7 @@ __declspec(dllimport) long NtAllocateVirtualMemory(HANDLE process,
     ULONG protect);
 __declspec(dllimport) long NtFreeVirtualMemory(HANDLE process,
     void **base, ULONGLONG *size, ULONG free_type);
+__declspec(dllimport) UINT64 NtGdiCreatePatternBrush(HBITMAP bitmap);
 __declspec(dllimport) UINT64 NtGdiCreateSolidBrush(COLORREF colour, ULONG unused);
 __declspec(dllimport) UINT64 NtGdiCreatePen(int style, int width, COLORREF colour,
                                             ULONG unused);
@@ -284,11 +285,18 @@ GDI32_API HFONT CreateFontIndirectW(const LOGFONTW *logical_font)
 
 GDI32_API HBRUSH CreatePatternBrush(HBITMAP bitmap)
 {
-    if (!bitmap) return 0;
-    /* Pattern sampling is not in the kernel raster ABI. A neutral solid brush
-     * keeps callers functional while bitmap-backed pattern rasterization is
-     * still unavailable. */
-    return CreateSolidBrush(0x00c0c0c0u);
+    if (object_type(bitmap) != SV_GDI_TYPE_BITMAP) return NULL;
+    for (UINT i = 0; i < 128; ++i) {
+        if (g_bitmap_dimensions[i].Handle != bitmap ||
+            !g_bitmap_dimensions[i].Bits) continue;
+        HDC dc = CreateCompatibleDC(NULL);
+        if (!dc) return NULL;
+        SelectObject(dc, bitmap);
+        sv_flush_dib(dc);
+        DeleteDC(dc);
+        break;
+    }
+    return (HBRUSH)(ULONG_PTR)NtGdiCreatePatternBrush(bitmap);
 }
 
 typedef struct { UINT Style; COLORREF Color; ULONG_PTR Hatch; } SV_LOGBRUSH;

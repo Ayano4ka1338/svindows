@@ -36,6 +36,27 @@ UINT64 NtGdiCreateSolidBrush(UINT64 *a)
     return handle;
 }
 
+/* A pattern brush owns a snapshot. Its source bitmap can be deleted. */
+UINT64 NtGdiCreatePatternBrush(UINT64 *a)
+{
+    W32K_OBJECT *bitmap = gdi_object(a[0], GDI_TYPE_BITMAP);
+    if (!bitmap) return 0;
+    const W32K_SURFACE *source = &bitmap->u.Bitmap.Surface;
+    SIZE_T bytes = (SIZE_T)source->Stride * source->Height * sizeof(UINT32);
+    UINT32 *bits = ExAllocatePoolWithTag(NonPagedPool, bytes, 'taPG');
+    if (!bits) return 0;
+    memcpy(bits, source->Bits, bytes);
+    W32K_OBJECT *brush;
+    UINT64 handle = gdi_allocate(GDI_TYPE_BRUSH, 0, &brush);
+    if (!handle) {
+        ExFreePool(bits);
+        return 0;
+    }
+    brush->u.Brush.Pattern = *source;
+    brush->u.Brush.Pattern.Bits = bits;
+    return handle;
+}
+
 /* HPEN NtGdiCreatePen(int style, int width, COLORREF colour, HBRUSH) */
 UINT64 NtGdiCreatePen(UINT64 *a)
 {
@@ -236,15 +257,38 @@ UINT64 NtGdiGetDCObject(UINT64 *a)
 
 /* The colour a fill uses: the selected brush, or the DC brush colour cached in
  * DC_ATTR when nothing has been selected. */
-static UINT32 dc_brush_color(UINT64 hdc, W32K_DC *dc, BOOLEAN *hollow)
+static void dc_fill_brush(UINT64 hdc, W32K_DC *dc,
+                          INT32 x, INT32 y, INT32 w, INT32 h)
 {
     W32K_OBJECT *brush = gdi_object(dc->SelectedBrush, GDI_TYPE_BRUSH);
-    if (hollow)
-        *hollow = brush ? brush->u.Brush.Hollow : FALSE;
-    if (brush)
-        return brush->u.Brush.Color;
-    UINT64 attr = dc_attr(hdc);
-    return attr ? *(volatile UINT32 *)(attr + DCATTR_CRBRUSH) : 0x00FFFFFF;
+    if (brush && brush->u.Brush.Hollow) return;
+    const W32K_SURFACE *pattern = brush ? &brush->u.Brush.Pattern : NULL;
+    if (!pattern || !pattern->Bits) {
+        UINT64 attr = dc_attr(hdc);
+        UINT32 color = brush ? brush->u.Brush.Color :
+            attr ? *(volatile UINT32 *)(attr + DCATTR_CRBRUSH) : 0x00FFFFFF;
+        dc_fill(dc, x, y, w, h, color);
+        return;
+    }
+    if (!dc_clip(dc, &x, &y, &w, &h)) return;
+    dc_damage(dc, x, y, w, h);
+    BOOLEAN clipped = dc->Surface->IsScreen && dc->Hwnd &&
+        !W32kScreenRectUnobscured(dc->Hwnd, x, y, w, h);
+    INT32 pw = (INT32)pattern->Width, ph = (INT32)pattern->Height;
+    INT32 px = (INT32)(((INT64)x - dc->OrgX) % pw);
+    INT32 py = (INT32)(((INT64)y - dc->OrgY) % ph);
+    if (px < 0) px += pw;
+    if (py < 0) py += ph;
+    for (INT32 row = 0; row < h; ++row) {
+        const UINT32 *source = pattern->Bits + (SIZE_T)py * pattern->Stride;
+        INT32 col_in_pattern = px;
+        for (INT32 col = 0; col < w; ++col) {
+            if (!clipped || W32kScreenPixelVisible(dc->Hwnd, x + col, y + row))
+                surface_pixel(dc->Surface, x + col, y + row, source[col_in_pattern]);
+            if (++col_in_pattern == pw) col_in_pattern = 0;
+        }
+        if (++py == ph) py = 0;
+    }
 }
 
 static UINT32 dc_pen_color(UINT64 hdc, W32K_DC *dc, BOOLEAN *hollow)
@@ -265,16 +309,12 @@ UINT64 NtGdiPatBlt(UINT64 *a)
     if (!dc || !dc->Surface)
         return 0;
     UINT32 rop = (UINT32)a[5];
-    BOOLEAN hollow = FALSE;
-    UINT32 color;
+    INT32 x = (INT32)a[1], y = (INT32)a[2], w = (INT32)a[3], h = (INT32)a[4];
     switch (rop) {
-    case 0x00000042: color = 0x00000000; break;             /* BLACKNESS */
-    case 0x00FF0062: color = 0x00FFFFFF; break;             /* WHITENESS */
-    default:         color = dc_brush_color(a[0], dc, &hollow); break;
+    case 0x00000042: dc_fill(dc, x, y, w, h, 0x00000000); break; /* BLACKNESS */
+    case 0x00FF0062: dc_fill(dc, x, y, w, h, 0x00FFFFFF); break; /* WHITENESS */
+    default: dc_fill_brush(a[0], dc, x, y, w, h); break;
     }
-    if (hollow)
-        return 1;
-    dc_fill(dc, (INT32)a[1], (INT32)a[2], (INT32)a[3], (INT32)a[4], color);
     dc_present(dc);
     return 1;
 }
@@ -505,11 +545,9 @@ UINT64 NtGdiRectangle(UINT64 *a)
     if (right < left || bottom < top)
         return 0;
 
-    BOOLEAN brush_hollow = FALSE, pen_hollow = FALSE;
-    UINT32 fill = dc_brush_color(a[0], dc, &brush_hollow);
+    BOOLEAN pen_hollow = FALSE;
     UINT32 edge = dc_pen_color(a[0], dc, &pen_hollow);
-    if (!brush_hollow)
-        dc_fill(dc, left, top, right - left, bottom - top, fill);
+    dc_fill_brush(a[0], dc, left, top, right - left, bottom - top);
     if (!pen_hollow) {
         dc_fill(dc, left, top, right - left, 1, edge);
         dc_fill(dc, left, bottom - 1, right - left, 1, edge);

@@ -1211,6 +1211,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F04] = NtGdiReadUserBuffer;
     KiServiceTable[0x1F05] = NtUserMenuBar;
     KiServiceTable[0x1F06] = NtUserWindowRelation;
+    KiServiceTable[0x1F07] = NtGdiCreatePatternBrush;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

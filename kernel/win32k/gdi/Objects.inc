@@ -82,6 +82,7 @@ static void dc_present(W32K_DC *dc);
 typedef struct _W32K_BRUSH {
     UINT32 Color;   /* COLORREF */
     BOOLEAN Hollow;
+    W32K_SURFACE Pattern;
 } W32K_BRUSH;
 
 typedef struct _W32K_FONT {
@@ -183,6 +184,8 @@ static void gdi_free(UINT64 handle)
     UINT16 index = (UINT16)(handle & 0xFFFF);
     if (object->Type == GDI_TYPE_BITMAP && object->u.Bitmap.Storage)
         ExFreePool(object->u.Bitmap.Storage);
+    if (object->Type == GDI_TYPE_BRUSH && object->u.Brush.Pattern.Bits)
+        ExFreePool(object->u.Brush.Pattern.Bits);
     if (object->Type == GDI_TYPE_DC)
         dc_dispose_window(&object->u.Dc);
     object->Type = 0;
@@ -481,6 +484,8 @@ void W32kCleanupProcessGdi(PKPROCESS process)
         UINT64 handle = ((UINT64)object->Upper << 16) | i;
         if (object->Type == GDI_TYPE_BITMAP && object->u.Bitmap.Storage)
             ExFreePool(object->u.Bitmap.Storage);
+        if (object->Type == GDI_TYPE_BRUSH && object->u.Brush.Pattern.Bits)
+            ExFreePool(object->u.Brush.Pattern.Bits);
         if (object->Type == GDI_TYPE_DC)
             dc_dispose_window(&object->u.Dc);
         object->Type = 0;

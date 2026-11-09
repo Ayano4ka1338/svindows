@@ -144,6 +144,7 @@ UINT64 NtGdiPatBlt(UINT64 *args);
 UINT64 NtGdiBitBlt(UINT64 *args);
 UINT64 NtGdiBlitUserBuffer(UINT64 *args);
 UINT64 NtGdiReadUserBuffer(UINT64 *args);
+UINT64 NtGdiCreatePatternBrush(UINT64 *args);
 UINT64 NtGdiExtTextOutW(UINT64 *args);
 UINT64 NtGdiGetTextMetricsW(UINT64 *args);
 UINT64 NtGdiGetTextExtent(UINT64 *args);
