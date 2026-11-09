@@ -24,11 +24,19 @@ __declspec(dllexport) LONG RegEnumKeyExW(HKEY key, DWORD index, WCHAR *name,
                                           void *last_write)
 {
     (void)reserved;
-    if (!name || !name_chars || (class_name && !class_chars)) return 87;
+    if (!name || !name_chars || reserved || (class_name && !class_chars)) return 87;
+    if (!key) return 6; /* ERROR_INVALID_HANDLE */
+    HKEY opened = 0;
+    if (is_predefined(key)) {
+        LONG status = RegOpenKeyExW(key, 0, 0, KEY_READ, &opened);
+        if (status != ERROR_SUCCESS) return status;
+        key = opened;
+    }
     BYTE buffer[256];
     DWORD required = 0;
     NTSTATUS st = NtEnumerateKey((HANDLE)key, index, 0, buffer,
                                  sizeof(buffer), &required);
+    if (opened) RegCloseKey(opened);
     if (!NT_SUCCESS(st)) return (LONG)RtlNtStatusToDosError(st);
     DWORD chars = *(DWORD *)(buffer + 12) / sizeof(WCHAR);
     DWORD capacity = *name_chars;
@@ -48,6 +56,12 @@ __declspec(dllexport) LONG RegEnumKeyExW(HKEY key, DWORD index, WCHAR *name,
         for (int i = 0; i < 8; i++) time[i] = 0;
     }
     return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) LONG RegEnumKeyW(HKEY key, DWORD index, WCHAR *name,
+                                      DWORD name_chars)
+{
+    return RegEnumKeyExW(key, index, name, &name_chars, 0, 0, 0, 0);
 }
 
 __declspec(dllexport) LONG RegEnumValueW(HKEY key, DWORD index,
