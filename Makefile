@@ -552,7 +552,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(RPCRT4) ::WINDOWS/SYSTEM32/RPCRT4.DLL
 	mcopy -i $(INITRD) $(WINMM) ::WINDOWS/SYSTEM32/WINMM.DLL
 	mcopy -i $(INITRD) $(WINDOWSCODECS) ::WINDOWS/SYSTEM32/WINDOWSCODECS.DLL
-	mcopy -i $(INITRD) $(COMMAND_BINS) ::
+	mcopy -i $(INITRD) $(COMMAND_BINS) ::WINDOWS/SYSTEM32/
 	# Keep each Windows release together; root batch files are launchers.
 	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS3 ::WINDOWS7
 	if [ -n "$(WINDOWS1_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS1_FILES) ::WINDOWS1/; fi
