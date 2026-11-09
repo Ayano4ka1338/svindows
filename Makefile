@@ -565,11 +565,12 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	    mcopy -i $(INITRD) "$$f" "::WINDOWS3/$$rel"; \
 	done
 	if [ -n "$(WINDOWS7_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS7_FILES) ::WINDOWS7/; fi
-	mcopy -i $(INITRD) user/d/win.bat ::WIN.BAT
-	mcopy -i $(INITRD) user/d/win2.bat ::WIN2.BAT
-	mcopy -i $(INITRD) user/d/win3.bat ::WIN3.BAT
-	mcopy -i $(INITRD) user/d/win3x.bat ::WIN3X.BAT
-	mcopy -i $(INITRD) user/d/win7x.bat ::WIN7X.BAT
+	mmd -i $(INITRD) ::DOS
+	mcopy -i $(INITRD) user/d/win.bat ::DOS/WIN.BAT
+	mcopy -i $(INITRD) user/d/win2.bat ::DOS/WIN2.BAT
+	mcopy -i $(INITRD) user/d/win3.bat ::DOS/WIN3.BAT
+	mcopy -i $(INITRD) user/d/win3x.bat ::DOS/WIN3X.BAT
+	mcopy -i $(INITRD) user/d/win7x.bat ::DOS/WIN7X.BAT
 	mcopy -i $(INITRD) user/d/xwin/XWIN.EXE ::WINDOWS3/XWIN.EXE
 	mmd -i $(INITRD) ::TESTS
 	mcopy -i $(INITRD) $(BUILD)/dos-tests/COMSMOKE.COM ::TESTS/COMSMOKE.COM
@@ -579,7 +580,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(BUILD)/dos-tests/INPFLUSH.COM ::TESTS/INPFLUSH.COM
 	mcopy -i $(INITRD) $(BUILD)/dos-tests/FFGROUP.COM ::TESTS/FFGROUP.COM
 	mcopy -i $(INITRD) $(BUILD)/dos-tests/MZSMOKE.EXE ::TESTS/MZSMOKE.EXE
-	mcopy -i $(INITRD) $(BUILD)/dos-tests/DOSCHECK.BAT ::DOSCHECK.BAT
+	mcopy -i $(INITRD) $(BUILD)/dos-tests/DOSCHECK.BAT ::TESTS/DOSCHECK.BAT
 	mcopy -s -i $(INITRD) $(BUILD)/alpine-xorg/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-curl/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-feh/root/* ::
@@ -622,7 +623,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	if [ -n "$(DOOM_FILES)" ]; then \
 	    mmd -i $(INITRD) ::DOOM && \
 	    mcopy -i $(INITRD) $(DOOM_FILES) ::DOOM/ && \
-	    mcopy -i $(INITRD) user/d/doom/doom.bat ::DOOM.BAT; \
+	    mcopy -i $(INITRD) user/d/doom/doom.bat ::DOS/DOOM.BAT; \
 	fi
 	# Xorg writes its default log to /var/log/Xorg.0.log; the Alpine package
 	# owns /var/log, so the emulated C: root must provide it. FAT mirrors the

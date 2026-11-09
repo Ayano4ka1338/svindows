@@ -72,12 +72,14 @@ source-level debugging with `-Og` is needed.
 To run a DOS program, put its `.COM` or MZ `.EXE` file on `build/initrd.fat`
 (or copy it to the mounted C: drive) and enter its name in `cmd.exe`. When
 `user/d/doom/` is present, the build copies the bundled DOS/4G Doom distribution
-and any additional files in that directory to `C:\DOOM`, and adds a root
-`DOOM.BAT` launcher. Windows 1.01 system files from `user/d/windows1/` are
-copied into `C:\WINDOWS1`. The root `C:\WIN.BAT` launcher changes into that
+and any additional files in that directory to `C:\DOOM`, and installs its
+`DOOM.BAT` launcher in `C:\DOS`. Windows 1.01 system files from
+`user/d/windows1/` are copied into `C:\WINDOWS1`. The `C:\DOS\WIN.BAT`
+launcher changes into that
 directory before running `WIN.COM`, then restores the root directory when
-Windows exits. Start Windows with `C:\>WIN`; alternatively run `CD \WINDOWS1`
-and `WIN.COM`. `C:\DOSCHECK.BAT` runs COM,
+Windows exits. The launchers in `C:\DOS` are on `PATH`, so start Windows with
+`C:\>WIN` or `C:\>WIN2`; alternatively run `CD \WINDOWS1` and `WIN.COM`.
+`C:\TESTS\DOSCHECK.BAT` runs COM,
 MZ, conventional-memory and DPMI host-discovery probes from `C:\TESTS`.
 `python3 tools/QemuSmoke.py --doom-probe` now checks both the initial 32-bit
 DPMI transition and the first virtual PC I/O access. This is a useful startup

@@ -9,7 +9,7 @@ typedef struct _CMD_ENV_ENTRY {
 } CMD_ENV_ENTRY;
 
 static CMD_ENV_ENTRY g_environment[CMD_ENV_COUNT] = {
-    { "PATH", "C:\\;C:\\usr\\bin;C:\\windows\\system32" },
+    { "PATH", "C:\\DOS;C:\\;C:\\usr\\bin;C:\\windows\\system32" },
     { "PATHEXT", ".EXE;.COM;.BAT;.ELF" },
     /* Defaults for musl/Alpine programs launched from the PE command shell. */
     { "HOME", "/home/user" },

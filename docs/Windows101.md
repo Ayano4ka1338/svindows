@@ -5,7 +5,7 @@ system files stay together. `WIN100.OVL` in this payload originally contained
 an absolute `C:\WINTEST\WIN100.OVL` self-path from the image it was extracted
 from; the staged copy is patched to `C:\WINDOWS1\WIN100.OVL`.
 
-The `C:\WIN.BAT` launcher changes the DOS current directory to `\WINDOWS1`,
+The `C:\DOS\WIN.BAT` launcher changes the DOS current directory to `\WINDOWS1`,
 starts `WIN.COM`, and restores the root directory after Windows exits. Start
 Windows from the root with:
 
