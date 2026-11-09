@@ -48,7 +48,7 @@ def stage(destination: Path) -> None:
             for member in tar:
                 path = member.name
                 if name == "xorg-server" and path == "usr/libexec/Xorg":
-                    output = root / "XORG"
+                    output = root / "usr/bin/xorg"
                 elif name == "dash" and path == "usr/bin/dash":
                     output = root / "bin/sh"
                 elif name == "xkbcomp" and path == "usr/bin/xkbcomp":
@@ -161,7 +161,7 @@ def stage(destination: Path) -> None:
     if not (font_dir / "fonts.dir").is_file():
         raise ValueError("bitmap font index was not generated")
 
-    if not (root / "XORG").is_file() or not (root / "LIB" /
+    if not (root / "usr/bin/xorg").is_file() or not (root / "LIB" /
             "ld-musl-x86_64.so.1").is_file():
         raise ValueError("Xorg or the musl interpreter is missing")
     (destination / ".ready").write_text("Alpine v3.22 x86_64 Xorg ELF\n")

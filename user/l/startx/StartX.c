@@ -103,7 +103,7 @@ static long start_xorg(void)
     long pid = linux_syscall0(57); /* fork */
     if (pid != 0) return pid;
 
-    static const char path[] = "/XORG";
+    static const char path[] = "/usr/bin/xorg";
     static const char display[] = ":0";
     static const char terminal[] = "vt2";
     static const char no_listen[] = "-nolisten";

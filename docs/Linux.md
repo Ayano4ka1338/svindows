@@ -168,7 +168,8 @@ and its direct musl-linked library closure. `tools/StageAlpineXorg.py` uses
 [Alpine repositories](https://dl-cdn.alpinelinux.org/alpine/v3.22/), verify
 SHA-256 digests, and stage the ELF, libraries, Xorg modules, `xkbcomp`,
 standalone `dash` as `/bin/sh`, and XKB rules. The build installs the executable as `C:\XORG`, the musl loader and shared libraries
-under `/lib`, and modules under `/usr/lib/xorg/modules`. A direct server probe with
+under `/lib`, and modules under `/usr/lib/xorg/modules`. Xorg is installed at
+`/usr/bin/xorg`. A direct server probe with
 `xorg :0 -nolisten tcp -nolock -logfile /tmp/Xorg.log` creates both local
 listeners, uses fbdev at 1280x800, compiles its XKB map, and enters the main
 loop. `-nolock` avoids Xorg's hard-link lock-file operation,
