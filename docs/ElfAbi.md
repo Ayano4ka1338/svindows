@@ -182,8 +182,7 @@ window between short-lived clients. `/dev/console`, `/dev/tty`, and
 `/dev/ptmx` and
 `/dev/pts/N` provide Unix98 pseudo terminals for xterm's shell, with basic
 line discipline, termios, window-size ioctls, and poll/select readiness.
-The same TWM binary is
-installed as `TWM.ELF` in the root and at `/usr/bin/twm` for ELF `execve`.
+The TWM binary is installed at `/usr/bin/twm` for ELF `execve`.
 `python3 tools/StartXVisualSmoke.py` captures the desktop in QEMU.
 The Alpine `xeyes` client is installed at `/usr/bin/xeyes`; run `xeyes` from
 the xterm shell to check X11 client startup, drawing, and pointer events.

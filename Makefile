@@ -571,7 +571,6 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) user/d/win3x.bat ::WIN3X.BAT
 	mcopy -i $(INITRD) user/d/win7x.bat ::WIN7X.BAT
 	mcopy -i $(INITRD) user/d/xwin/XWIN.EXE ::WINDOWS3/XWIN.EXE
-	mcopy -i $(INITRD) $(STARTX) ::STARTX.ELF
 	mmd -i $(INITRD) ::TESTS
 	mcopy -i $(INITRD) $(BUILD)/dos-tests/COMSMOKE.COM ::TESTS/COMSMOKE.COM
 	mcopy -i $(INITRD) $(BUILD)/dos-tests/MEMSMOKE.COM ::TESTS/MEMSMOKE.COM
@@ -592,6 +591,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	for d in USR/BIN USR/LIB; do \
 	    mdir -i $(INITRD) "::$$d" >/dev/null 2>&1 || mmd -i $(INITRD) "::$$d"; \
 	done
+	mcopy -i $(INITRD) $(STARTX) ::USR/BIN/STARTX.ELF
 	mcopy -i $(INITRD) $(BUILD)/UNAME.EXE ::USR/BIN/UNAME
 	mcopy -i $(INITRD) $(BUILD)/alpine-fastfetch/usr/bin/fastfetch ::USR/BIN/FASTFETCH
 	mmd -i $(INITRD) ::USR/SHARE/FASTFETCH ::USR/SHARE/HWDATA
@@ -603,8 +603,6 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	# same PE image as C:\CMD.EXE, launched through execve from xterm.
 	# The extensionless copy lets the Linux path /usr/bin/cmd resolve.
 	mcopy -i $(INITRD) $(CMD) ::USR/BIN/CMD
-	mcopy -i $(INITRD) $(BUILD)/alpine-xorg/root/usr/bin/twm ::TWM.ELF
-	mcopy -i $(INITRD) $(BUILD)/alpine-xorg/root/usr/bin/xterm ::XTERM.ELF
 	# Also expose the upstream client under an explicit TLS-oriented name.
 	mcopy -o -i $(INITRD) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURLTLS
 	mcopy -o -i $(INITRD) $(BUILD)/alpine-curl/root/usr/bin/curl ::USR/BIN/CURLTLS.ELF
@@ -617,10 +615,10 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(CURL_HTTP) ::USR/BIN/CURLHTTP.ELF
 	mmd -i $(INITRD) ::DEV ::DEV/PTS
 	mmd -i $(INITRD) ::TMP ::TEMP
-	# Provide a known-good image for the first feh smoke test.
-	mcopy -i $(INITRD) other/Logo_small.png ::LOGO.PNG
 	# Give POSIX programs a real HOME rather than leaving HOME unset.
 	mmd -i $(INITRD) ::HOME ::HOME/USER ::HOME/USER/.CONFIG ::HOME/USER/.CONFIG/FEH
+	# Keep the feh smoke-test image in the user's home directory.
+	mcopy -i $(INITRD) other/Logo_small.png ::HOME/USER/LOGO.PNG
 	if [ -n "$(DOOM_FILES)" ]; then \
 	    mmd -i $(INITRD) ::DOOM && \
 	    mcopy -i $(INITRD) $(DOOM_FILES) ::DOOM/ && \
