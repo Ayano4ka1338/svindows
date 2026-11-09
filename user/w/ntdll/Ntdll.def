@@ -65,6 +65,7 @@ EXPORTS
     NtEnumerateKey
     NtEnumerateValueKey
     NtQueryKey
+    NtRenameKey
     NtSetValueKey
     NtQueryValueKey
     NtDelayExecution

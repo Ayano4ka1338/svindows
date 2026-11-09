@@ -562,6 +562,8 @@ DWORD RtlNtStatusToDosError(NTSTATUS status)
     case 0xC0000034: return 2;   /* OBJECT_NAME_NOT_FOUND */
     case 0xC0000008: return 6;   /* INVALID_HANDLE */
     case 0xC0000022: return 5;   /* ACCESS_DENIED */
+    case 0xC0000033: return 123; /* INVALID_NAME */
+    case 0xC0000035: return 183; /* ALREADY_EXISTS */
     case 0xC0000023: return 122; /* INSUFFICIENT_BUFFER */
     case 0xC000007C: return 1008; /* NO_TOKEN */
     case 0xC0000121: return 5; /* CANNOT_DELETE */

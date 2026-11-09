@@ -410,6 +410,7 @@ SYSCALL_STUB NtDeleteValueKey,       0x10A
 SYSCALL_STUB NtEnumerateKey,         0x10B
 SYSCALL_STUB NtEnumerateValueKey,    0x10C
 SYSCALL_STUB NtQueryKey,             0x10D
+SYSCALL_STUB NtRenameKey,            0x1F09
 SYSCALL_STUB NtOpenThread,           0x10E
 SYSCALL_STUB NtOpenEvent,            0x10F
 SYSCALL_STUB NtCreateJobObject,      0x110

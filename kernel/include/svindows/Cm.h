@@ -44,6 +44,7 @@ UINT64 NtDeleteValueKey(UINT64 *args);
 UINT64 NtEnumerateKey(UINT64 *args);
 UINT64 NtEnumerateValueKey(UINT64 *args);
 UINT64 NtQueryKey(UINT64 *args);
+UINT64 NtRenameKey(UINT64 *args);
 UINT64 NtSetValueKey(UINT64 *args);
 UINT64 NtQueryValueKey(UINT64 *args);
 

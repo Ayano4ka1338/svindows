@@ -1213,6 +1213,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F06] = NtUserWindowRelation;
     KiServiceTable[0x1F07] = NtGdiCreatePatternBrush;
     KiServiceTable[0x1F08] = NtGdiClearWindowBackground;
+    KiServiceTable[0x1F09] = NtRenameKey;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

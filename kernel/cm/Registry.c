@@ -348,6 +348,38 @@ static NTSTATUS cm_prepare_query(UINT64 output, ULONG capacity,
     return STATUS_SUCCESS;
 }
 
+/* Rename the node in place so handles and descendants stay attached. */
+UINT64 NtRenameKey(UINT64 *a)
+{
+    char name[sizeof(((CM_KEY *)0)->Name)];
+    if (!MmCaptureUnicodeName(a[1], name, sizeof(name)))
+        return (UINT64)STATUS_OBJECT_NAME_INVALID;
+    if (!name[0]) return (UINT64)STATUS_OBJECT_NAME_INVALID;
+    for (const char *p = name; *p; ++p)
+        if (*p == '\\' || *p == '/') return (UINT64)STATUS_OBJECT_NAME_INVALID;
+
+    UINT64 flags = KiIrqSave();
+    CM_KEY *key = a[0] ? cm_key_from_handle(a[0]) : NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    if (!key) {
+        status = STATUS_INVALID_HANDLE;
+    } else if (!key->Parent || !key->Parent->Parent ||
+               key->Parent->Parent == g_cm_root) {
+        status = STATUS_ACCESS_DENIED; /* The registry roots have fixed names. */
+    } else {
+        CM_KEY *existing = cm_find_subkey(key->Parent, name);
+        if (existing && existing != key) {
+            status = STATUS_OBJECT_NAME_COLLISION;
+        } else {
+            memcpy(key->Name, name, strlen(name) + 1);
+            key->LastWriteTime = KeGetTickCount() * 100000ULL;
+            key->Parent->LastWriteTime = key->LastWriteTime;
+        }
+    }
+    KiIrqRestore(flags);
+    return (UINT64)status;
+}
+
 /* KeyBasicInformation: LastWriteTime, TitleIndex, NameLength, Name. */
 UINT64 NtEnumerateKey(UINT64 *a)
 {

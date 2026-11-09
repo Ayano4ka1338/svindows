@@ -23,7 +23,6 @@ __declspec(dllexport) LONG RegEnumKeyExW(HKEY key, DWORD index, WCHAR *name,
                                           DWORD *class_chars,
                                           void *last_write)
 {
-    (void)reserved;
     if (!name || !name_chars || reserved || (class_name && !class_chars)) return 87;
     if (!key) return 6; /* ERROR_INVALID_HANDLE */
     HKEY opened = 0;
@@ -139,4 +138,37 @@ __declspec(dllexport) LONG RegQueryInfoKeyW(
         for (int i = 0; i < 8; i++) target[i] = source[i];
     }
     return ERROR_SUCCESS;
+}
+
+
+extern NTSTATUS NtRenameKey(HANDLE key, const UNICODE_STRING *name);
+
+__declspec(dllexport) LONG RegRenameKey(HKEY key, const WCHAR *subkey,
+                                        const WCHAR *new_name)
+{
+    if (!key) return 6;
+    if (!new_name || !*new_name) return 87;
+    int length = 0;
+    while (length < 64 && new_name[length]) ++length;
+    if (length == 64) return 206;
+
+    HKEY opened = 0;
+    if ((subkey && *subkey) || is_predefined(key)) {
+        int limit = 255;
+        if (is_predefined(key)) {
+            for (const char *p = root_prefix(key); *p; ++p) --limit;
+            --limit; /* separator */
+        }
+        int n = 0;
+        while (subkey && n < limit && subkey[n]) ++n;
+        if (subkey && subkey[n]) return 206;
+        LONG result = RegOpenKeyExW(key, subkey, 0, 0x20006, &opened); /* KEY_WRITE */
+        if (result != ERROR_SUCCESS) return result;
+        key = opened;
+    }
+    UNICODE_STRING name;
+    init_ustr(&name, (WCHAR *)new_name, length);
+    NTSTATUS status = NtRenameKey((HANDLE)key, &name);
+    if (opened) RegCloseKey(opened);
+    return NT_SUCCESS(status) ? ERROR_SUCCESS : (LONG)RtlNtStatusToDosError(status);
 }
