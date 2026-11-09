@@ -603,6 +603,70 @@ __declspec(dllexport) LONG RegGetValueW(HKEY hKey, const WCHAR *subKey,
 
 #include "AdvapiSid.inc"
 #include "AdvapiToken.inc"
+/* Encoding detection is a heuristic for unmarked files. Sample pairs of
+ * bytes directly so the buffer need not be aligned as WCHAR. */
+static int unicode_control(unsigned ch)
+{
+    return ch == '\r' || ch == '\n' || ch == '\t' ||
+           ch == ' ' || ch == 0x3000;
+}
+
+__declspec(dllexport) int IsTextUnicode(const void *buffer, int size, int *tests)
+{
+    const unsigned requested = tests ? (unsigned)*tests : ~0u;
+    if (!buffer || size < 2) {
+        if (tests) *tests = 0;
+        return 0;
+    }
+
+    enum {
+        ASCII16 = 1, STATISTICS = 2, CONTROLS = 4, SIGNATURE = 8,
+        REVERSE = 4, ILLEGAL_CHARS = 0x100, ODD_LENGTH = 0x200,
+        NULL_BYTES = 0x1000
+    };
+    const BYTE *bytes = buffer;
+    unsigned found = size & 1 ? ODD_LENGTH : 0;
+    unsigned words = (unsigned)size / 2;
+    if (words > 256) words = 256;
+    unsigned ascii = 0, reverse_ascii = 0, low_change = 0, high_change = 0;
+    for (unsigned i = 0; i < words; ++i) {
+        unsigned low = bytes[i * 2], high = bytes[i * 2 + 1];
+        unsigned word = low | (high << 8);
+        if (i == 0 && word == 0xfeff) found |= SIGNATURE;
+        if (i == 0 && word == 0xfffe) found |= SIGNATURE << REVERSE;
+        if ((!word && i + 1 != (unsigned)size / 2) ||
+            (word == 0xfffe && i) || word == 0xffff || word == 0x0a0d)
+            found |= ILLEGAL_CHARS;
+        if ((!low || !high) && word) found |= NULL_BYTES;
+        if (unicode_control(word)) found |= CONTROLS;
+        if (unicode_control(high | (low << 8))) found |= CONTROLS << REVERSE;
+        if (!high && ((low >= 32 && low < 127) || unicode_control(low))) ++ascii;
+        if (!low && ((high >= 32 && high < 127) || unicode_control(high)))
+            ++reverse_ascii;
+        if (i) {
+            int dl = (int)low - bytes[(i - 1) * 2];
+            int dh = (int)high - bytes[(i - 1) * 2 + 1];
+            low_change += (unsigned)(dl < 0 ? -dl : dl);
+            high_change += (unsigned)(dh < 0 ? -dh : dh);
+        }
+    }
+    if (ascii == words) found |= ASCII16;
+    if (reverse_ascii == words) found |= ASCII16 << REVERSE;
+    if (ascii > words / 2 || (words >= 3 && low_change > 4 * high_change))
+        found |= STATISTICS;
+    if (reverse_ascii > words / 2 || (words >= 3 && high_change > 4 * low_change))
+        found |= STATISTICS << REVERSE;
+
+    /* A BOM supplies stronger byte-order evidence than the heuristics. */
+    if (found & SIGNATURE)
+        found &= ~0xf0u;
+    else if (found & (SIGNATURE << REVERSE))
+        found &= ~0x0fu;
+    found &= requested;
+    if (tests) *tests = (int)found;
+    return !(found & 0x0ff0) && (found & 0xf00f) != 0;
+}
+
 #include "AdvapiRegistryEnum.inc"
 #include "AdvapiService.inc"
 #include "AdvapiSecurityDescriptor.inc"
