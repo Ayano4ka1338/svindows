@@ -204,8 +204,29 @@ __declspec(dllexport) HANDLE CreatePropertySheetPageW(const void *page)
 __declspec(dllexport) int PropertySheetW(const void *header)
 { (void)header; return -1; }
 
-/* Ordinals 380 and 392 are private common-controls imports in the Windows 7
- * calculator. Keep their calls harmless while the corresponding private
- * callbacks remain unsupported. */
+/* Private common-controls import with no implemented operation. */
 __declspec(dllexport) ULONG_PTR SvOrdinal380(void) { return 0; }
-__declspec(dllexport) ULONG_PTR SvOrdinal392(void) { return 0; }
+
+/* The Windows 7 calculator uses ordinal 392 with flags zero to copy a
+ * resource bitmap, then deletes the original before sending STM_SETIMAGE. */
+HBITMAP SvOrdinal392(HBITMAP bitmap, UINT flags)
+{
+    BITMAP info;
+    if (flags || GetObjectW(bitmap, sizeof(info), &info) != sizeof(info))
+        return NULL;
+    HDC src = CreateCompatibleDC(NULL);
+    HDC dst = CreateCompatibleDC(NULL);
+    HBITMAP copy = src && dst ?
+        CreateCompatibleBitmap(src, info.bmWidth, info.bmHeight) : NULL;
+    BOOL copied = FALSE;
+    if (copy) {
+        SelectObject(src, bitmap);
+        SelectObject(dst, copy);
+        copied = BitBlt(dst, 0, 0, info.bmWidth, info.bmHeight,
+                        src, 0, 0, SRCCOPY);
+    }
+    if (dst) DeleteDC(dst);
+    if (src) DeleteDC(src);
+    if (!copied && copy) DeleteObject(copy);
+    return copied ? copy : NULL;
+}
