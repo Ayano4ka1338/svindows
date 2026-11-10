@@ -73,6 +73,7 @@ __declspec(dllimport) UINT64 NtGdiRectangle(HDC hdc, int left, int top, int righ
 __declspec(dllimport) UINT64 NtGdiMoveTo(HDC hdc, int x, int y, POINT *previous);
 __declspec(dllimport) UINT64 NtGdiLineTo(HDC hdc, int x, int y);
 __declspec(dllimport) UINT64 NtGdiCreateCompatibleDC(HDC reference);
+__declspec(dllimport) UINT64 SvNtGdiCreateDisplayDC(void);
 __declspec(dllimport) UINT64 NtGdiCreateCompatibleBitmap(HDC reference, int width,
                                                          int height);
 __declspec(dllimport) UINT64 NtGdiCreateBitmap(int width, int height, ULONG planes,
@@ -170,6 +171,29 @@ static void remember_bitmap_dimensions(HBITMAP bitmap, int width, int height)
 /* ------------------------------------------------------------------ */
 /* Device contexts and bitmaps                                          */
 /* ------------------------------------------------------------------ */
+
+static BOOL display_driver(const WCHAR *name)
+{
+    static const WCHAR display[] = L"DISPLAY";
+    if (!name) return FALSE;
+    for (UINT i = 0; i < sizeof(display) / sizeof(display[0]); i++) {
+        WCHAR ch = name[i];
+        if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+        if (ch != display[i]) return FALSE;
+    }
+    return TRUE;
+}
+
+GDI32_API HDC CreateDCW(const WCHAR *driver, const WCHAR *device,
+                       const WCHAR *output, const void *mode)
+{
+    (void)output;
+    /* Only the default display is installed. Printer drivers and display
+     * modes requiring a device configuration cannot be opened here. */
+    if (mode || (driver ? !display_driver(driver) : !display_driver(device)))
+        return NULL;
+    return (HDC)(ULONG_PTR)SvNtGdiCreateDisplayDC();
+}
 
 GDI32_API HDC CreateCompatibleDC(HDC reference)
 {

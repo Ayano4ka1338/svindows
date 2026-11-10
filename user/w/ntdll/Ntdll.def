@@ -168,6 +168,7 @@ EXPORTS
     NtGdiMoveTo
     NtGdiLineTo
     NtGdiCreateCompatibleDC
+    SvNtGdiCreateDisplayDC
     NtGdiCreateCompatibleBitmap
     NtGdiCreateBitmap
     NtGdiGetDeviceCaps

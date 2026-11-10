@@ -1215,6 +1215,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F08] = NtGdiClearWindowBackground;
     KiServiceTable[0x1F09] = NtRenameKey;
     KiServiceTable[0x1F0A] = NtAdjustPrivilegesToken;
+    KiServiceTable[0x1F0B] = SvNtGdiCreateDisplayDC;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

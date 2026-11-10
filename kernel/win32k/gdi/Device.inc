@@ -26,7 +26,8 @@ UINT64 W32kAcquireWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
         for (UINT16 i = 1; i < GDI_MAX_OBJECTS; i++) {
             W32K_OBJECT *object = &g_gdi_objects[i];
             if (object->Type == GDI_TYPE_DC && object->Owner == gdi_current_process() &&
-                !object->u.Dc.Hwnd && object->u.Dc.DeviceSurface.IsScreen) {
+                !object->u.Dc.Hwnd && !object->u.Dc.StandaloneDisplay &&
+                object->u.Dc.DeviceSurface.IsScreen) {
                 cached = ((UINT64)object->Upper << 16) | i;
                 break;
             }
@@ -54,6 +55,16 @@ UINT64 W32kAcquireWindowDc(UINT64 hwnd, INT32 x, INT32 y, INT32 width,
     UINT64 hdc = W32kCreateWindowDc(hwnd, x, y, width, height);
     if (hdc && hwnd)
         g_window_dc[slot] = hdc;
+    return hdc;
+}
+
+UINT64 SvNtGdiCreateDisplayDC(UINT64 *args)
+{
+    (void)args;
+    UINT64 hdc = W32kCreateWindowDc(0, 0, 0, GfxFramebuffer.Width,
+                                    GfxFramebuffer.Height);
+    W32K_OBJECT *object = hdc ? gdi_object(hdc, GDI_TYPE_DC) : NULL;
+    if (object) object->u.Dc.StandaloneDisplay = TRUE;
     return hdc;
 }
 

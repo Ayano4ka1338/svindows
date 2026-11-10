@@ -64,6 +64,7 @@ typedef struct _W32K_DC {
     BOOLEAN HasTransparentPixels;
     BOOLEAN Painting;
     BOOLEAN Dirty;
+    BOOLEAN StandaloneDisplay;
     INT32 DirtyLeft, DirtyTop, DirtyRight, DirtyBottom;
     UINT64 Hwnd;
     INT32  OrgX, OrgY;           /* where (0,0) of the DC lands on the surface */
