@@ -634,6 +634,27 @@ USER32_API LRESULT SendMessageTimeoutW(HWND window, UINT message,
     SetLastError(0);
     return 1;
 }
+USER32_API BOOL ChangeWindowMessageFilterEx(HWND window, UINT message,
+    DWORD action, void *change_filter)
+{
+    (void)message;
+    if (!IsWindow(window)) { SetLastError(1400); return FALSE; }
+    if (action > 2) { SetLastError(87); return FALSE; }
+    if (change_filter) {
+        struct { DWORD cbSize, ExtStatus; } *change = change_filter;
+        if (change->cbSize != sizeof(*change)) {
+            SetLastError(87);
+            return FALSE;
+        }
+        change->ExtStatus = 0; /* MSGFLTINFO_NONE: no UIPI filter is active */
+    }
+    if (action == 2) {
+        SetLastError(50); /* no enforcement layer exists for disallow */
+        return FALSE;
+    }
+    SetLastError(0);
+    return TRUE;
+}
 USER32_API int InternalGetWindowText(HWND window, WCHAR *text, int capacity)
 {
     if (!text || capacity<=0) return 0;
