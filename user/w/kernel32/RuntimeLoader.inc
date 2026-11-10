@@ -328,6 +328,26 @@ __declspec(dllexport) HANDLE GetStdHandle(DWORD which)
     return g_std_console;
 }
 
+static int wide_ieq(const WCHAR *a, const WCHAR *b);
+
+/* Open the attached console independently of redirected standard handles. */
+__declspec(dllexport) HANDLE OpenConsoleW(const WCHAR *name, DWORD access,
+                                          BOOL inherit, DWORD disposition)
+{
+    (void)inherit; /* Namespace file handles are not inheritable yet. */
+    if (!name || disposition != 3 ||
+        (!wide_ieq(name, L"CONIN$") && !wide_ieq(name, L"CONOUT$"))) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return NT_INVALID_HANDLE;
+    }
+    return nt_open_w(L"\\Device\\Console", access, 3, disposition, 0);
+}
+
+__declspec(dllexport) unsigned int GetConsoleOutputCP(void)
+{
+    return 437; /* The console uses the system OEM code page. */
+}
+
 __declspec(dllexport) BOOL GetConsoleMode(HANDLE console, DWORD *mode)
 {
     if (!console || console == NT_INVALID_HANDLE || !mode) {
