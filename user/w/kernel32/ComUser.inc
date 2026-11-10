@@ -384,16 +384,6 @@ typedef struct _USER_WINDOW {
 static USER_WINDOW g_user_windows[USER_MAX_WINDOWS];
 static HANDLE g_user_message_event;
 
-#define USER_MAX_REGISTERED_MESSAGES 64
-typedef struct _USER_REGISTERED_MESSAGE {
-    BOOL  Used;
-    DWORD Id;
-    WCHAR Name[USER_CLASS_NAME_MAX];
-} USER_REGISTERED_MESSAGE;
-
-static USER_REGISTERED_MESSAGE
-    g_user_registered_messages[USER_MAX_REGISTERED_MESSAGES];
-
 typedef struct _USER_CURSOR {
     DWORD ResourceId;
 } USER_CURSOR;
@@ -468,37 +458,26 @@ __declspec(dllexport) ATOM RegisterClassExW(const WNDCLASSEXW *window_class)
     return 0;
 }
 
+extern ULONGLONG NtUserRegisterWindowMessage(const UNICODE_STRING_K *name);
+
 __declspec(dllexport) DWORD RegisterWindowMessageW(const WCHAR *message_name)
 {
-    if (!message_name || !*message_name) {
+    DWORD length = 0;
+    if (message_name)
+        while (length < 64 && message_name[length]) length++;
+    if (!length || length >= 64) {
         SetLastError(87); /* ERROR_INVALID_PARAMETER */
         return 0;
     }
 
-    for (int i = 0; i < USER_MAX_REGISTERED_MESSAGES; i++) {
-        USER_REGISTERED_MESSAGE *entry = &g_user_registered_messages[i];
-        if (entry->Used && user_class_name_equal(entry->Name, message_name))
-            return entry->Id;
-    }
-
-    for (int i = 0; i < USER_MAX_REGISTERED_MESSAGES; i++) {
-        USER_REGISTERED_MESSAGE *entry = &g_user_registered_messages[i];
-        if (!entry->Used) {
-            int n = 0;
-            while (message_name[n] && n + 1 < USER_CLASS_NAME_MAX) {
-                entry->Name[n] = message_name[n];
-                n++;
-            }
-            entry->Name[n] = 0;
-            entry->Id = 0xC000u + (DWORD)i;
-            entry->Used = 1;
-            SetLastError(0);
-            return entry->Id;
-        }
-    }
-
-    SetLastError(8); /* ERROR_NOT_ENOUGH_MEMORY */
-    return 0;
+    UNICODE_STRING_K name = {
+        (WCHAR)(length * sizeof(WCHAR)),
+        (WCHAR)((length + 1) * sizeof(WCHAR)),
+        (WCHAR *)message_name
+    };
+    DWORD id = (DWORD)NtUserRegisterWindowMessage(&name);
+    if (!id) SetLastError(8); /* ERROR_NOT_ENOUGH_MEMORY */
+    return id;
 }
 
 __declspec(dllexport) HANDLE LoadCursorW(HANDLE instance,
