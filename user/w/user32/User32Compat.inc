@@ -624,6 +624,13 @@ USER32_API int InternalGetWindowText(HWND window, WCHAR *text, int capacity)
     return (int)NtUserGetWindowText(window,text,(ULONG)capacity);
 }
 
+USER32_API DWORD GetDialogBaseUnits(void)
+{
+    /* The desktop currently uses the fixed 8x16 system raster font.  Windows
+     * dialog units are based on the average character width and font height. */
+    return (DWORD)8 | ((DWORD)16 << 16);
+}
+
 __declspec(dllimport) UINT64 NtUserGetClassInfoEx(HINSTANCE, const void *, WNDCLASSEXW *, void *, UINT);
 USER32_API BOOL GetClassInfoExW(HINSTANCE instance, const WCHAR *name, WNDCLASSEXW *out)
 {
