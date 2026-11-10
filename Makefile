@@ -370,6 +370,8 @@ $(MSVCRT): user/w/msvcrt/Msvcrt.c $(MSVCRT_PARTS) $(KERNEL32)
 	           "/export:?what@exception@@UEBAPEBDXZ=msvcrt_exception_what" \
 	           "/export:?terminate@@YAXXZ=msvcrt_terminate" \
 	           "/export:??1type_info@@UEAA@XZ=msvcrt_type_info_dtor" \
+	           "/export:??2@YAPEAX_K@Z=msvcrt_operator_new" \
+	           "/export:??3@YAXPEAX@Z=msvcrt_operator_delete" \
 	           /export:_CxxThrowException=__CxxThrowException \
 	           $(BUILD)/msvcrt.obj $(KERNEL32LIB)
 	@echo "  DLL   $(MSVCRT)"

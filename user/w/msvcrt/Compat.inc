@@ -736,6 +736,22 @@ __declspec(dllexport) int _callnewh(SIZE_T size)
     return 0;
 }
 
+/* The native Task Manager uses the MSVC scalar C++ allocation operators for
+ * small UI and process-record objects.  Keep allocation ownership in the
+ * process heap so ordinary HeapFree/malloc cleanup can release the storage. */
+__declspec(dllexport) void *msvcrt_operator_new(SIZE_T size)
+{
+    void *memory = malloc(size ? size : 1);
+    if (!memory)
+        ExitProcess(3); /* this CRT's C++ exception path is fail-fast */
+    return memory;
+}
+
+__declspec(dllexport) void msvcrt_operator_delete(void *memory)
+{
+    free(memory);
+}
+
 /* No DBCS code page is active, so no byte is ever a lead byte. */
 __declspec(dllexport) int _ismbblead(unsigned int c)
 {
