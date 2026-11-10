@@ -420,7 +420,7 @@ $(UXTHEME): user/w/uxtheme/Uxtheme.c user/w/uxtheme/Uxtheme.h $(GDI32) $(KERNEL3
 
 # Shared common controls are a separate Win32 library layered on USER32/GDI32.
 COMCTL32_SRC := user/w/comctl32/Comctl32.c user/w/comctl32/Progress.c user/w/comctl32/Status.c \
-                user/w/comctl32/Trackbar.c user/w/comctl32/Tab.c user/w/comctl32/ListView.c user/w/comctl32/Toolbar.c user/w/comctl32/DateTime.c user/w/comctl32/UpDown.c
+                user/w/comctl32/Trackbar.c user/w/comctl32/Tab.c user/w/comctl32/ListView.c user/w/comctl32/Toolbar.c user/w/comctl32/DateTime.c user/w/comctl32/UpDown.c user/w/comctl32/TaskDialog.c
 COMCTL32_HEADERS := user/w/comctl32/Comctl32.h user/w/comctl32/Internal.h
 $(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) user/w/comctl32/Comctl32.def $(USER32) $(GDI32) $(KERNEL32)
 	@mkdir -p $(BUILD)
@@ -433,12 +433,13 @@ $(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) user/w/comctl32/Comctl32.def $(
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/Toolbar.c -o $(BUILD)/comctl32-toolbar.obj
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/DateTime.c -o $(BUILD)/comctl32-datetime.obj
 	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/UpDown.c -o $(BUILD)/comctl32-updown.obj
+	$(CLANGWIN) -DSV_COMCTL32_BUILD $(NOTEPAD_INC) -Iuser/w/comctl32 -c user/w/comctl32/TaskDialog.c -o $(BUILD)/comctl32-taskdialog.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x250000000 \
 	           /def:user/w/comctl32/Comctl32.def \
 	           /out:$@ /implib:$(COMCTL32LIB) $(BUILD)/comctl32.obj \
 	           $(BUILD)/comctl32-progress.obj $(BUILD)/comctl32-status.obj \
 	           $(BUILD)/comctl32-trackbar.obj $(BUILD)/comctl32-tab.obj \
-	           $(BUILD)/comctl32-listview.obj $(BUILD)/comctl32-toolbar.obj $(BUILD)/comctl32-datetime.obj $(BUILD)/comctl32-updown.obj \
+	           $(BUILD)/comctl32-listview.obj $(BUILD)/comctl32-toolbar.obj $(BUILD)/comctl32-datetime.obj $(BUILD)/comctl32-updown.obj $(BUILD)/comctl32-taskdialog.obj \
 	           $(USER32LIB) $(GDI32LIB) $(KERNEL32LIB)
 	@echo "  DLL   $@"
 

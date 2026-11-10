@@ -4,3 +4,4 @@ EXPORTS
     DefSubclassProc @413
     SvOrdinal380 @380 NONAME
     SvOrdinal392 @392 NONAME
+    TaskDialogIndirect @345
