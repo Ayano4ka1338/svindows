@@ -1342,6 +1342,11 @@ static UINT64 NtUserMapWindowPoints(UINT64 *a)
     return (UINT32)((UINT16)dx|((UINT32)(UINT16)dy<<16));
 }
 
+static UINT64 SvNtUserIsIconic(UINT64 *a)
+{
+    return KiUserWindowValid(a[0], TRUE) && g_w32k[(UINT16)a[0]].Minimized;
+}
+
 static UINT64 SvNtUserGetCursorPos(UINT64 *a)
 {
     INT32 *point = (INT32 *)a[0];

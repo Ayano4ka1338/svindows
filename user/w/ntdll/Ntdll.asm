@@ -417,6 +417,7 @@ SYSCALL_STUB SvNtUserGetCursorPos,   0x1F0C
 SYSCALL_STUB SvNtUserChildWindowFromPoint, 0x1F0D
 SYSCALL_STUB SvNtGdiViewportOrigin, 0x1F0E
 SYSCALL_STUB SvNtGdiClipRect,        0x1F0F
+SYSCALL_STUB SvNtUserIsIconic,      0x1F10
 SYSCALL_STUB NtOpenThread,           0x10E
 SYSCALL_STUB NtOpenEvent,            0x10F
 SYSCALL_STUB NtCreateJobObject,      0x110

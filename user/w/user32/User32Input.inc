@@ -77,6 +77,20 @@ USER32_API short GetKeyState(int key)
     return (short)NtUserGetKeyState(key);
 }
 
+__declspec(dllimport) UINT64 SvNtUserIsIconic(HWND hwnd);
+
+USER32_API BOOL IsIconic(HWND hwnd)
+{
+    return SvNtUserIsIconic(hwnd) != 0;
+}
+
+USER32_API HANDLE GetKeyboardLayout(DWORD thread)
+{
+    (void)thread;
+    /* The USER keyboard mapper has one installed layout, US English. */
+    return (HANDLE)(UINT_PTR)0x04090409;
+}
+
 typedef void (*SV_WINEVENTPROC)(HANDLE, DWORD, HWND, LONG, LONG, DWORD, DWORD);
 __declspec(dllimport) UINT64 NtUserSetWinEventHook(DWORD first, DWORD last,
     HINSTANCE module, const void *module_name, SV_WINEVENTPROC callback,
