@@ -6,6 +6,7 @@ BOOL SvRegisterStatus(void);
 BOOL SvRegisterTrackbar(void);
 BOOL SvRegisterTab(void);
 BOOL SvRegisterListView(void);
+BOOL SvRegisterTreeView(void);
 BOOL SvRegisterToolbar(void);
 BOOL SvRegisterDateTime(void);
 BOOL SvRegisterUpDown(void);

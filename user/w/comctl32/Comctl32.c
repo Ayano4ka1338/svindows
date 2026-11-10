@@ -22,12 +22,16 @@ void SvComctlFill(HDC dc, const RECT *rect, COLORREF color)
     DeleteObject(brush);
 }
 
-static BOOL date_registered,updown_registered;
+static BOOL date_registered,updown_registered,tree_registered;
 static BOOL progress_registered, status_registered, trackbar_registered, tab_registered, listview_registered, toolbar_registered;
 COMCTL32_API BOOL InitCommonControlsEx(const INITCOMMONCONTROLSEX *controls)
 {
     if (!controls || controls->dwSize != sizeof(*controls)) return FALSE;
     DWORD flags = controls->dwICC;
+    if ((flags & 2) && !tree_registered) {
+        if (!SvRegisterTreeView()) return FALSE;
+        tree_registered = TRUE;
+    }
     if((flags&ICC_DATE_CLASSES)&&!date_registered){if(!SvRegisterDateTime())return FALSE;date_registered=TRUE;}
     if((flags&ICC_UPDOWN_CLASS)&&!updown_registered){if(!SvRegisterUpDown())return FALSE;updown_registered=TRUE;}
     if ((flags & ICC_PROGRESS_CLASS) && !progress_registered) {
@@ -59,7 +63,7 @@ COMCTL32_API BOOL InitCommonControlsEx(const INITCOMMONCONTROLSEX *controls)
 
 COMCTL32_API void InitCommonControls(void)
 {
-    INITCOMMONCONTROLSEX controls = { sizeof(controls), ICC_PROGRESS_CLASS | ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_COOL_CLASSES };
+    INITCOMMONCONTROLSEX controls = { sizeof(controls), 2 | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_COOL_CLASSES };
     (void)InitCommonControlsEx(&controls);
 }
 
