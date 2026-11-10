@@ -140,3 +140,61 @@ __declspec(dllexport) BOOL_K AdjustTokenPrivileges(HANDLE token, BOOL_K disable_
     SetLastError(status == 0x106 ? 1300 /* ERROR_NOT_ALL_ASSIGNED */ : 0);
     return TRUE_K;
 }
+
+/* Well-known accounts used in local tokens and registry descriptors. */
+__declspec(dllexport) BOOL_K LookupAccountSidW(const WCHAR *system, const void *sid,
+    WCHAR *name, DWORD *name_size, WCHAR *domain, DWORD *domain_size, DWORD *use)
+{
+    static const struct {
+        DWORD Authority, First, Second;
+        BYTE Count;
+        DWORD Use;
+        const WCHAR *Name, *Domain;
+    } accounts[] = {
+        {1, 0, 0, 1, 5, L"Everyone", L""},
+        {5, 4, 0, 1, 5, L"INTERACTIVE", L"NT AUTHORITY"},
+        {5, 11, 0, 1, 5, L"Authenticated Users", L"NT AUTHORITY"},
+        {5, 18, 0, 1, 5, L"SYSTEM", L"NT AUTHORITY"},
+        {5, 19, 0, 1, 5, L"LOCAL SERVICE", L"NT AUTHORITY"},
+        {5, 20, 0, 1, 5, L"NETWORK SERVICE", L"NT AUTHORITY"},
+        {5, 32, 544, 2, 4, L"Administrators", L"BUILTIN"},
+        {5, 32, 545, 2, 4, L"Users", L"BUILTIN"},
+        {5, 32, 546, 2, 4, L"Guests", L"BUILTIN"}
+    };
+    if (!name_size || !domain_size || !use) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return FALSE_K;
+    }
+    if (!sid_valid(sid)) {
+        SetLastError(1337); /* ERROR_INVALID_SID */
+        return FALSE_K;
+    }
+    if (!advapi_local_system(system)) {
+        SetLastError(1722); /* RPC_S_SERVER_UNAVAILABLE */
+        return FALSE_K;
+    }
+
+    const BYTE *raw = sid;
+    for (unsigned i = 0; i < sizeof(accounts) / sizeof(accounts[0]); i++) {
+        if (raw[1] != accounts[i].Count || sid_authority(raw) != accounts[i].Authority ||
+            sid_subauthority(raw, 0) != accounts[i].First ||
+            (raw[1] == 2 && sid_subauthority(raw, 1) != accounts[i].Second))
+            continue;
+        DWORD need_name = (DWORD)wide_len(accounts[i].Name) + 1;
+        DWORD need_domain = (DWORD)wide_len(accounts[i].Domain) + 1;
+        if (!name || *name_size < need_name || !domain || *domain_size < need_domain) {
+            *name_size = need_name;
+            *domain_size = need_domain;
+            SetLastError(122); /* ERROR_INSUFFICIENT_BUFFER */
+            return FALSE_K;
+        }
+        sid_copy(name, accounts[i].Name, need_name * sizeof(*name));
+        sid_copy(domain, accounts[i].Domain, need_domain * sizeof(*domain));
+        *name_size = need_name - 1;
+        *domain_size = need_domain - 1;
+        *use = accounts[i].Use;
+        return TRUE_K;
+    }
+    SetLastError(1332); /* ERROR_NONE_MAPPED */
+    return FALSE_K;
+}
