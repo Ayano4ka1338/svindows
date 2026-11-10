@@ -2,11 +2,14 @@
 #define SVWINDOWS_EDIT_MODEL_H
 /* UTF-16 storage and selection offsets. No HWND, DC, theme or screen state. */
 typedef unsigned short EDIT_CHAR;
-typedef struct {
+typedef struct EDIT_MODEL {
     EDIT_CHAR *text;
     int length, capacity, caret, anchor;
     unsigned limit;
     int modified;
+    void *storage;
+    int (*grow_storage)(struct EDIT_MODEL *model, int capacity);
+    void (*free_storage)(struct EDIT_MODEL *model);
 } EDIT_MODEL;
 void *SvControlAlloc(unsigned long long bytes);
 void SvControlFree(void *pointer);

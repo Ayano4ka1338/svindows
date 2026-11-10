@@ -1,5 +1,78 @@
 #include "Control.h"
 #define MARGIN 4
+
+__declspec(dllimport) void *LocalAlloc(UINT flags, ULONG_PTR bytes);
+__declspec(dllimport) void *LocalReAlloc(void *handle, ULONG_PTR bytes, UINT flags);
+__declspec(dllimport) void *LocalLock(void *handle);
+__declspec(dllimport) BOOL LocalUnlock(void *handle);
+__declspec(dllimport) ULONG_PTR LocalSize(void *handle);
+__declspec(dllimport) void *LocalFree(void *handle);
+
+static int grow_local_buffer(EDIT_MODEL *model, int capacity)
+{
+    ULONG_PTR size = (ULONG_PTR)capacity * sizeof(WCHAR);
+    void *handle = model->storage
+        ? LocalReAlloc(model->storage, size, 0x40 /* LMEM_ZEROINIT */)
+        : LocalAlloc(0x42 /* LMEM_MOVEABLE | LMEM_ZEROINIT */, size);
+    if (!handle) return 0;
+    model->storage = handle;
+    model->text = LocalLock(handle);
+    if (!model->text) return 0;
+    LocalUnlock(handle);
+    model->capacity = capacity;
+    return 1;
+}
+
+static void free_local_buffer(EDIT_MODEL *model)
+{
+    LocalFree(model->storage);
+    model->storage = 0;
+}
+
+static void *edit_get_handle(EDIT_MODEL *model)
+{
+    if (model->storage) return model->storage;
+    WCHAR *previous = model->text;
+    if (!grow_local_buffer(model, model->capacity)) {
+        LocalFree(model->storage);
+        model->storage = 0;
+        model->text = previous;
+        return 0;
+    }
+    for (int i = 0; i <= model->length; i++) model->text[i] = previous[i];
+    SvControlFree(previous);
+    model->grow_storage = grow_local_buffer;
+    model->free_storage = free_local_buffer;
+    return model->storage;
+}
+
+static void edit_set_handle(SV_CONTROL *control, void *handle)
+{
+    ULONG_PTR capacity = LocalSize(handle) / sizeof(WCHAR);
+    if (!capacity || capacity > 0x7fffffffu) return;
+    WCHAR *text = LocalLock(handle);
+    if (!text) return;
+    ULONG_PTR length = 0;
+    while (length < capacity && text[length]) length++;
+    LocalUnlock(handle);
+    if (length == capacity) return;
+
+    /* EM_SETHANDLE transfers the supplied block. The caller frees the
+     * previous block if it supplies a different handle. */
+    EDIT_MODEL *model = &control->model;
+    if (!model->storage && model->text != text) SvControlFree(model->text);
+    model->grow_storage = grow_local_buffer;
+    model->free_storage = free_local_buffer;
+    model->storage = handle;
+    model->text = text;
+    model->capacity = (int)capacity;
+    model->length = (int)length;
+    model->caret = model->anchor = 0;
+    model->modified = 0;
+    control->first_line = control->scroll_x = 0;
+    SvControlInvalidate(control);
+}
+
 static int line_height(HDC dc)
 {
     TEXTMETRICW tm;
@@ -145,6 +218,11 @@ LRESULT SvEditMessage(SV_CONTROL *c, UINT msg, WPARAM wp, LPARAM lp)
         return lo > 65535 || hi > 65535 ? -1 : MAKELONG(lo, hi);
     }
     case EM_SETSEL: SvEditSelect(m, (int)wp, (int)lp); SvEditEnsureVisible(c); SvControlInvalidate(c); return 0;
+    case EM_GETHANDLE:
+        return (c->style & ES_MULTILINE) ? (LRESULT)edit_get_handle(m) : 0;
+    case EM_SETHANDLE:
+        if (c->style & ES_MULTILINE) edit_set_handle(c, (void *)wp);
+        return 0;
     case EM_GETMODIFY: return m->modified;
     case EM_SETMODIFY: m->modified = !!wp; return 0;
     case EM_GETLINECOUNT: return SvEditLineFromOffset(m, m->length) + 1;

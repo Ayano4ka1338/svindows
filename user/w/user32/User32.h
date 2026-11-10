@@ -285,6 +285,8 @@ __declspec(dllimport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
 #define EM_SETMODIFY     0x00B9u
 #define EM_GETLINECOUNT  0x00BAu
 #define EM_LINEINDEX     0x00BBu
+#define EM_SETHANDLE     0x00BCu
+#define EM_GETHANDLE     0x00BDu
 #define EM_LINELENGTH    0x00C1u
 #define EM_REPLACESEL    0x00C2u
 #define EM_LIMITTEXT     0x00C5u

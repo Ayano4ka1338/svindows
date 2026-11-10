@@ -14,6 +14,7 @@ static int reserve(EDIT_MODEL *m, int needed)
         if (capacity > 0x3FFFFFFFu) { capacity = (unsigned)needed; break; }
         capacity *= 2;
     }
+    if (m->grow_storage) return m->grow_storage(m, (int)capacity);
     EDIT_CHAR *text = SvControlAlloc((unsigned long long)capacity * sizeof(*text));
     if (!text) return 0;
     for (int i = 0; i <= m->length && m->text; ++i) text[i] = m->text[i];
@@ -118,6 +119,8 @@ int SvEditLineEnd(const EDIT_MODEL *m, int offset)
 }
 void SvEditDispose(EDIT_MODEL *m)
 {
-    SvControlFree(m->text); m->text = 0;
+    if (m->free_storage) m->free_storage(m);
+    else SvControlFree(m->text);
+    m->text = 0;
     m->length = m->capacity = m->caret = m->anchor = 0;
 }
