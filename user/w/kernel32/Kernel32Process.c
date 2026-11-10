@@ -32,6 +32,8 @@ extern long NtDuplicateObject(HANDLE source_process, HANDLE source_handle,
 extern long NtOpenProcess(HANDLE *process, DWORD access, void *attributes,
                           const void *client_id);
 extern long SvNtQueryThreadExitStatus(HANDLE thread, DWORD *exit_status);
+extern long NtQuerySystemInformation(DWORD info_class, void *buffer,
+                                     DWORD length, DWORD *return_length);
 
 __declspec(dllexport) BOOL GetExitCodeThread(HANDLE thread, DWORD *exit_code)
 {
@@ -40,6 +42,75 @@ __declspec(dllexport) BOOL GetExitCodeThread(HANDLE thread, DWORD *exit_code)
     long result = SvNtQueryThreadExitStatus(thread, &status);
     if (result < 0) { SetLastError(6); return 0; }
     *exit_code = status == 0x00000103u ? 259u : status;
+    SetLastError(0);
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetLogicalProcessorInformationEx(
+    DWORD relationship, void *buffer, DWORD *returned_length)
+{
+    const DWORD RELATION_PROCESSOR_CORE = 0;
+    const DWORD RELATION_GROUP = 4;
+    const DWORD RELATION_ALL = 0xffff;
+    if (!returned_length || (relationship != RELATION_PROCESSOR_CORE &&
+        relationship != RELATION_GROUP && relationship != RELATION_ALL)) {
+        SetLastError(relationship == RELATION_PROCESSOR_CORE ||
+                     relationship == RELATION_GROUP ||
+                     relationship == RELATION_ALL ? 87 : 50);
+        return 0;
+    }
+
+    struct {
+        DWORD Reserved, TimerResolution, PageSize, PhysicalPages;
+        DWORD LowestPage, HighestPage, AllocationGranularity, Padding;
+        unsigned long long MinimumAddress, MaximumAddress, ActiveMask;
+        unsigned char ProcessorCount;
+        unsigned char Tail[7];
+    } basic;
+    DWORD actual = 0;
+    long status = NtQuerySystemInformation(0, &basic, sizeof(basic), &actual);
+    if (status < 0 || !basic.ProcessorCount || basic.ProcessorCount > 64) {
+        SetLastError(50);
+        return 0;
+    }
+    DWORD core_count = 0;
+    for (DWORD i = 0; i < basic.ProcessorCount; ++i)
+        if (basic.ActiveMask & (1ull << i)) core_count++;
+    if (!core_count) { SetLastError(50); return 0; }
+    DWORD need = (relationship == RELATION_GROUP ? 0 : core_count * 48) +
+                 (relationship == RELATION_PROCESSOR_CORE ? 0 : 80);
+    DWORD capacity = *returned_length;
+    *returned_length = need;
+    if (!buffer || capacity < need) {
+        SetLastError(122); /* ERROR_INSUFFICIENT_BUFFER */
+        return 0;
+    }
+    unsigned char *out = buffer;
+    DWORD offset = 0;
+    if (relationship != RELATION_GROUP) {
+        for (DWORD i = 0; i < basic.ProcessorCount; ++i) {
+            unsigned long long affinity = 1ull << i;
+            if (!(basic.ActiveMask & affinity)) continue;
+            unsigned char *record = out + offset;
+            for (DWORD j = 0; j < 48; ++j) record[j] = 0;
+            *(DWORD *)(record + 0) = RELATION_PROCESSOR_CORE;
+            *(DWORD *)(record + 4) = 48;
+            *(unsigned short *)(record + 30) = 1; /* one processor group */
+            *(unsigned long long *)(record + 32) = affinity;
+            offset += 48;
+        }
+    }
+    if (relationship != RELATION_PROCESSOR_CORE) {
+        unsigned char *record = out + offset;
+        for (DWORD j = 0; j < 80; ++j) record[j] = 0;
+        *(DWORD *)(record + 0) = RELATION_GROUP;
+        *(DWORD *)(record + 4) = 80;
+        *(unsigned short *)(record + 8) = 1;  /* maximum processor groups */
+        *(unsigned short *)(record + 10) = 1; /* active processor groups */
+        record[32] = basic.ProcessorCount;
+        record[33] = (unsigned char)core_count;
+        *(unsigned long long *)(record + 72) = basic.ActiveMask;
+    }
     SetLastError(0);
     return 1;
 }
