@@ -164,17 +164,9 @@ USER32_API HWND CreateWindowExW(DWORD ex_style, const WCHAR *class_name,
     if (!class_name || !SvRegisterControl(class_name))
         return NULL;
 
-    /* CW_USEDEFAULT would reach the kernel as 0x80000000 and place the window
-     * off screen (its painter drops anything outside the framebuffer), so the
-     * documented default position takes its place. */
-    if (x == CW_USEDEFAULT) {
-        x = 120;
-        y = 100;
-    }
-    if (width == CW_USEDEFAULT)
-        width = 640;
-    if (height == CW_USEDEFAULT)
-        height = 400;
+    /* Preserve CW_USEDEFAULT for win32k. Its window manager resolves default
+     * geometry and cascades successive top-level windows, keeping a newly
+     * launched application from covering the one that was already open. */
 
     if(!menu&&!(style&(WS_CHILD|WS_POPUP)))menu=sv_user_default_menu(class_name,instance);
 
