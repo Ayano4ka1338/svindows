@@ -705,12 +705,16 @@ static UINT64 NtUserCallHwndLock(UINT64 *a) { return 0; }
 static UINT64 NtUserCallHwndParam(UINT64 *a) { return 0; }
 static UINT64 NtUserCallTwoParam(UINT64 *a) { return 0; }
 static UINT64 NtUserEnumDisplayMonitors(UINT64 *a) { return 0; }
+/* A desktop is owned by the window manager. Its slot-zero handle is never
+ * allocated as an application window or accepted for destruction. */
+#define SV_DESKTOP_HWND 0xffff0000ull
+
 static UINT64 NtUserGetDC(UINT64 *a)
 {
-    if (a[0] && !KiUserWindowValid(a[0], TRUE)) return 0;
+    UINT64 hwnd = a[0] == SV_DESKTOP_HWND ? 0 : a[0];
+    if (hwnd && !KiUserWindowValid(hwnd, TRUE)) return 0;
     /* GetDC(NULL) means the whole screen; GetDC(hwnd) is the client area, which
      * the window manager owns - a client never draws its own caption. */
-    UINT64 hwnd = a[0];
     INT32 x = 0, y = 0;
     INT32 w = (INT32)GfxFramebuffer.Width, h = (INT32)GfxFramebuffer.Height;
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);

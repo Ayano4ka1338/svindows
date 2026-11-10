@@ -136,6 +136,7 @@ EXPORTS
     SvNtUserIsIconic
     SvNtUserCreateIconHandle
     SvNtUserDestroyIcon
+    SvNtUserGetDesktopWindow
     SvNtUserChildWindowFromPoint
     NtUserSetFocus
     NtUserGetFocus

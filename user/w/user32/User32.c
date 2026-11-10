@@ -276,6 +276,13 @@ USER32_API int GetWindowTextW(HWND hwnd, WCHAR *buffer, int capacity)
     return copied;
 }
 
+__declspec(dllimport) UINT64 SvNtUserGetDesktopWindow(void);
+
+USER32_API HWND GetDesktopWindow(void)
+{
+    return (HWND)(UINT_PTR)SvNtUserGetDesktopWindow();
+}
+
 USER32_API HWND WindowFromPoint(POINT point)
 {
     /* Screen coordinates, answered by the window manager's hit test. */

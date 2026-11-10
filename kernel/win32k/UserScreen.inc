@@ -1321,8 +1321,26 @@ static void W32kSetStyle(UINT16 slot, UINT32 style)
     if(was_visible!=((style&WS_VISIBLE_)!=0))W32kShowWindow(KiUserWindowHandle(slot),(style&WS_VISIBLE_)?5:0);
 }
 
+static UINT64 SvNtUserGetDesktopWindow(UINT64 *a)
+{
+    (void)a;
+    return GfxAvailable() ? SV_DESKTOP_HWND : 0;
+}
+
+static UINT64 desktop_rect(UINT64 address)
+{
+    if (!GfxAvailable() || !MmProbeForWrite(address, 4 * sizeof(INT32)))
+        return 0;
+    INT32 *rect = (INT32 *)address;
+    rect[0] = rect[1] = 0;
+    rect[2] = (INT32)GfxFramebuffer.Width;
+    rect[3] = (INT32)GfxFramebuffer.Height;
+    return 1;
+}
+
 static UINT64 NtUserGetWindowRect(UINT64 *a)
 {
+    if (a[0] == SV_DESKTOP_HWND) return desktop_rect(a[1]);
     if (!KiUserWindowValid(a[0], TRUE))
         return 0;
     return W32kGetRect(a[0], (INT32 *)a[1], FALSE) ? 1 : 0;
@@ -1331,12 +1349,14 @@ static UINT64 NtUserGetWindowRect(UINT64 *a)
 /* Private client contract: source HWND, target HWND, POINT array, count. */
 static UINT64 NtUserMapWindowPoints(UINT64 *a)
 {
-    if ((a[0] && !KiUserWindowValid(a[0], TRUE)) ||
-        (a[1] && !KiUserWindowValid(a[1], TRUE)) || a[3]>65536 ||
+    UINT64 from = a[0] == SV_DESKTOP_HWND ? 0 : a[0];
+    UINT64 to = a[1] == SV_DESKTOP_HWND ? 0 : a[1];
+    if ((from && !KiUserWindowValid(from, TRUE)) ||
+        (to && !KiUserWindowValid(to, TRUE)) || a[3]>65536 ||
         !MmProbeForWrite(a[2], a[3]*8)) return 0;
     INT32 sx=0,sy=0,tx=0,ty=0,w,h;
-    if(a[0])W32kClientOrigin((UINT16)a[0],&sx,&sy,&w,&h);
-    if(a[1])W32kClientOrigin((UINT16)a[1],&tx,&ty,&w,&h);
+    if(from)W32kClientOrigin((UINT16)from,&sx,&sy,&w,&h);
+    if(to)W32kClientOrigin((UINT16)to,&tx,&ty,&w,&h);
     INT32 dx=sx-tx,dy=sy-ty;INT32 *p=(INT32*)a[2];
     for(UINT64 i=0;i<a[3];i++){p[i*2]+=dx;p[i*2+1]+=dy;}
     return (UINT32)((UINT16)dx|((UINT32)(UINT16)dy<<16));
@@ -1387,6 +1407,7 @@ static UINT64 SvNtUserChildWindowFromPoint(UINT64 *a)
 
 static UINT64 NtUserGetClientRect(UINT64 *a)
 {
+    if (a[0] == SV_DESKTOP_HWND) return desktop_rect(a[1]);
     if (!KiUserWindowValid(a[0], TRUE))
         return 0;
     return W32kGetRect(a[0], (INT32 *)a[1], TRUE) ? 1 : 0;
