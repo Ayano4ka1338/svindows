@@ -97,6 +97,7 @@ __declspec(dllexport) HANDLE ImageList_Create(int width,int height,UINT flags,in
     for(UINT i=0;i<256;i++)if(!g_image_lists[i].Magic){
         SV_IMAGELIST *list=&g_image_lists[i];sv_image_list_clear(list);
         list->Magic=SV_IMAGE_LIST_MAGIC;list->Width=width;list->Height=height;
+        list->Background=0xffffffffu;
         list->Flags=flags;list->Capacity=SV_IMAGE_LIST_MAX;return list;
     }
     return 0;
@@ -234,4 +235,25 @@ HBITMAP SvOrdinal392(HBITMAP bitmap, UINT flags)
     if (src) DeleteDC(src);
     if (!copied && copy) DeleteObject(copy);
     return copied ? copy : NULL;
+}
+
+
+__declspec(dllexport) COLORREF ImageList_SetBkColor(HANDLE handle, COLORREF color)
+{
+    SV_IMAGELIST *list = 0;
+    for (UINT i = 0; i < 256; i++)
+        if (handle == &g_image_lists[i] && g_image_lists[i].Magic == SV_IMAGE_LIST_MAGIC)
+            list = &g_image_lists[i];
+    if (!list) return (COLORREF)-1;
+    COLORREF previous = list->Background;
+    list->Background = color;
+    return previous;
+}
+
+__declspec(dllexport) int ImageList_ReplaceIcon(HANDLE list, int index, HICON icon)
+{
+    (void)list; (void)index; (void)icon;
+    /* Icon handles currently carry resource identity only. No icon pixels can
+     * be cloned into a bitmap list until the icon decoder is implemented. */
+    return -1;
 }

@@ -7,5 +7,6 @@ typedef struct {
     unsigned int Magic;
     int Width, Height, Flags, Count, Capacity;
     HBITMAP Images[SV_IMAGE_LIST_MAX];
+    unsigned int Background;
 } SV_IMAGELIST;
 #endif
