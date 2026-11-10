@@ -86,6 +86,15 @@ __declspec(dllexport) char *setlocale(int category, const char *locale)
     (void)category; (void)locale;
     return "C";
 }
+__declspec(dllexport) WCHAR *_wsetlocale(int category, const WCHAR *locale)
+{
+    static WCHAR c_locale[] = L"C";
+    if (category < 0 || category > 5) return 0;
+    if (!locale || !*locale || (locale[0] == 'C' && !locale[1]))
+        return c_locale;
+    return 0;
+}
+
 __declspec(dllexport) int strcoll(const char *left, const char *right)
 {
     return strcmp(left, right);
