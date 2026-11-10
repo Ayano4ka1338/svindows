@@ -782,3 +782,9 @@ client-rect-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/ClientRectChecks.c -o $(BUILD)/ClientRectChecks
 	$(BUILD)/ClientRectChecks
+
+.PHONY: storage-medium-check
+storage-medium-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined tools/checks/StorageMediumChecks.c -o $(BUILD)/StorageMediumChecks
+	$(BUILD)/StorageMediumChecks
