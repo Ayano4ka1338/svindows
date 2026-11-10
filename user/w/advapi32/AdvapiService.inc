@@ -7,6 +7,7 @@ extern int CreateProcessW(const WCHAR *application, WCHAR *command,
                           const WCHAR *current_directory, void *startup,
                           void *process_info);
 extern int GetExitCodeProcess(HANDLE process, DWORD *exit_code);
+extern DWORD GetProcessId(HANDLE process);
 extern int CloseHandle(HANDLE handle);
 extern DWORD GetLastError(void);
 
@@ -24,6 +25,12 @@ extern DWORD GetLastError(void);
 #define ERROR_SERVICE_DOES_NOT_EXIST 1060u
 #define ERROR_SERVICE_ALREADY_RUNNING 1056u
 #define ERROR_SERVICE_DISABLED 1058u
+#define ERROR_MORE_DATA 234u
+#define ERROR_NO_MORE_ITEMS 259u
+#define SERVICE_ACTIVE 1u
+#define SERVICE_INACTIVE 2u
+#define SERVICE_STATE_ALL 3u
+#define SC_ENUM_PROCESS_INFO 0u
 
 typedef struct {
     HANDLE Process;
@@ -42,6 +49,14 @@ typedef struct {
     DWORD ServiceType, CurrentState, ControlsAccepted, Win32ExitCode;
     DWORD ServiceSpecificExitCode, CheckPoint, WaitHint;
 } SCM_STATUS;
+typedef struct {
+    DWORD ServiceType, CurrentState, ControlsAccepted, Win32ExitCode;
+    DWORD ServiceSpecificExitCode, CheckPoint, WaitHint, ProcessId, ServiceFlags;
+} SCM_STATUS_PROCESS;
+typedef struct {
+    WCHAR *ServiceName, *DisplayName;
+    SCM_STATUS_PROCESS Status;
+} SCM_ENUM_SERVICE_PROCESS;
 typedef struct {
     DWORD ServiceType, StartType, ErrorControl;
     WCHAR *BinaryPathName, *LoadOrderGroup;
@@ -379,4 +394,159 @@ __declspec(dllexport) BOOL_K ControlService(HANDLE handle, DWORD control,
     /* A child executable is not a service-control dispatcher. */
     SetLastError(1061); /* ERROR_SERVICE_CANNOT_ACCEPT_CTRL */
     return FALSE_K;
+}
+
+typedef struct {
+    WCHAR Name[80], DisplayName[128];
+    SCM_STATUS_PROCESS Status;
+} SCM_ENUM_ITEM;
+static SCM_ENUM_ITEM g_scm_enum_items[128];
+static volatile DWORD g_scm_enum_lock;
+
+__declspec(dllexport) BOOL_K EnumServicesStatusExW(HANDLE manager,
+    DWORD info_level, DWORD service_type, DWORD service_state,
+    BYTE *buffer, DWORD buffer_size, DWORD *bytes_needed,
+    DWORD *services_returned, DWORD *resume_handle, const WCHAR *group_name)
+{
+    if (info_level != SC_ENUM_PROCESS_INFO) {
+        SetLastError(124); /* ERROR_INVALID_LEVEL */
+        return FALSE_K;
+    }
+    if ((buffer_size && !buffer) || !bytes_needed || !services_returned ||
+        (group_name && !group_name[0]) ||
+        (service_state != SERVICE_ACTIVE && service_state != SERVICE_INACTIVE &&
+         service_state != SERVICE_STATE_ALL)) {
+        SetLastError(87);
+        return FALSE_K;
+    }
+    scm_lock();
+    SCM_HANDLE_SLOT *manager_slot = scm_slot(manager, SCM_MANAGER);
+    DWORD access = manager_slot ? manager_slot->Access : 0;
+    scm_unlock();
+    if (!manager_slot) { SetLastError(6); return FALSE_K; }
+    if (!(access & 4u)) { SetLastError(5); return FALSE_K; }
+    while (__atomic_exchange_n(&g_scm_enum_lock, 1, __ATOMIC_ACQUIRE))
+        __asm__ volatile("pause");
+
+    static const WCHAR services_path[] = {
+        'S','Y','S','T','E','M','\\','C','u','r','r','e','n','t','C','o','n','t',
+        'r','o','l','S','e','t','\\','S','e','r','v','i','c','e','s',0
+    };
+    HKEY root = 0;
+    LONG status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, services_path, 0,
+                                KEY_READ, &root);
+    if (status && status != 2) {
+        __atomic_store_n(&g_scm_enum_lock, 0, __ATOMIC_RELEASE);
+        SetLastError((DWORD)status);
+        return FALSE_K;
+    }
+    DWORD start = resume_handle ? *resume_handle : 0;
+    SCM_ENUM_ITEM *items = g_scm_enum_items;
+    DWORD count = 0, next_index = start;
+    int complete = 1;
+    if (!status) {
+        DWORD index = start;
+        for (; index < 4096 && count < 128; ++index) {
+            WCHAR name[80] = {0};
+            DWORD chars = 79;
+            LONG es = RegEnumKeyExW(root, index, name, &chars, 0, 0, 0, 0);
+            if (es == ERROR_NO_MORE_ITEMS) break;
+            if (es) {
+                RegCloseKey(root);
+                __atomic_store_n(&g_scm_enum_lock, 0, __ATOMIC_RELEASE);
+                SetLastError((DWORD)es);
+                return FALSE_K;
+            }
+            name[chars < 79 ? chars : 79] = 0;
+            HKEY config = scm_open_config(name);
+            if (!config) continue;
+            DWORD type = 0;
+            WCHAR display[128] = {0}, group[128] = {0};
+            int valid = scm_read_dword(config, L"Type", &type) &&
+                scm_config_string(config, L"DisplayName", display, 128) &&
+                scm_config_string(config, L"Group", group, 128);
+            RegCloseKey(config);
+            if (!valid || (service_type && !(type & service_type)) ||
+                (group_name && !scm_name_equal(group_name, group)))
+                continue;
+            if (!display[0]) {
+                DWORD n = 0;
+                while (name[n] && n < 79) { display[n] = name[n]; n++; }
+                display[n] = 0;
+            }
+            SCM_ENUM_ITEM *item = &items[count];
+            for (DWORD z = 0; z < sizeof(*item); ++z)
+                ((BYTE *)item)[z] = 0;
+            for (DWORD n = 0; n < 80; ++n) {
+                item->Name[n] = name[n];
+                if (!name[n]) break;
+            }
+            for (DWORD n = 0; n < 128; ++n) {
+                item->DisplayName[n] = display[n];
+                if (!display[n]) break;
+            }
+            item->Status.ServiceType = type;
+            item->Status.CurrentState = SERVICE_STOPPED;
+            scm_lock();
+            for (DWORD si = 0; si < SCM_SERVICES; ++si) {
+                SCM_SERVICE_RECORD *service = &g_scm_services[si];
+                if (!service->Name[0] || !scm_name_equal(service->Name, name))
+                    continue;
+                DWORD exit_code = 0;
+                if (service->Process &&
+                    GetExitCodeProcess(service->Process, &exit_code) &&
+                    exit_code == 259) {
+                    item->Status.CurrentState = SERVICE_RUNNING;
+                    item->Status.ProcessId = GetProcessId(service->Process);
+                } else {
+                    item->Status.Win32ExitCode = exit_code;
+                }
+                break;
+            }
+            scm_unlock();
+            int active = item->Status.CurrentState == SERVICE_RUNNING;
+            if ((active && !(service_state & SERVICE_ACTIVE)) ||
+                (!active && !(service_state & SERVICE_INACTIVE)))
+                continue;
+            count++;
+            next_index = index + 1;
+        }
+        if (count == 128 && index < 4096) {
+            complete = 0;
+            next_index = index;
+        }
+        RegCloseKey(root);
+    }
+
+    DWORD required = count * (DWORD)sizeof(SCM_ENUM_SERVICE_PROCESS);
+    for (DWORD i = 0; i < count; ++i)
+        required += (scm_wide_length(items[i].Name) +
+                     scm_wide_length(items[i].DisplayName) + 2) * sizeof(WCHAR);
+    *bytes_needed = required;
+    *services_returned = 0;
+    if (required > buffer_size) {
+        if (resume_handle) *resume_handle = start;
+        __atomic_store_n(&g_scm_enum_lock, 0, __ATOMIC_RELEASE);
+        SetLastError(ERROR_MORE_DATA);
+        return FALSE_K;
+    }
+    SCM_ENUM_SERVICE_PROCESS *out = (SCM_ENUM_SERVICE_PROCESS *)buffer;
+    WCHAR *strings = (WCHAR *)(buffer + count * sizeof(*out));
+    for (DWORD i = 0; i < count; ++i) {
+        DWORD name_chars = scm_wide_length(items[i].Name) + 1;
+        DWORD display_chars = scm_wide_length(items[i].DisplayName) + 1;
+        out[i].ServiceName = strings;
+        for (DWORD j = 0; j < name_chars; ++j) strings[j] = items[i].Name[j];
+        strings += name_chars;
+        out[i].DisplayName = strings;
+        for (DWORD j = 0; j < display_chars; ++j)
+            strings[j] = items[i].DisplayName[j];
+        strings += display_chars;
+        out[i].Status = items[i].Status;
+        *services_returned += 1;
+    }
+    if (resume_handle) *resume_handle = complete ? 0 : next_index;
+    __atomic_store_n(&g_scm_enum_lock, 0, __ATOMIC_RELEASE);
+    SetLastError(0);
+    return TRUE_K;
 }
