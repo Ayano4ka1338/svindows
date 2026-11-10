@@ -670,5 +670,6 @@ __declspec(dllexport) int IsTextUnicode(const void *buffer, int size, int *tests
 #include "AdvapiRegistryEnum.inc"
 #include "AdvapiService.inc"
 #include "AdvapiSecurityDescriptor.inc"
+#include "AdvapiObjectSecurity.inc"
 #include "AdvapiLsa.inc"
 #include "AdvapiCrypto.inc"
