@@ -466,6 +466,8 @@ SYSCALL_STUB NtUserSetActiveWindow,          0x10E1
 SYSCALL_STUB NtUserSetCapture,               0x104C
 SYSCALL_STUB NtUserReleaseCapture,           0x1017
 SYSCALL_STUB NtUserSetCursor,                0x101D
+SYSCALL_STUB NtUserSetTimer,                 0x101B
+SYSCALL_STUB NtUserKillTimer,                0x101E
 SYSCALL_STUB NtUserSetWinEventHook,          0x1105
 SYSCALL_STUB NtUserUnhookWinEvent,           0x1106
 ; Window-manager queries. These use Svindows-assigned numbers inside the USER

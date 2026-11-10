@@ -131,3 +131,22 @@ USER32_API BOOL UnhookWinEvent(HANDLE hook)
     SetLastError(6); /* ERROR_INVALID_HANDLE */
     return FALSE;
 }
+
+__declspec(dllimport) UINT64 NtUserSetTimer(HWND window, UINT_PTR id, UINT timeout,
+    void (*callback)(HWND, UINT, UINT_PTR, DWORD), UINT tolerance);
+__declspec(dllimport) UINT64 NtUserKillTimer(HWND window, UINT_PTR id);
+
+USER32_API UINT_PTR SetTimer(HWND window, UINT_PTR id, UINT timeout,
+    void (*callback)(HWND, UINT, UINT_PTR, DWORD))
+{
+    UINT_PTR timer = NtUserSetTimer(window, id, timeout, callback, 0);
+    if (!timer) SetLastError(50); /* ERROR_NOT_SUPPORTED */
+    return timer;
+}
+
+USER32_API BOOL KillTimer(HWND window, UINT_PTR id)
+{
+    if (NtUserKillTimer(window, id)) return TRUE;
+    SetLastError(87); /* ERROR_INVALID_PARAMETER */
+    return FALSE;
+}
