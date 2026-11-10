@@ -335,3 +335,167 @@ __declspec(dllexport) long PrintDlgExW(void *dialog)
     set_dialog_error(PDERR_NODEVICES);
     return (long)0x80070490u; /* HRESULT_FROM_WIN32(ERROR_NOT_FOUND) */
 }
+
+__declspec(dllimport) HANDLE GetProcessHeap(void);
+__declspec(dllimport) void *HeapAlloc(HANDLE, DWORD, ULONG_PTR);
+__declspec(dllimport) BOOL HeapFree(HANDLE, DWORD, void *);
+__declspec(dllimport) UINT RegisterWindowMessageW(const WCHAR *);
+
+typedef struct {
+    DWORD Size;
+    HWND Owner;
+    HINSTANCE Instance;
+    DWORD Flags;
+    WCHAR *Find, *Replace;
+    WORD FindCapacity, ReplaceCapacity;
+    LPARAM Data;
+    void *Hook;
+    const WCHAR *Template;
+} SV_FINDREPLACEW;
+_Static_assert(sizeof(SV_FINDREPLACEW) == 80, "FINDREPLACEW x64");
+
+enum { FIND_NEXT = 0x08, FIND_REPLACE = 0x10, FIND_REPLACE_ALL = 0x20,
+       FIND_DIALOG_TERM = 0x40, FIND_WHOLE_WORD = 0x02, FIND_MATCH_CASE = 0x04 };
+
+typedef struct {
+    SV_FINDREPLACEW *Request;
+    HWND Find, Replace, WholeWord, MatchCase;
+    UINT Notification;
+    BOOL Closing;
+} SV_SEARCH_DIALOG;
+
+static LRESULT search_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message == WM_NCCREATE) {
+        const CREATESTRUCTW *create = (const CREATESTRUCTW *)lparam;
+        SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)create->lpCreateParams);
+        return TRUE;
+    }
+    SV_SEARCH_DIALOG *dialog = (SV_SEARCH_DIALOG *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    if (!dialog) return DefWindowProcW(window, message, wparam, lparam);
+    if (message == WM_CLOSE) {
+        DestroyWindow(window);
+        return 0;
+    }
+    if (message == WM_NCDESTROY) {
+        if (!dialog->Closing) {
+            dialog->Closing = TRUE;
+            dialog->Request->Flags &= ~(FIND_NEXT | FIND_REPLACE | FIND_REPLACE_ALL);
+            dialog->Request->Flags |= FIND_DIALOG_TERM;
+            SendMessageW(dialog->Request->Owner, dialog->Notification, 0,
+                         (LPARAM)dialog->Request);
+        }
+        HeapFree(GetProcessHeap(), 0, dialog);
+        return 0;
+    }
+    if (message == WM_COMMAND) {
+        UINT command = LOWORD(wparam);
+        if (command == IDCANCEL) {
+            DestroyWindow(window);
+            return 0;
+        }
+        if (command == IDOK || command == 11 || command == 12) {
+            SV_FINDREPLACEW *request = dialog->Request;
+            if (!GetWindowTextW(dialog->Find, request->Find, request->FindCapacity)) return 0;
+            if (dialog->Replace)
+                GetWindowTextW(dialog->Replace, request->Replace, request->ReplaceCapacity);
+            request->Flags &= ~(FIND_NEXT | FIND_REPLACE | FIND_REPLACE_ALL |
+                                FIND_WHOLE_WORD | FIND_MATCH_CASE);
+            if (SendMessageW(dialog->WholeWord, BM_GETCHECK, 0, 0))
+                request->Flags |= FIND_WHOLE_WORD;
+            if (SendMessageW(dialog->MatchCase, BM_GETCHECK, 0, 0))
+                request->Flags |= FIND_MATCH_CASE;
+            request->Flags |= command == 12 ? FIND_REPLACE_ALL :
+                              command == 11 ? FIND_REPLACE : FIND_NEXT;
+            SendMessageW(request->Owner, dialog->Notification, 0, (LPARAM)request);
+            return 0;
+        }
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static HWND search_dialog(SV_FINDREPLACEW *request, BOOL replace)
+{
+    set_dialog_error(0);
+    if (!request || request->Size != sizeof(*request)) {
+        set_dialog_error(CDERR_STRUCTSIZE);
+        return 0;
+    }
+    if (!request->Owner || !request->Find || !request->FindCapacity ||
+        (replace && (!request->Replace || !request->ReplaceCapacity))) {
+        set_dialog_error(CDERR_INITIALIZATION);
+        return 0;
+    }
+    UINT notification = RegisterWindowMessageW(L"commdlg_FindReplace");
+    SV_SEARCH_DIALOG *state = notification ?
+        HeapAlloc(GetProcessHeap(), 8, sizeof(*state)) : 0;
+    if (!state) {
+        set_dialog_error(CDERR_INITIALIZATION);
+        return 0;
+    }
+    state->Request = request;
+    state->Notification = notification;
+
+    WNDCLASSEXW window_class = {0};
+    window_class.cbSize = sizeof(window_class);
+    window_class.lpfnWndProc = search_proc;
+    window_class.lpszClassName = L"SvFindReplaceDialog";
+    window_class.hbrBackground = (HBRUSH)(UINT_PTR)16;
+    window_class.hCursor = LoadCursorW(0, IDC_ARROW);
+    RegisterClassExW(&window_class);
+    HWND window = CreateWindowExW(0, window_class.lpszClassName, replace ? L"Replace" : L"Find",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP, 220, 160, 448, replace ? 203 : 170,
+        request->Owner, 0, 0, state);
+    if (!window) {
+        HeapFree(GetProcessHeap(), 0, state);
+        set_dialog_error(CDERR_DIALOGFAILURE);
+        return 0;
+    }
+    path_control(window, L"STATIC", L"Find what", 0, 12, 13, 80, 23, 0);
+    state->Find = path_control(window, L"EDIT", request->Find,
+        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 100, 12, 204, 24, 20);
+    int options_y = 49;
+    if (replace) {
+        path_control(window, L"STATIC", L"Replace with", 0, 12, 47, 80, 23, 0);
+        state->Replace = path_control(window, L"EDIT", request->Replace,
+            WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 100, 46, 204, 24, 21);
+        path_control(window, L"BUTTON", L"Replace", WS_TABSTOP, 320, 46, 102, 26, 11);
+        path_control(window, L"BUTTON", L"Replace All", WS_TABSTOP, 320, 78, 102, 26, 12);
+        options_y = 83;
+    }
+    state->WholeWord = path_control(window, L"BUTTON", L"Whole word", WS_TABSTOP | BS_AUTOCHECKBOX,
+        100, options_y, 166, 24, 22);
+    state->MatchCase = path_control(window, L"BUTTON", L"Match case", WS_TABSTOP | BS_AUTOCHECKBOX,
+        100, options_y + 26, 166, 24, 23);
+    path_control(window, L"BUTTON", L"Find Next", WS_TABSTOP | BS_DEFPUSHBUTTON,
+        320, 12, 102, 26, IDOK);
+    path_control(window, L"BUTTON", L"Cancel", WS_TABSTOP, 320, options_y + 33, 102, 26, IDCANCEL);
+    if (!state->Find || (replace && !state->Replace)) {
+        DestroyWindow(window);
+        set_dialog_error(CDERR_DIALOGFAILURE);
+        return 0;
+    }
+    SendMessageW(state->WholeWord, BM_SETCHECK, (request->Flags & FIND_WHOLE_WORD) != 0, 0);
+    SendMessageW(state->MatchCase, BM_SETCHECK, (request->Flags & FIND_MATCH_CASE) != 0, 0);
+    request->Flags |= 1; /* FR_DOWN: search forward. */
+    ShowWindow(window, SW_SHOW);
+    SetFocus(state->Find);
+    return window;
+}
+
+__declspec(dllexport) HWND FindTextW(SV_FINDREPLACEW *request)
+{
+    return search_dialog(request, FALSE);
+}
+
+__declspec(dllexport) HWND ReplaceTextW(SV_FINDREPLACEW *request)
+{
+    return search_dialog(request, TRUE);
+}
+
+__declspec(dllexport) BOOL ChooseFontW(void *dialog)
+{
+    (void)dialog;
+    set_dialog_error(CDERR_INITIALIZATION);
+    return FALSE;
+}
