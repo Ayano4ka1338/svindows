@@ -822,3 +822,38 @@ __declspec(dllexport) int _purecall(void)
 {
     return 0;
 }
+
+__declspec(dllexport) int wprintf(const WCHAR *format, ...)
+{
+    if (!format) { g_errno = 22; return -1; }
+    __builtin_va_list args;
+    __builtin_va_start(args, format);
+    SIZE_T capacity = 256;
+    WCHAR *wide = 0;
+    int count = -1;
+    for (;;) {
+        wide = malloc(capacity * sizeof(*wide));
+        if (!wide) { g_errno = 12; break; }
+        __builtin_va_list copy;
+        __builtin_va_copy(copy, args);
+        count = _vsnwprintf(wide, capacity, format, copy);
+        __builtin_va_end(copy);
+        if (count >= 0) break;
+        free(wide); wide = 0;
+        if (capacity > 0x3fffffffu) { g_errno = 34; break; }
+        capacity *= 2;
+    }
+    __builtin_va_end(args);
+    if (!wide) return -1;
+    char *bytes = malloc((SIZE_T)count + 1);
+    if (!bytes) { free(wide); g_errno = 12; return -1; }
+    for (int i = 0; i < count; i++) {
+        if (wide[i] > 255) {
+            free(bytes); free(wide); g_errno = 42; return -1;
+        }
+        bytes[i] = (char)wide[i];
+    }
+    int written = _write(1, bytes, (unsigned)count);
+    free(bytes); free(wide);
+    return written == count ? count : -1;
+}
