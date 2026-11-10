@@ -175,3 +175,30 @@ __declspec(dllexport) int ShellMessageBoxW(void *instance, void *owner,
     LocalFree(message);
     return result;
 }
+
+__declspec(dllimport) int GetVersionExW(void *);
+__declspec(dllimport) int GetProductInfo(unsigned long, unsigned long,
+    unsigned long, unsigned long, unsigned long *);
+__declspec(dllexport) int IsOS(unsigned long feature)
+{
+    struct {
+        unsigned long Size,Major,Minor,Build,Platform;
+        WCHAR ServicePack[128];
+    } version;
+    version.Size=sizeof(version);
+    if (!GetVersionExW(&version) || version.Platform!=2) return 0;
+    switch (feature) {
+    case 1: return 1; /* OS_NT */
+    case 3: return version.Major>=4;
+    case 7: return version.Major>=5;
+    case 18: return version.Major>5 || (version.Major==5 && version.Minor>=1);
+    case 8: case 20: {
+        unsigned long product=0;
+        return GetProductInfo(version.Major,version.Minor,0,0,&product) && product==0x30;
+    }
+    default:
+        /* No terminal server/client, fast user switching, domain membership,
+         * WOW64 or specialized Windows edition is installed in Svindows. */
+        return 0;
+    }
+}
