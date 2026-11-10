@@ -304,7 +304,6 @@ __declspec(dllexport) DWORD CheckForReadOnlyResource(HANDLE module, DWORD flag)
 /* ------------------------------------------------------------------ */
 
 #define GMEM_ZEROINIT 0x0040u
-#define LMEM_ZEROINIT 0x0040u
 
 __declspec(dllexport) void *GlobalAlloc(UINT flags, SIZE_T bytes)
 {
@@ -353,42 +352,6 @@ __declspec(dllexport) BOOL GlobalUnlock(void *h)
 {
     (void)h;
     return 1;
-}
-
-/* LocalAlloc currently exposes fixed heap blocks for all allocation flags. */
-__declspec(dllexport) void *LocalLock(void *h)
-{
-    if (!h || !HeapValidate(GetProcessHeap(), 0, h)) {
-        SetLastError(6);
-        return 0;
-    }
-    return h;
-}
-
-__declspec(dllexport) BOOL LocalUnlock(void *h)
-{
-    SetLastError(LocalLock(h) ? 158 : 6); /* ERROR_NOT_LOCKED or INVALID_HANDLE */
-    return 0;
-}
-
-__declspec(dllexport) void *LocalReAlloc(void *h, SIZE_T bytes, UINT flags)
-{
-    if (!h)
-        return 0;
-    if (!bytes)
-        bytes = 1;
-    void *fresh = HeapReAlloc(GetProcessHeap(),
-                              (flags & LMEM_ZEROINIT) ? HEAP_ZERO_MEMORY : 0,
-                              h, bytes);
-    if (!fresh)
-        SetLastError(8);
-    return fresh;
-}
-
-__declspec(dllexport) SIZE_T LocalSize(void *h)
-{
-    SIZE_T size = HeapSize(GetProcessHeap(), 0, h);
-    return size == (SIZE_T)-1 ? 0 : size;
 }
 
 /* ------------------------------------------------------------------ */

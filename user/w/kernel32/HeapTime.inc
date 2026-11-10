@@ -263,18 +263,6 @@ __declspec(dllexport) BOOL HeapSetInformation(HANDLE heap, int info_class,
     return 1;
 }
 
-__declspec(dllexport) LPVOID LocalAlloc(DWORD flags, SIZE_T bytes)
-{
-    return HeapAlloc(GetProcessHeap(),
-                     (flags & 0x0040) ? HEAP_ZERO_MEMORY : 0, bytes);
-}
-
-__declspec(dllexport) LPVOID LocalFree(LPVOID ptr)
-{
-    HeapFree(GetProcessHeap(), 0, ptr);
-    return 0;
-}
-
 /* ------------------------------------------------------------------ */
 /* Time: KUSER_SHARED_DATA (the read-only page at 0x7FFE0000)          */
 /* ------------------------------------------------------------------ */
