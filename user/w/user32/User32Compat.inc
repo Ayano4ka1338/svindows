@@ -307,6 +307,23 @@ USER32_API HWND GetDlgItem(HWND dialog, int id)
 USER32_API LRESULT SendDlgItemMessageW(HWND dialog, int id, UINT message,
                                        WPARAM wparam, LPARAM lparam)
 { HWND child=GetDlgItem(dialog,id);return child?SendMessageW(child,message,wparam,lparam):0; }
+USER32_API UINT GetDlgItemTextW(HWND dialog, int id, WCHAR *text, int capacity)
+{
+    if (!text || capacity <= 0) return 0;
+    text[0] = 0;
+    return (UINT)GetWindowTextW(GetDlgItem(dialog, id), text, capacity);
+}
+
+USER32_API BOOL SetDlgItemTextW(HWND dialog, int id, const WCHAR *text)
+{
+    return SetWindowTextW(GetDlgItem(dialog, id), text);
+}
+
+USER32_API int GetDlgCtrlID(HWND control)
+{
+    return (int)GetWindowLongPtrW(control, GWL_ID);
+}
+
 USER32_API BOOL IsDlgButtonChecked(HWND dialog, int id)
 { return (BOOL)SendDlgItemMessageW(dialog,id,0x00f0,0,0); }
 USER32_API BOOL SetDlgItemInt(HWND dialog, int id, UINT value, BOOL signed_value)
@@ -315,12 +332,12 @@ USER32_API BOOL SetDlgItemInt(HWND dialog, int id, UINT value, BOOL signed_value
     do{text[i++]=(WCHAR)('0'+n%10);n/=10;}while(n&&i<14);
     if(signed_value&&(int)value<0)text[i++]='-';text[i]=0;
     for(UINT a=0;a<i/2;a++){WCHAR t=text[a];text[a]=text[i-1-a];text[i-1-a]=t;}
-    HWND child=GetDlgItem(dialog,id);return child?SetWindowTextW(child,text):FALSE;
+    return SetDlgItemTextW(dialog, id, text);
 }
 USER32_API UINT GetDlgItemInt(HWND dialog, int id, BOOL *translated,
                               BOOL signed_value)
 {
-    WCHAR text[32];HWND child=GetDlgItem(dialog,id);int n=child?GetWindowTextW(child,text,32):0;
+    WCHAR text[32];int n=(int)GetDlgItemTextW(dialog,id,text,32);
     UINT value=0;int i=0,neg=0;if(n&&text[0]=='-'){neg=1;i++;}
     for(;i<n&&text[i]>='0'&&text[i]<='9';i++)value=value*10+(text[i]-'0');
     if(translated)*translated=n>0&&i==n;if(neg&&signed_value)value=(UINT)-(int)value;return value;
