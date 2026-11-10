@@ -61,6 +61,35 @@ static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
     return handle;
 }
 
+#define USER_TYPE_WINDOWSTATION 18
+#define USER_TYPE_DESKTOP       19
+
+static UINT64 KiUserDesktopHandle(PKPROCESS process)
+{
+    for (UINT16 i = 200; i < USER_OBJECT_SLOTS; ++i) {
+        USER_OBJECT_OWNER *object = &g_user_objects[i];
+        if (object->Process == process && object->Type == USER_TYPE_DESKTOP)
+            return ((UINT64)object->Generation << 16) | i;
+    }
+    PKTHREAD caller = KeGetCurrentThread();
+    if (!caller || caller->Process != process)
+        return 0;
+    return KiUserAllocateObject(USER_TYPE_DESKTOP, NULL);
+}
+
+/* The GUI session has one interactive desktop. Threads in a process inherit
+ * that desktop, so expose a real USER handle owned by the querying process. */
+static UINT64 NtUserGetThreadDesktop(UINT64 *a)
+{
+    PKTHREAD caller = KeGetCurrentThread();
+    if (!caller || !caller->Process)
+        return 0;
+    PKTHREAD target = a[0] ? KeLookupThreadById((ULONG)a[0]) : caller;
+    if (!target || target->Process != caller->Process)
+        return 0;
+    return KiUserDesktopHandle(caller->Process);
+}
+
 /*
  * HCURSOR NtUserFindExistingCursorIcon(PUNICODE_STRING module,
  *                                      PUNICODE_STRING resource, void *param)
@@ -765,7 +794,17 @@ static UINT64 NtUserGetObjectInformation(UINT64 *a)
     KeLog("[user] GetObjectInformation(h=%lu, idx=%lu, out=%p, size=%lu)\n",
           (unsigned long)(UINT32)handle, (unsigned long)index, (void *)out,
           (unsigned long)size);
-    BOOLEAN station = (handle == 1 || handle == 4);
+    UINT16 object_index = (UINT16)handle;
+    UINT16 object_generation = (UINT16)(handle >> 16);
+    PKTHREAD caller = KeGetCurrentThread();
+    if (!caller || object_index < 200 || object_index >= USER_OBJECT_SLOTS ||
+        !object_generation ||
+        g_user_objects[object_index].Process != caller->Process ||
+        g_user_objects[object_index].Generation != object_generation ||
+        (g_user_objects[object_index].Type != USER_TYPE_DESKTOP &&
+         g_user_objects[object_index].Type != USER_TYPE_WINDOWSTATION))
+        return 0;
+    BOOLEAN station = g_user_objects[object_index].Type == USER_TYPE_WINDOWSTATION;
     static const WCHAR name_desktop[] = {'D','e','f','a','u','l','t',0};
     static const WCHAR name_station[] = {'W','i','n','S','t','a','0',0};
     static const WCHAR type_desktop[] = {'D','e','s','k','t','o','p',0};
@@ -777,7 +816,7 @@ static UINT64 NtUserGetObjectInformation(UINT64 *a)
 
     if (index == 1) { /* UOI_FLAGS: USEROBJECTFLAGS {inherit, reserved, flags} */
         bytes = 12;
-        flags_word = 1; /* WSF_VISIBLE */
+        flags_word = station ? 1 : 0; /* WSF_VISIBLE; desktop has no flags. */
     } else if (index == 2) { /* UOI_NAME */
         text = station ? name_station : name_desktop;
         for (UINT32 i = 0; text[i]; i++)

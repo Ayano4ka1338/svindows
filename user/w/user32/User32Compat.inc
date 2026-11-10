@@ -631,6 +631,19 @@ USER32_API DWORD GetDialogBaseUnits(void)
     return (DWORD)8 | ((DWORD)16 << 16);
 }
 
+__declspec(dllimport) UINT64 NtUserGetThreadDesktop(DWORD thread_id);
+USER32_API void *GetThreadDesktop(DWORD thread_id)
+{
+    if (!thread_id) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return NULL;
+    }
+    UINT64 desktop = NtUserGetThreadDesktop(thread_id);
+    if (!desktop)
+        SetLastError(1400); /* ERROR_INVALID_HANDLE */
+    return (void *)(UINT_PTR)desktop;
+}
+
 __declspec(dllimport) UINT64 NtUserGetClassInfoEx(HINSTANCE, const void *, WNDCLASSEXW *, void *, UINT);
 USER32_API BOOL GetClassInfoExW(HINSTANCE instance, const WCHAR *name, WNDCLASSEXW *out)
 {

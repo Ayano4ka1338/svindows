@@ -703,7 +703,6 @@ static UINT64 NtUserWaitMessage(UINT64 *a)
 /* Desktop/window-station objects are not implemented. Do not return fake
  * handles that clients could later pass to unrelated object services. */
 static UINT64 NtUserGetProcessWindowStation(UINT64 *a) { (void)a; return 0; }
-static UINT64 NtUserGetThreadDesktop(UINT64 *a) { (void)a; return 0; }
 static UINT64 NtUserSetThreadDesktop(UINT64 *a) { (void)a; return 0; }
 static UINT64 NtUserOpenInputDesktop(UINT64 *a) { (void)a; return 0; }
 static UINT64 NtUserCloseDesktop(UINT64 *a) { (void)a; return 0; }
