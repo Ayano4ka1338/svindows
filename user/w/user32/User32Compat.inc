@@ -451,3 +451,15 @@ USER32_API BOOL FillRect(HDC dc,const RECT *rect,HBRUSH brush)
 USER32_API int DrawTextW(HDC dc,const WCHAR *text,int count,LPRECT rect,UINT format)
 { return SvGdiDrawTextW(dc,text,count,rect,format); }
 
+
+USER32_API BOOL WinHelpW(HWND owner, const WCHAR *file, UINT command, ULONG_PTR data)
+{
+    (void)owner;
+    (void)file;
+    (void)command;
+    (void)data;
+    /* There is no WinHelp viewer to service the request. */
+    extern void SetLastError(DWORD);
+    SetLastError(50); /* ERROR_NOT_SUPPORTED */
+    return FALSE;
+}
