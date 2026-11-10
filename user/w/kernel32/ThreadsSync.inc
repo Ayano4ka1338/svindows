@@ -255,6 +255,50 @@ __declspec(dllexport) int MultiByteToWideChar(unsigned code_page, DWORD flags,
     return n;
 }
 
+__declspec(dllexport) DWORD ExpandEnvironmentStringsA(const char *source,
+                                                       char *out, DWORD size)
+{
+    if (!source || (size && !out)) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return 0;
+    }
+
+    HANDLE heap = GetProcessHeap();
+    int source_length = MultiByteToWideChar(0, 0, source, -1, 0, 0);
+    if (source_length <= 0) return 0;
+    WCHAR *wide_source = HeapAlloc(heap, 0, (SIZE_T)source_length * sizeof(WCHAR));
+    if (!wide_source) {
+        SetLastError(8); /* ERROR_NOT_ENOUGH_MEMORY */
+        return 0;
+    }
+    MultiByteToWideChar(0, 0, source, -1, wide_source, source_length);
+
+    DWORD capacity = ExpandEnvironmentStringsW(wide_source, 0, 0);
+    DWORD needed = 0;
+    while (capacity && capacity <= 0x7fffffffu) {
+        WCHAR *expanded = HeapAlloc(heap, 0, (SIZE_T)capacity * sizeof(WCHAR));
+        if (!expanded) {
+            SetLastError(8);
+            break;
+        }
+        DWORD result = ExpandEnvironmentStringsW(wide_source, expanded, capacity);
+        if (result && result <= capacity) {
+            needed = (DWORD)WideCharToMultiByte(0, 0, expanded, (int)result,
+                                                0, 0, 0, 0);
+            if (needed && size >= needed)
+                WideCharToMultiByte(0, 0, expanded, (int)result, out,
+                                    (int)needed, 0, 0);
+            else if (out && size)
+                out[0] = 0;
+        }
+        HeapFree(heap, 0, expanded);
+        if (result <= capacity) break;
+        capacity = result;
+    }
+    HeapFree(heap, 0, wide_source);
+    return needed;
+}
+
 /* ------------------------------------------------------------------ */
 /* Root directory enumeration (first Win32 filesystem-search layer)    */
 /* ------------------------------------------------------------------ */
