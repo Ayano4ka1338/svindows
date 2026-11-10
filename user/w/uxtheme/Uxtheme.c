@@ -164,3 +164,13 @@ UXTHEME_API HRESULT GetThemeColor(HTHEME theme, int part, int state,
              ? RGB(131,131,131) : RGB(0,0,0);
     return S_OK;
 }
+
+UXTHEME_API HRESULT SetWindowTheme(void *window, const WCHAR *application,
+                                    const WCHAR *classes)
+{
+    (void)window;
+    /* Themes currently select their renderer through OpenThemeData's class
+     * argument. Per-window renderer overrides need window-manager storage. */
+    if (!application && !classes) return S_OK;
+    return (HRESULT)0x80004001u; /* E_NOTIMPL */
+}
