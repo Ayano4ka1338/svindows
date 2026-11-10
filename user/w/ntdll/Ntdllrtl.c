@@ -90,5 +90,6 @@ void *memcpy(void *dst, const void *src, SIZE_T n);
 #include "Rtl/MemorySync.inc"
 #include "Rtl/Strings.inc"
 #include "Rtl/Paths.inc"
+#include "Rtl/FileCompat.inc"
 #include "Rtl/Compat.inc"
 #include "Rtl/Exception.inc"

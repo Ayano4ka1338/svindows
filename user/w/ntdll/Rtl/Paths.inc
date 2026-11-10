@@ -231,3 +231,24 @@ BOOLEAN RtlDosPathNameToNtPathName_U(const WCHAR *dos,
     return NT_SUCCESS(RtlDosPathNameToNtPathName_U_WithStatus(
         dos, nt, file_part, reserved));
 }
+
+typedef struct {
+    UNICODE_STRING_NT Name;
+    HANDLE Directory;
+    void *CurrentDirectoryReference;
+} RELATIVE_NAME_LOCAL;
+
+BOOLEAN RtlDosPathNameToRelativeNtPathName_U(const WCHAR *dos,
+    UNICODE_STRING_NT *nt, WCHAR **file_part, RELATIVE_NAME_LOCAL *relative)
+{
+    /* An absolute NT name is sufficient for NtOpenFile even when a caller
+     * accepts an optional directory-relative optimization. */
+    if (relative) memset(relative, 0, sizeof(*relative));
+    return RtlDosPathNameToNtPathName_U(dos, nt, file_part, 0);
+}
+void RtlReleaseRelativeName(RELATIVE_NAME_LOCAL *relative)
+{
+    /* This implementation never acquires a directory reference. The full
+     * allocated NT name is separately owned by RtlFreeUnicodeString. */
+    if (relative) memset(relative, 0, sizeof(*relative));
+}

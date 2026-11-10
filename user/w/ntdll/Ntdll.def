@@ -341,3 +341,10 @@ EXPORTS
     NtUserMenuBar
 
     NtUserWindowRelation
+
+    NtDeleteFile
+    NtQuerySecurityObject
+    RtlAdjustPrivilege
+    RtlCreateSystemVolumeInformationFolder
+    RtlDosPathNameToRelativeNtPathName_U
+    RtlReleaseRelativeName
