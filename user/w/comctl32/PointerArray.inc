@@ -20,6 +20,11 @@ COMCTL32_API SV_DPA *DPA_CreateEx(int grow, HANDLE heap)
     return array;
 }
 
+COMCTL32_API SV_DPA *DPA_Create(void)
+{
+    return DPA_CreateEx(8, 0);
+}
+
 COMCTL32_API BOOL DPA_Destroy(SV_DPA *array)
 {
     if (!array) return FALSE;
