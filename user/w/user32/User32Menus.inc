@@ -58,17 +58,67 @@ static SV_MENU_ITEM *sv_menu_insert(SV_USER_MENU *m,UINT index)
     for(UINT i=m->Count;i>index;i--)m->Items[i]=m->Items[i-1];
     m->Count++;m->Items[index]=(SV_MENU_ITEM){0};return &m->Items[index];
 }
-USER32_API BOOL AppendMenuW(HMENU menu,UINT flags,UINT_PTR id,const WCHAR *text)
+static BOOL sv_legacy_menu_item(SV_MENU_ITEM *item, UINT flags, UINT_PTR id,
+                                const WCHAR *text)
 {
-    if((flags&MF_POP)&&!sv_menu((HMENU)id))return FALSE;
-    SV_MENU_ITEM *item=sv_menu_insert(sv_menu(menu),SV_MENU_ITEMS);if(!item)return FALSE;
-    item->Type=flags&0x6f64;item->State=flags&0x108b;item->Id=(UINT)id;
-    if(flags&MF_POP){item->Sub=(HMENU)id;item->Id=(UINT)-1;}
-    if((flags&MF_SEPARATOR_)||(!(flags&(MF_POP|4|0x100))&&!id&&(!text||!text[0])))item->Type|=MF_SEPARATOR_;
-    else if(flags&4)item->Bitmap=(HBITMAP)text;
-    else sv_menu_text(item->Text,text);
+    if ((flags & MF_POP) && !sv_menu((HMENU)id)) return FALSE;
+    item->Type = flags & (0x6f64u & ~MF_BY_POS);
+    item->State = flags & 0x108b;
+    item->Id = (UINT)id;
+    if (flags & MF_POP) {
+        item->Sub = (HMENU)id;
+        item->Id = (UINT)-1;
+    }
+    if ((flags & MF_SEPARATOR_) || (!(flags & (MF_POP | 4 | 0x100)) &&
+        !id && (!text || !text[0])))
+        item->Type |= MF_SEPARATOR_;
+    else if (flags & 4)
+        item->Bitmap = (HBITMAP)text;
+    else if (flags & 0x100)
+        item->Data = (ULONG_PTR)text;
+    else
+        sv_menu_text(item->Text, text);
     return TRUE;
 }
+
+USER32_API BOOL InsertMenuW(HMENU handle, UINT target, UINT flags, UINT_PTR id,
+                            const WCHAR *text)
+{
+    SV_USER_MENU *menu = sv_menu(handle);
+    if (!menu) return FALSE;
+    UINT index = menu->Count;
+    if (flags & MF_BY_POS) {
+        if (target != (UINT)-1) index = target;
+    } else if (target != (UINT)-1 &&
+               !sv_menu_find(menu, target, FALSE, 0, &menu, &index))
+        return FALSE;
+
+    SV_MENU_ITEM replacement = {0};
+    if (!sv_legacy_menu_item(&replacement, flags, id, text)) return FALSE;
+    SV_MENU_ITEM *item = sv_menu_insert(menu, index);
+    if (!item) return FALSE;
+    *item = replacement;
+    return TRUE;
+}
+
+USER32_API BOOL AppendMenuW(HMENU menu, UINT flags, UINT_PTR id, const WCHAR *text)
+{
+    return InsertMenuW(menu, (UINT)-1, flags | MF_BY_POS, id, text);
+}
+
+USER32_API BOOL ModifyMenuW(HMENU menu, UINT target, UINT flags, UINT_PTR id,
+                            const WCHAR *text)
+{
+    SV_MENU_ITEM *item = sv_menu_find(sv_menu(menu), target, (flags & MF_BY_POS) != 0,
+                                      0, 0, 0);
+    SV_MENU_ITEM replacement = {0};
+    if (!item || !sv_legacy_menu_item(&replacement, flags, id, text)) return FALSE;
+    HMENU old = item->Sub;
+    *item = replacement;
+    if (old && old != replacement.Sub) DestroyMenu(old);
+    return TRUE;
+}
+
 USER32_API HMENU GetSystemMenu(HWND hwnd, BOOL revert)
 {
     RECT bounds;
@@ -127,6 +177,59 @@ USER32_API BOOL InsertMenuItemW(HMENU menu,UINT id,BOOL position,const void *val
 }
 USER32_API BOOL SetMenuItemInfoW(HMENU menu,UINT id,BOOL position,const void *info)
 { return sv_menu_apply(sv_menu_find(sv_menu(menu),id,position,0,0,0),info); }
+USER32_API BOOL GetMenuItemInfoW(HMENU menu, UINT id, BOOL position, void *value)
+{
+    SV_MENU_INFO *info = value;
+    if (!info || (info->cbSize != sizeof(*info) && info->cbSize != 72)) return FALSE;
+    const SV_MENU_ITEM *item = sv_menu_find(sv_menu(menu), id, position, 0, 0, 0);
+    if (!item) return FALSE;
+
+    UINT mask = info->fMask;
+    if (mask & (0x100 | 0x10)) info->fType = item->Type;
+    if (mask & 1) info->fState = item->State;
+    if (mask & 2) info->wID = item->Id;
+    if (mask & 4) info->hSubMenu = item->Sub;
+    if (mask & 8) {
+        info->hbmpChecked = item->Checked;
+        info->hbmpUnchecked = item->Unchecked;
+    }
+    if (mask & 0x20) info->dwItemData = item->Data;
+    if ((mask & 0x80) && info->cbSize == sizeof(*info)) info->hbmpItem = item->Bitmap;
+    if ((mask & 0x10) && (item->Type & 4)) {
+        info->dwTypeData = (WCHAR *)item->Bitmap;
+        info->cch = 0;
+    } else if ((mask & 0x40) || ((mask & 0x10) &&
+              !(item->Type & (0x100 | MF_SEPARATOR_)))) {
+        UINT length = 0;
+        while (item->Text[length]) length++;
+        if (info->dwTypeData && info->cch) {
+            if (length >= info->cch) length = info->cch - 1;
+            for (UINT i = 0; i < length; i++) info->dwTypeData[i] = item->Text[i];
+            info->dwTypeData[length] = 0;
+        }
+        info->cch = length;
+    }
+    return TRUE;
+}
+
+USER32_API BOOL SetMenuDefaultItem(HMENU handle, UINT id, UINT by_position)
+{
+    SV_USER_MENU *menu = sv_menu(handle);
+    if (!menu) return FALSE;
+    SV_MENU_ITEM *item = 0;
+    if (id != (UINT)-1) {
+        for (UINT i = 0; i < menu->Count; i++)
+            if ((by_position ? i : menu->Items[i].Id) == id) {
+                item = &menu->Items[i];
+                break;
+            }
+        if (!item) return FALSE;
+    }
+    for (UINT i = 0; i < menu->Count; i++) menu->Items[i].State &= ~0x1000u;
+    if (item) item->State |= 0x1000; /* MFS_DEFAULT */
+    return TRUE;
+}
+
 USER32_API BOOL RemoveMenu(HMENU menu,UINT id,UINT flags)
 {
     SV_USER_MENU *m=0;UINT index=0;
@@ -348,6 +451,16 @@ USER32_API BOOL TrackPopupMenu(HMENU menu,UINT flags,int x,int y,int reserved,HW
     }
     return run.Command!=0;
 }
+typedef struct { DWORD Size; RECT Exclude; } SV_POPUP_PARAMS;
+
+USER32_API BOOL TrackPopupMenuEx(HMENU menu, UINT flags, int x, int y,
+    HWND owner, const SV_POPUP_PARAMS *params)
+{
+    if (params && params->Size != sizeof(*params)) return FALSE;
+    return TrackPopupMenu(menu, flags, x, y, 0, owner,
+                          params ? &params->Exclude : 0);
+}
+
 static BOOL sv_user_menu_command(HWND hwnd,WPARAM wp,LPARAM lp)
 {
     HMENU handle=GetMenu(hwnd);SV_USER_MENU *menu=sv_menu(handle);if(!menu)return FALSE;
