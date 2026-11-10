@@ -115,6 +115,15 @@ __declspec(dllexport) BOOL GetLogicalProcessorInformationEx(
     return 1;
 }
 
+__declspec(dllexport) BOOL GetNumaHighestNodeNumber(DWORD *highest_node)
+{
+    if (!highest_node) { SetLastError(87); return 0; }
+    /* The physical memory manager has one uniform allocation domain. */
+    *highest_node = 0;
+    SetLastError(0);
+    return 1;
+}
+
 __declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit,
                                          DWORD process_id)
 {
