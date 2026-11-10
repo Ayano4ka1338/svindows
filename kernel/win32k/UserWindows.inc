@@ -15,7 +15,8 @@ typedef struct _USER_CLASS_LOCAL {
     UINT64 Instance;
     UINT64 BackgroundBrush;
     UINT32 Style;
-    UINT32 WndExtra;
+    UINT32 WndExtra, ClassExtra;
+    UINT64 Icon, Cursor, SmallIcon, MenuName, ClassName;
     UINT16 Atom;
     BOOLEAN Used;
     PKPROCESS Process;
@@ -88,6 +89,12 @@ static UINT64 NtUserRegisterClassExWOW(UINT64 *a)
             *(const UINT64 *)(wcex + WNDCLASSEX_WNDPROC);
         g_user_classes[i].Instance =
             *(const UINT64 *)(wcex + WNDCLASSEX_HINSTANCE);
+        g_user_classes[i].ClassExtra=*(const UINT32 *)(wcex+16);
+        g_user_classes[i].Icon=*(const UINT64 *)(wcex+32);
+        g_user_classes[i].Cursor=*(const UINT64 *)(wcex+40);
+        g_user_classes[i].MenuName=*(const UINT64 *)(wcex+56);
+        g_user_classes[i].ClassName=*(const UINT64 *)(wcex+64);
+        g_user_classes[i].SmallIcon=*(const UINT64 *)(wcex+72);
         g_user_classes[i].BackgroundBrush =
             *(const UINT64 *)(wcex + WNDCLASSEX_BACKGROUND);
         /* The class name is interned in the station atom table, so
@@ -137,28 +144,33 @@ static UINT64 NtUserGetClassInfoEx(UINT64 *a)
         return 0;
 
     WCHAR stackname[32];
-    UINT32 chars = ustr->Length / 2;
-    if (chars > 31)
-        chars = 31;
-    for (UINT32 i = 0; i < chars; i++) {
-        if (!MmProbeForRead((UINT64)(ustr->Buffer + i), sizeof(WCHAR)))
-            return 0;
-        stackname[i] = ustr->Buffer[i];
+    UINT16 atom=(!ustr->Length && (UINT64)ustr->Buffer<=0xffff) ? (UINT16)(UINT64)ustr->Buffer : 0;
+    UINT32 chars=ustr->Length/2;
+    if (chars>31 || (ustr->Length&1)) return 0;
+    for (UINT32 i=0;i<chars;i++) {
+        if (!MmProbeForRead((UINT64)(ustr->Buffer+i),sizeof(WCHAR))) return 0;
+        stackname[i]=ustr->Buffer[i];
     }
-    stackname[chars] = 0;
-
-    for (int i = 0; i < USER_MAX_CLASSES; i++) {
-        if (!g_user_classes[i].Used || g_user_classes[i].Process != caller->Process ||
-            !KiWideEqual(g_user_classes[i].Name, stackname))
-            continue;
-        memset(out, 0, 80);
-        *(UINT32 *)(out + WNDCLASSEX_STYLE) = g_user_classes[i].Style;
-        *(UINT64 *)(out + WNDCLASSEX_WNDPROC) = g_user_classes[i].WndProc;
-        *(UINT64 *)(out + WNDCLASSEX_HINSTANCE) = g_user_classes[i].Instance;
-        *(UINT64 *)(out + WNDCLASSEX_BACKGROUND) =
-            g_user_classes[i].BackgroundBrush;
-        *(const WCHAR **)(out + WNDCLASSEX_CLASSNAME) = ustr->Buffer;
-        return g_user_classes[i].Atom;
+    stackname[chars]=0;
+    for (int i=0;i<USER_MAX_CLASSES;i++) {
+        USER_CLASS_LOCAL *cls=&g_user_classes[i];
+        if (!cls->Used || cls->Process!=caller->Process ||
+            (a[0] && cls->Instance && a[0]!=cls->Instance) ||
+            (atom ? cls->Atom!=atom : !KiWideEqual(cls->Name,stackname))) continue;
+        memset(out,0,80);
+        *(UINT32 *)(out+0)=80;
+        *(UINT32 *)(out+4)=cls->Style;
+        *(UINT64 *)(out+8)=cls->WndProc;
+        *(UINT32 *)(out+16)=cls->ClassExtra;
+        *(UINT32 *)(out+20)=cls->WndExtra;
+        *(UINT64 *)(out+24)=cls->Instance;
+        *(UINT64 *)(out+32)=cls->Icon;
+        *(UINT64 *)(out+40)=cls->Cursor;
+        *(UINT64 *)(out+48)=cls->BackgroundBrush;
+        *(UINT64 *)(out+56)=cls->MenuName;
+        *(UINT64 *)(out+64)=atom ? cls->ClassName : (UINT64)ustr->Buffer;
+        *(UINT64 *)(out+72)=cls->SmallIcon;
+        return cls->Atom;
     }
     return 0;
 }

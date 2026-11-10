@@ -623,3 +623,32 @@ USER32_API int InternalGetWindowText(HWND window, WCHAR *text, int capacity)
     if (!text || capacity<=0) return 0;
     return (int)NtUserGetWindowText(window,text,(ULONG)capacity);
 }
+
+__declspec(dllimport) UINT64 NtUserGetClassInfoEx(HINSTANCE, const void *, WNDCLASSEXW *, void *, UINT);
+USER32_API BOOL GetClassInfoExW(HINSTANCE instance, const WCHAR *name, WNDCLASSEXW *out)
+{
+    if (!name || !out || out->cbSize!=sizeof(*out)) { SetLastError(87); return FALSE; }
+    struct { USHORT Length,MaximumLength; const WCHAR *Buffer; } string;
+    string.Length=string.MaximumLength=0; string.Buffer=name;
+    if (!IS_INTRESOURCE(name)) {
+        UINT n=0; while (name[n] && n<32767) n++;
+        if (n>=32767) { SetLastError(87); return FALSE; }
+        string.Length=(USHORT)(n*sizeof(WCHAR));
+        string.MaximumLength=string.Length;
+        if (!SvRegisterControl(name)) return FALSE;
+    }
+    if (NtUserGetClassInfoEx(instance,&string,out,0,0)) return TRUE;
+    SetLastError(1411); return FALSE;
+}
+USER32_API BOOL GetClassInfoW(HINSTANCE instance, const WCHAR *name, WNDCLASSW *out)
+{
+    if (!out) { SetLastError(87); return FALSE; }
+    WNDCLASSEXW value; value.cbSize=sizeof(value);
+    if (!GetClassInfoExW(instance,name,&value)) return FALSE;
+    out->style=value.style; out->lpfnWndProc=value.lpfnWndProc;
+    out->cbClsExtra=value.cbClsExtra; out->cbWndExtra=value.cbWndExtra;
+    out->hInstance=value.hInstance; out->hIcon=value.hIcon; out->hCursor=value.hCursor;
+    out->hbrBackground=value.hbrBackground;
+    out->lpszMenuName=value.lpszMenuName; out->lpszClassName=value.lpszClassName;
+    return TRUE;
+}

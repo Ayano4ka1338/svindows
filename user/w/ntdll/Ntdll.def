@@ -355,3 +355,4 @@ EXPORTS
     RtlIoDecodeMemIoResource
     RtlCmDecodeMemIoResource
     SvNtUserQueryWindowState
+    NtUserGetClassInfoEx
