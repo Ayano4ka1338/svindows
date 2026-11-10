@@ -536,6 +536,34 @@ __declspec(dllexport) int _vsnwprintf(WCHAR *out, SIZE_T count,
     return n < count ? (int)n : -1;
 }
 
+__declspec(dllexport) int _vsnwprintf_s(WCHAR *out, SIZE_T size,
+    SIZE_T limit, const WCHAR *format, __builtin_va_list args)
+{
+    if (!out && !size && !limit && format) return 0;
+    if (!out || !size || !format) {
+        if (out && size) out[0] = 0;
+        g_errno = 22; /* EINVAL */
+        return -1;
+    }
+    SIZE_T capacity = limit < size ? limit + 1 : size;
+    int result = _vsnwprintf(out, capacity, format, args);
+    if (result < 0 && limit != (SIZE_T)-1 && limit >= size) {
+        out[0] = 0;
+        g_errno = 34; /* ERANGE */
+    }
+    return result;
+}
+
+__declspec(dllexport) int _snwprintf_s(WCHAR *out, SIZE_T size, SIZE_T limit,
+    const WCHAR *format, ...)
+{
+    __builtin_va_list args;
+    __builtin_va_start(args, format);
+    int result = _vsnwprintf_s(out, size, limit, format, args);
+    __builtin_va_end(args);
+    return result;
+}
+
 /* Enough wide stdio for inbox console tools.  Hostname.exe uses exactly
  * fwprintf(stdout, L"%ls", text); keeping it here also makes error messages
  * with literal wide text visible. */
