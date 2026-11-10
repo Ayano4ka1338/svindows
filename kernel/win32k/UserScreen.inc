@@ -1367,6 +1367,17 @@ static UINT64 SvNtUserIsIconic(UINT64 *a)
     return KiUserWindowValid(a[0], TRUE) && g_w32k[(UINT16)a[0]].Minimized;
 }
 
+static UINT64 SvNtUserSetCursorPos(UINT64 *a)
+{
+    if (!GfxAvailable()) return 0;
+    UINT64 flags = KiIrqSave();
+    INT32 x = (INT32)a[0], y = (INT32)a[1];
+    UINT8 buttons = HalMouseWarp(&x, &y);
+    W32kInputMouseLocked(x, y, g_w32k_pointer_valid ? g_w32k_pointer_buttons : buttons);
+    KiIrqRestore(flags);
+    return 1;
+}
+
 static UINT64 SvNtUserGetCursorPos(UINT64 *a)
 {
     INT32 *point = (INT32 *)a[0];

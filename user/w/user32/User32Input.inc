@@ -29,6 +29,20 @@ USER32_API HCURSOR SetCursor(HCURSOR cursor)
     return NULL;
 }
 
+__declspec(dllimport) UINT64 SvNtUserSetCursorPos(int x, int y);
+
+USER32_API BOOL SetCursorPos(int x, int y)
+{
+    return SvNtUserSetCursorPos(x, y) != 0;
+}
+
+USER32_API int ShowCursor(BOOL show)
+{
+    /* Native pointer coordinates exist independently of cursor artwork. */
+    static int display_count;
+    return __atomic_add_fetch(&display_count, show ? 1 : -1, __ATOMIC_RELAXED);
+}
+
 USER32_API HWND SetFocus(HWND hwnd)
 {
     /* NtUserSetFocus returns the previously focused window and makes the window

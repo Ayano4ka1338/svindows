@@ -52,6 +52,7 @@ void HalInitializeMouse(void);
 /* Called once the framebuffer geometry is known, to seat the cursor and set
  * the clamp bounds. */
 void HalMouseSetBounds(INT32 width, INT32 height);
+UINT8 HalMouseWarp(INT32 *x, INT32 *y);
 
 /* Non-blocking read of one decoded packet as an unclamped relative delta plus
  * the packet's button bitmask. Used by the Linux evdev/REL adapter. */

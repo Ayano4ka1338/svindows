@@ -59,6 +59,20 @@ void HalMouseSetBounds(INT32 width, INT32 height)
     KiIrqRestore(flags);
 }
 
+UINT8 HalMouseWarp(INT32 *x, INT32 *y)
+{
+    UINT64 flags = KiIrqSave();
+    if (*x < 0) *x = 0;
+    if (*x > mouse_max_x) *x = mouse_max_x;
+    if (*y < 0) *y = 0;
+    if (*y > mouse_max_y) *y = mouse_max_y;
+    MouseState.X = *x;
+    MouseState.Y = *y;
+    UINT8 buttons = MouseState.Buttons;
+    KiIrqRestore(flags);
+    return buttons;
+}
+
 static void mouse_decode(UINT8 byte)
 {
 

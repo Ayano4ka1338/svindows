@@ -133,6 +133,7 @@ EXPORTS
     NtUserGetWindowRect
     NtUserGetClientRect
     SvNtUserGetCursorPos
+    SvNtUserSetCursorPos
     SvNtUserIsIconic
     SvNtUserCreateIconHandle
     SvNtUserDestroyIcon
