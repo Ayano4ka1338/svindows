@@ -18,6 +18,8 @@ __declspec(dllimport) UINT64 NtUserSetWindowLongPtr(HWND hwnd, int index, LONG_P
 __declspec(dllimport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
                                           int count, LPRECT rect, UINT format);
 
+typedef struct { int Min, Max, Position; UINT Page; } SV_SCROLL_STATE;
+
 typedef struct {
     HWND Window, Parent;
     WCHAR ClassName[96], Title[160];
@@ -29,6 +31,7 @@ typedef struct {
     BOOL Enabled, Used;
     RECT NormalRect;
     int ShowCmd;
+    SV_SCROLL_STATE Scroll[2];
     struct { const WCHAR *Name; HANDLE Value; } Props[SV_USER_PROPS];
 } SV_USER_WINDOW_STATE;
 static SV_USER_WINDOW_STATE g_sv_windows[SV_USER_WINDOWS];
@@ -78,6 +81,7 @@ static void sv_user_record_window(HWND hwnd, const WCHAR *class_name,
     state->Style = style; state->ExStyle = ex_style;
     state->Id = (DWORD)(UINT_PTR)menu; state->Menu = menu;
     state->Instance = instance; state->Enabled = (style & WS_DISABLED) == 0;
+    state->Scroll[0].Max = state->Scroll[1].Max = 100;
     state->Used = TRUE; state->ShowCmd = (style & WS_VISIBLE) ? SW_SHOW : SW_HIDE;
     for (UINT i = 0; class_name && class_name[i] && i + 1 < 96; i++)
         state->ClassName[i] = class_name[i];
@@ -190,6 +194,7 @@ USER32_API HANDLE SetClipboardData(UINT format, HANDLE data)
 { if (!g_sv_clipboard_open || format >= 32 || !data) return 0; g_sv_clipboard[format]=data; return data; }
 
 #include "User32Menus.inc"
+#include "User32Scroll.inc"
 
 USER32_API BOOL SetForegroundWindow(HWND hwnd)
 { return SetActiveWindow(hwnd) != 0 || sv_user_state(hwnd) != 0; }
