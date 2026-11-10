@@ -507,3 +507,4 @@ static HANDLE nt_open_w(const WCHAR *name, DWORD access, DWORD share,
 #include "Profile.inc"
 #include "MappingMisc.inc"
 #include "StorageMedium.inc"
+#include "Volumes.inc"
