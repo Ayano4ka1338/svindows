@@ -501,6 +501,7 @@ static HANDLE nt_open_w(const WCHAR *name, DWORD access, DWORD share,
 #include "LocalMemory.inc"
 #include "EnvironmentStrings.inc"
 #include "ThreadsSync.inc"
+#include "ThreadpoolCleanup.inc"
 #include "ComUser.inc"
 #include "ResourcesSystem.inc"
 #include "ActCtx.inc"
