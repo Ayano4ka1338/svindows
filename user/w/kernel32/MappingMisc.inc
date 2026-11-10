@@ -874,16 +874,7 @@ __declspec(dllexport) BOOL SetThreadContext(HANDLE thread, const void *context)
 }
 __declspec(dllexport) BOOL IsDebuggerPresent(void) { return 0; }
 
-__declspec(dllexport) DWORD FormatMessageW(DWORD flags, const void *source,
-                                            DWORD message, DWORD language,
-                                            WCHAR *buffer, DWORD size,
-                                            void *arguments)
-{
-    (void)flags; (void)source; (void)message; (void)language; (void)arguments;
-    if (buffer && size) buffer[0] = 0;
-    SetLastError(317); /* ERROR_MR_MID_NOT_FOUND */
-    return 0;
-}
+#include "FormatMessage.inc"
 
 __declspec(dllexport) DWORD FormatMessageA(DWORD flags, const void *source,
                                             DWORD message, DWORD language,
