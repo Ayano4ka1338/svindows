@@ -807,3 +807,9 @@ copy-file-ex-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined tools/checks/CopyFileExChecks.c -o $(BUILD)/CopyFileExChecks
 	$(BUILD)/CopyFileExChecks
+
+.PHONY: resource-range-check
+resource-range-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined tools/checks/ResourceRangeChecks.c -o $(BUILD)/ResourceRangeChecks
+	$(BUILD)/ResourceRangeChecks
