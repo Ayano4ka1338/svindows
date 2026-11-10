@@ -97,6 +97,70 @@ UINT64 SvNtGdiViewportOrigin(UINT64 *a)
     return 1;
 }
 
+static BOOLEAN clip_rect_empty(W32K_CLIP_RECT rect)
+{
+    return rect.Left >= rect.Right || rect.Top >= rect.Bottom;
+}
+
+UINT64 SvNtGdiClipRect(UINT64 *a)
+{
+    W32K_DC *dc = dc_from_handle(a[0]);
+    if (!dc || a[1] > 1) return 0;
+    if (a[1] == 0 && !a[2]) {
+        dc->HasAppClip = FALSE;
+        return 2; /* SIMPLEREGION */
+    }
+    W32K_CLIP_RECT rect;
+    if (!MmProbeForRead(a[2], sizeof(rect))) return 0;
+    memcpy(&rect, (const void *)a[2], sizeof(rect));
+
+    if (a[1] == 0) {
+        dc->AppClip = rect;
+        dc->HasAppClip = TRUE;
+        return clip_rect_empty(rect) ? 1 : 2;
+    }
+
+    W32K_CLIP_RECT clip = dc->AppClip;
+    if (!dc->HasAppClip) {
+        INT32 x = dc->ClipX - dc->OrgX, y = dc->ClipY - dc->OrgY;
+        clip = (W32K_CLIP_RECT){x, y, x + dc->ClipW, y + dc->ClipH};
+    }
+    if (clip_rect_empty(clip)) return 1; /* NULLREGION */
+    if (clip_rect_empty(rect)) return 2;
+
+    INT64 left = (INT64)rect.Left + dc->ViewX;
+    INT64 top = (INT64)rect.Top + dc->ViewY;
+    INT64 right = (INT64)rect.Right + dc->ViewX;
+    INT64 bottom = (INT64)rect.Bottom + dc->ViewY;
+    if (left >= clip.Right || top >= clip.Bottom ||
+        right <= clip.Left || bottom <= clip.Top)
+        return 2;
+
+    if (left <= clip.Left && right >= clip.Right) {
+        if (top <= clip.Top && bottom >= clip.Bottom)
+            clip = (W32K_CLIP_RECT){0};
+        else if (top <= clip.Top)
+            clip.Top = (INT32)bottom;
+        else if (bottom >= clip.Bottom)
+            clip.Bottom = (INT32)top;
+        else
+            return 0;
+    } else if (top <= clip.Top && bottom >= clip.Bottom) {
+        if (left <= clip.Left)
+            clip.Left = (INT32)right;
+        else if (right >= clip.Right)
+            clip.Right = (INT32)left;
+        else
+            return 0;
+    } else {
+        /* A hole or L-shaped clip requires a multi-rectangle region. */
+        return 0;
+    }
+    dc->AppClip = clip;
+    dc->HasAppClip = TRUE;
+    return clip_rect_empty(clip) ? 1 : 2;
+}
+
 void W32kDestroyWindowDc(UINT64 hwnd)
 {
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);

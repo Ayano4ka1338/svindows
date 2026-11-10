@@ -55,6 +55,10 @@ typedef struct _W32K_SURFACE {
     BOOLEAN IsScreen;
 } W32K_SURFACE;
 
+typedef struct {
+    INT32 Left, Top, Right, Bottom;
+} W32K_CLIP_RECT;
+
 typedef struct _W32K_DC {
     W32K_SURFACE *Surface;
     W32K_SURFACE  DeviceSurface; /* screen DC or retained window drawing buffer */
@@ -69,7 +73,9 @@ typedef struct _W32K_DC {
     UINT64 Hwnd;
     INT32  OrgX, OrgY;           /* where the device origin lands on the surface */
     INT32  ViewX, ViewY;         /* logical origin in device coordinates */
-    INT32  ClipX, ClipY, ClipW, ClipH; /* in surface coordinates */
+    INT32  ClipX, ClipY, ClipW, ClipH; /* system clip in surface coordinates */
+    W32K_CLIP_RECT AppClip;          /* application clip in device coordinates */
+    BOOLEAN HasAppClip;
     INT32  CurX, CurY;           /* current position for MoveTo/LineTo */
     UINT64 SelectedBrush;
     UINT64 SelectedPen;
@@ -288,6 +294,16 @@ static BOOLEAN dc_clip_coords(W32K_DC *dc, INT32 *x, INT32 *y,
     if (top < dc->ClipY) top = dc->ClipY;
     if (right > clip_right) right = clip_right;
     if (bottom > clip_bottom) bottom = clip_bottom;
+    if (logical && dc->HasAppClip) {
+        INT64 app_left = (INT64)dc->OrgX + dc->AppClip.Left;
+        INT64 app_top = (INT64)dc->OrgY + dc->AppClip.Top;
+        INT64 app_right = (INT64)dc->OrgX + dc->AppClip.Right;
+        INT64 app_bottom = (INT64)dc->OrgY + dc->AppClip.Bottom;
+        if (left < app_left) left = app_left;
+        if (top < app_top) top = app_top;
+        if (right > app_right) right = app_right;
+        if (bottom > app_bottom) bottom = app_bottom;
+    }
     if (right <= left || bottom <= top)
         return FALSE;
     *x = left;

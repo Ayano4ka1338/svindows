@@ -172,6 +172,7 @@ EXPORTS
     NtGdiCreateCompatibleDC
     SvNtGdiCreateDisplayDC
     SvNtGdiViewportOrigin
+    SvNtGdiClipRect
     NtGdiCreateCompatibleBitmap
     NtGdiCreateBitmap
     NtGdiGetDeviceCaps

@@ -157,6 +157,7 @@ UINT64 NtGdiLineTo(UINT64 *args);
 UINT64 NtGdiCreateCompatibleDC(UINT64 *args);
 UINT64 SvNtGdiCreateDisplayDC(UINT64 *args);
 UINT64 SvNtGdiViewportOrigin(UINT64 *args);
+UINT64 SvNtGdiClipRect(UINT64 *args);
 UINT64 NtGdiCreateCompatibleBitmap(UINT64 *args);
 UINT64 NtGdiCreateBitmap(UINT64 *args);
 UINT64 NtGdiGetDCObject(UINT64 *args);

@@ -342,6 +342,21 @@ static SV_REGION *sv_region(HRGN region)
     for (UINT i=0;i<128;i++)if(g_regions[i].Used&&g_regions[i].Handle==region)return &g_regions[i];
     return 0;
 }
+__declspec(dllimport) UINT64 SvNtGdiClipRect(HDC dc, UINT exclude, const RECT *rect);
+
+GDI32_API int SelectClipRgn(HDC dc, HRGN region)
+{
+    SV_REGION *clip = region ? sv_region(region) : NULL;
+    if (region && !clip) return 0;
+    return (int)SvNtGdiClipRect(dc, 0, clip ? &clip->Bounds : NULL);
+}
+
+GDI32_API int ExcludeClipRect(HDC dc, int left, int top, int right, int bottom)
+{
+    const RECT rect = {left, top, right, bottom};
+    return (int)SvNtGdiClipRect(dc, 1, &rect);
+}
+
 GDI32_API HRGN CreateRectRgn(int left,int top,int right,int bottom)
 {
     for(UINT i=0;i<128;i++)if(!g_regions[i].Used){
