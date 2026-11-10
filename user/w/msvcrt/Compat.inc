@@ -893,3 +893,39 @@ __declspec(dllexport) int *___lc_handle_func(void) { return &g_lc_handle; }
 __declspec(dllexport) int __mb_cur_max = 1;
 static const unsigned short g_ctype[257] = {0};
 __declspec(dllexport) const unsigned short *__pctype_func(void) { return g_ctype+1; }
+
+__declspec(dllexport) int iswspace(WCHAR ch)
+{
+    return iswctype(ch, 0x0008);
+}
+
+__declspec(dllexport) int iswprint(WCHAR ch)
+{
+    return ch == ' ' || iswctype(ch, 0x0080);
+}
+
+__declspec(dllexport) SIZE_T wcscspn(const WCHAR *text, const WCHAR *reject)
+{
+    SIZE_T length = 0;
+    for (; text[length]; length++) {
+        for (SIZE_T i = 0; reject[i]; i++)
+            if (text[length] == reject[i]) return length;
+    }
+    return length;
+}
+
+__declspec(dllexport) WCHAR *_wcsupr(WCHAR *text)
+{
+    if (!text) return 0;
+    for (WCHAR *p = text; *p; p++)
+        if (*p >= 'a' && *p <= 'z') *p -= 'a' - 'A';
+    return text;
+}
+
+__declspec(dllexport) WCHAR *_wcslwr(WCHAR *text)
+{
+    if (!text) return 0;
+    for (WCHAR *p = text; *p; p++)
+        if (*p >= 'A' && *p <= 'Z') *p += 'a' - 'A';
+    return text;
+}
