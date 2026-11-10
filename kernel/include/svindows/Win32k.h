@@ -39,6 +39,7 @@ void W32kInitializeGdi(void);
 struct _KPROCESS;
 struct _KTHREAD;
 void W32kCleanupProcessGdi(struct _KPROCESS *process);
+ULONG W32kCountProcessGdiObjects(struct _KPROCESS *process);
 void W32kCleanupProcessUser(struct _KPROCESS *process);
 void W32kCleanupThreadUser(struct _KTHREAD *thread);
 void W32kCleanupWindowDc(struct _KPROCESS *process, UINT64 hwnd);

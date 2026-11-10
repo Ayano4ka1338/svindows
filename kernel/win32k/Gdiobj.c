@@ -47,3 +47,13 @@ extern const UINT8 Font9x20[95][20][5];
 #include "gdi/WindowSurfaces.inc"
 #include "gdi/Drawing.inc"
 #include "gdi/Device.inc"
+
+ULONG W32kCountProcessGdiObjects(PKPROCESS process)
+{
+    if (!process) return 0;
+    ULONG count = 0;
+    for (UINT32 i = 1; i < GDI_MAX_OBJECTS; ++i)
+        if (g_gdi_objects[i].Type && g_gdi_objects[i].Owner == process)
+            count++;
+    return count;
+}

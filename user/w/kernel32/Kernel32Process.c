@@ -37,6 +37,7 @@ extern long SvNtQueryThreadExitStatus(HANDLE thread, DWORD *exit_status);
 extern long SvNtReadProcessMemory(HANDLE process, const void *source,
                                   void *destination, SIZE_T size,
                                   SIZE_T *bytes_read);
+extern DWORD SvNtQueryGuiResources(DWORD process_id, DWORD kind);
 extern long NtQuerySystemInformation(DWORD info_class, void *buffer,
                                      DWORD length, DWORD *return_length);
 
@@ -316,6 +317,16 @@ __declspec(dllexport) DWORD GetProcessId(HANDLE process)
         return 0;
     }
     return (DWORD)info.UniqueProcessId;
+}
+
+__declspec(dllexport) DWORD GetGuiResources(HANDLE process, DWORD flags)
+{
+    if (flags > 1) { SetLastError(87); return 0; }
+    DWORD process_id = GetProcessId(process);
+    if (!process_id) return 0;
+    DWORD count = SvNtQueryGuiResources(process_id, flags);
+    SetLastError(0);
+    return count;
 }
 
 __declspec(dllexport) BOOL ReadProcessMemory(HANDLE process,

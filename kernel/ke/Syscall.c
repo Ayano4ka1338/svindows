@@ -843,6 +843,22 @@ typedef UINT64 (*KI_SERVICE)(UINT64 *args);
 #include "../win32k/UserScreen.inc"
 #include "../win32k/XorgMirror.inc"
 
+static UINT64 SvNtQueryGuiResources(UINT64 *a)
+{
+    ULONG pid = (ULONG)a[0], kind = (ULONG)a[1], found_pid = 0;
+    if (!pid || kind > 1) return 0;
+    POBJECT object = PsReferenceNextProcess(pid - 1, &found_pid);
+    if (!object || found_pid != pid) {
+        if (object) ObDereferenceObject(object);
+        return 0;
+    }
+    PKPROCESS process = PsGetProcessFromObject(object);
+    ULONG count = kind == 0 ? W32kCountProcessGdiObjects(process)
+                            : KiUserCountProcessObjects(process);
+    ObDereferenceObject(object);
+    return count;
+}
+
 /*
  * The system service table, indexed by NT x64 syscall numbers
  * (from the public NT syscall-number tables). Sparse: most slots are unused.
@@ -1233,6 +1249,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F16] = SvNtUserQueryWindowState;
     KiServiceTable[0x1F19] = SvNtQueryThreadExitStatus;
     KiServiceTable[0x1F1A] = SvNtReadProcessMemory;
+    KiServiceTable[0x1F1B] = SvNtQueryGuiResources;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

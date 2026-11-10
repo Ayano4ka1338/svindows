@@ -539,3 +539,4 @@ SYSCALL_STUB NtUserGetThreadDesktop, 0x1085
 SYSCALL_STUB SvNtQueryThreadExitStatus, 0x1F19
 SYSCALL_STUB SvNtReadProcessMemory, 0x1F1A
 SYSCALL_STUB NtGdiGetDCObject, 0x1038
+SYSCALL_STUB SvNtQueryGuiResources, 0x1F1B

@@ -24,6 +24,15 @@ typedef struct _USER_OBJECT_OWNER {
 } USER_OBJECT_OWNER;
 static USER_OBJECT_OWNER g_user_objects[USER_OBJECT_SLOTS];
 
+static ULONG KiUserCountProcessObjects(PKPROCESS process)
+{
+    ULONG count = 0;
+    for (UINT16 i = 200; process && i < USER_OBJECT_SLOTS; ++i)
+        if (g_user_objects[i].Process == process)
+            count++;
+    return count;
+}
+
 static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
 {
     PKTHREAD caller = KeGetCurrentThread();
