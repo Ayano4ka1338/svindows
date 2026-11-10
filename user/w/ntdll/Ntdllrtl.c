@@ -91,5 +91,6 @@ void *memcpy(void *dst, const void *src, SIZE_T n);
 #include "Rtl/Strings.inc"
 #include "Rtl/Paths.inc"
 #include "Rtl/FileCompat.inc"
+#include "Rtl/ResourceRanges.inc"
 #include "Rtl/Compat.inc"
 #include "Rtl/Exception.inc"

@@ -352,3 +352,5 @@ EXPORTS
     WinSqmEndSession
     WinSqmSetDWORD64
     WinSqmSetString
+    RtlIoDecodeMemIoResource
+    RtlCmDecodeMemIoResource
