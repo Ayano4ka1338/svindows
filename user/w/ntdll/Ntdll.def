@@ -215,6 +215,8 @@ EXPORTS
     RtlAnsiStringToUnicodeString
     RtlCreateUnicodeStringFromAsciiz
     RtlMultiByteToUnicodeN
+    RtlOemToUnicodeN
+    RtlUnicodeToOemN
     RtlMultiByteToUnicodeSize
     RtlUnicodeToMultiByteN
     RtlUnicodeToMultiByteSize
