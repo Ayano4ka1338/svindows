@@ -57,7 +57,10 @@ static BYTE *res_section(BYTE *base)
 }
 
 
-static const RES_ENTRY *res_find_entry(const RES_DIRECTORY *dir,
+static WCHAR wide_lower(WCHAR c);
+
+static const RES_ENTRY *res_find_entry(const BYTE *root,
+                                       const RES_DIRECTORY *dir,
                                        const void *id)
 {
     const RES_ENTRY *entries = (const RES_ENTRY *)(dir + 1);
@@ -66,12 +69,11 @@ static const RES_ENTRY *res_find_entry(const RES_DIRECTORY *dir,
     for (WORD i = 0; i < total; i++) {
         if (by_name) {
             if (entries[i].NameOrId & RES_NAME_IS_STRING) {
-                const WCHAR *p = (const WCHAR *)((const BYTE *)dir +
-                    (entries[i].NameOrId & 0x7FFFFFFFu));
+                const WCHAR *p = (const WCHAR *)(root + (entries[i].NameOrId & 0x7FFFFFFFu));
                 WORD len = *p++;
                 const WCHAR *want = (const WCHAR *)id;
                 WORD j = 0;
-                while (j < len && want[j] && p[j] == want[j])
+                while (j < len && want[j] && wide_lower(p[j]) == wide_lower(want[j]))
                     j++;
                 if (j == len && !want[j])
                     return &entries[i];
@@ -93,12 +95,12 @@ static const RES_ENTRY *res_find_entry(const RES_DIRECTORY *dir,
 static void *res_walk(BYTE *res, const void *type, const void *name,
                       WORD lang)
 {
-    const RES_ENTRY *e = res_find_entry((const RES_DIRECTORY *)res, type);
+    const RES_ENTRY *e = res_find_entry(res, (const RES_DIRECTORY *)res, type);
     if (!e)
         return 0;
     if (!(e->OffsetToData & RES_SUBDIR))
         return (void *)(res + e->OffsetToData);
-    e = res_find_entry((const RES_DIRECTORY *)(res +
+    e = res_find_entry(res, (const RES_DIRECTORY *)(res +
                        (e->OffsetToData & 0x7FFFFFFFu)), name);
     if (!e)
         return 0;
@@ -262,10 +264,10 @@ __declspec(dllexport) BOOL EnumResourceLanguagesW(HANDLE module,
     BYTE *res = res_section((BYTE *)module);
     if (!res)
         return 0;
-    const RES_ENTRY *t = res_find_entry((const RES_DIRECTORY *)res, type);
+    const RES_ENTRY *t = res_find_entry(res, (const RES_DIRECTORY *)res, type);
     if (!t || !(t->OffsetToData & RES_SUBDIR))
         return 0;
-    const RES_ENTRY *n = res_find_entry((const RES_DIRECTORY *)(res +
+    const RES_ENTRY *n = res_find_entry(res, (const RES_DIRECTORY *)(res +
                         (t->OffsetToData & 0x7FFFFFFFu)), name);
     if (!n || !(n->OffsetToData & RES_SUBDIR))
         return 0;
