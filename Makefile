@@ -110,6 +110,7 @@ USER32     := $(BUILD)/user32.dll
 USER32LIB  := $(BUILD)/user32.lib
 GDI32      := $(BUILD)/gdi32.dll
 GDI32LIB   := $(BUILD)/gdi32.lib
+WINSPOOL   := $(BUILD)/winspool.drv
 UXTHEME    := $(BUILD)/uxtheme.dll
 UXTHEMELIB := $(BUILD)/uxtheme.lib
 COMCTL32   := $(BUILD)/comctl32.dll
@@ -254,7 +255,7 @@ $(DOS_COMPAT_STAMP): .FORCE
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 $(DOS_COMPAT_OBJECTS) $(DOS_TESTS) $(INITRD): $(DOS_COMPAT_STAMP)
 
-$(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(CONTROL_OBJ) $(NOTEPAD) $(CALC): $(BUILD_CONFIG)
+$(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(USER32) $(GDI32) $(WINSPOOL) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(CONTROL_OBJ) $(NOTEPAD) $(CALC): $(BUILD_CONFIG)
 
 $(BUILD)/%.c.o: %.c
 	@mkdir -p $(dir $@)
@@ -390,6 +391,13 @@ $(GDI32): user/w/gdi32/Gdi32.c user/w/gdi32/Gdi32.h $(GDI32_PARTS) $(NTDLL)
 	$(CLANGWIN) -DSV_GDI32_BUILD -Iuser/w/gdi32 -c user/w/gdi32/Gdi32.c -o $(BUILD)/gdi32.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x230000000 \
 	           /out:$@ /implib:$(GDI32LIB) $(BUILD)/gdi32.obj $(NTDLLLIB)
+	@echo "  DLL   $@"
+
+$(WINSPOOL): user/w/winspool/Winspool.c $(NTDLL)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c $< -o $(BUILD)/winspool.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x2D0000000 \
+	           /out:$@ $(BUILD)/winspool.obj $(NTDLLLIB)
 	@echo "  DLL   $@"
 
 # Shared Windows 10 control theme; renders through GDI in user mode.
@@ -530,7 +538,7 @@ $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFe
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(UXTHEME) $(COMCTL32) $(SHELL32) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(INITRD) bs=1M count=450 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
@@ -543,6 +551,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(MSVCRT) ::WINDOWS/SYSTEM32/MSVCRT.DLL
 	mcopy -i $(INITRD) $(USER32) ::WINDOWS/SYSTEM32/USER32.DLL
 	mcopy -i $(INITRD) $(GDI32) ::WINDOWS/SYSTEM32/GDI32.DLL
+	mcopy -i $(INITRD) $(WINSPOOL) ::WINDOWS/SYSTEM32/WINSPOOL.DRV
 	mcopy -i $(INITRD) $(UXTHEME) ::WINDOWS/SYSTEM32/UXTHEME.DLL
 	mcopy -i $(INITRD) $(COMCTL32) ::WINDOWS/SYSTEM32/COMCTL32.DLL
 	mcopy -i $(INITRD) $(SHELL32) ::WINDOWS/SYSTEM32/SHELL32.DLL
