@@ -736,6 +736,7 @@ typedef void (*THREADPOOL_WORK_CALLBACK)(void *callback_instance,
 typedef struct _THREADPOOL_WORK_ITEM {
     BOOL Used;
     BOOL Submitted;
+    BOOL Running;
     THREADPOOL_WORK_CALLBACK Callback;
     void *Context;
     void *Environment;
@@ -750,7 +751,8 @@ static THREADPOOL_WORK_ITEM *g_threadpool_work_tail;
 static volatile LONG g_threadpool_work_lock;
 static volatile LONG g_threadpool_worker_state; /* 0=none, 1=starting, 2=ready */
 static HANDLE g_threadpool_work_semaphore;
-static HANDLE g_threadpool_workers[4];
+static HANDLE g_threadpool_workers[8];
+static volatile LONG g_threadpool_worker_count;
 
 static void threadpool_lock(void)
 {
@@ -815,8 +817,14 @@ static DWORD threadpool_worker_start(void *parameter)
             work->LegacyCallback = 0;
             threadpool_unlock();
         } else {
-            work->Callback(0, work->Context, work);
-            __sync_lock_test_and_set(&work->Submitted, 0);
+            threadpool_lock();
+            work->Running = 1;
+            threadpool_unlock();
+            work->Callback(work, work->Context, work);
+            threadpool_lock();
+            work->Running = 0;
+            work->Submitted = 0;
+            threadpool_unlock();
         }
     }
 }
@@ -839,6 +847,7 @@ static BOOL threadpool_ensure_workers(void)
                 __sync_lock_test_and_set(&g_threadpool_worker_state, 0);
                 return 0;
             }
+            __atomic_add_fetch(&g_threadpool_worker_count, 1, __ATOMIC_RELEASE);
         }
         __sync_lock_test_and_set(&g_threadpool_worker_state, 2);
         return 1;
@@ -847,6 +856,41 @@ static BOOL threadpool_ensure_workers(void)
     while (g_threadpool_worker_state == 1)
         Sleep(0);
     return g_threadpool_worker_state == 2;
+}
+
+__declspec(dllexport) BOOL CallbackMayRunLong(void *callback_instance)
+{
+    THREADPOOL_WORK_ITEM *work = callback_instance;
+    if (!work || work < g_threadpool_work_items ||
+        work >= g_threadpool_work_items + MAX_THREADPOOL_WORK_ITEMS) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return 0;
+    }
+    threadpool_lock();
+    BOOL valid = work->Used && work->Running;
+    threadpool_unlock();
+    if (!valid) {
+        SetLastError(87);
+        return 0;
+    }
+    LONG count = __atomic_load_n(&g_threadpool_worker_count, __ATOMIC_ACQUIRE);
+    if (count < 8) {
+        LONG slot = __atomic_fetch_add(&g_threadpool_worker_count, 1,
+                                       __ATOMIC_ACQ_REL);
+        if (slot < 8) {
+            HANDLE worker = CreateThread(0, 0, threadpool_worker_start, 0, 0, 0);
+            if (worker)
+                g_threadpool_workers[slot] = worker;
+            else
+                __atomic_sub_fetch(&g_threadpool_worker_count, 1,
+                                   __ATOMIC_RELEASE);
+        } else {
+            __atomic_sub_fetch(&g_threadpool_worker_count, 1,
+                               __ATOMIC_RELEASE);
+        }
+    }
+    SetLastError(0);
+    return 1;
 }
 
 __declspec(dllexport) BOOL QueueUserWorkItem(DWORD (*callback)(void *),
