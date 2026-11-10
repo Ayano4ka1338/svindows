@@ -618,6 +618,22 @@ USER32_API DWORD GetWindowThreadProcessId(HWND window, DWORD *process)
     if (process) *process=(DWORD)NtUserQueryWindow(window,4);
     return thread;
 }
+USER32_API LRESULT SendMessageTimeoutW(HWND window, UINT message,
+    WPARAM wparam, LPARAM lparam, UINT flags, UINT timeout,
+    ULONG_PTR *result)
+{
+    (void)flags;
+    if (!IsWindow(window)) { SetLastError(1400); return 0; }
+    DWORD owner = GetWindowThreadProcessId(window, NULL);
+    if (!owner || owner != GetCurrentThreadId()) {
+        SetLastError(timeout ? 50 : 1460); /* ERROR_NOT_SUPPORTED / TIMEOUT */
+        return 0;
+    }
+    LRESULT value = SendMessageW(window, message, wparam, lparam);
+    if (result) *result = (ULONG_PTR)value;
+    SetLastError(0);
+    return 1;
+}
 USER32_API int InternalGetWindowText(HWND window, WCHAR *text, int capacity)
 {
     if (!text || capacity<=0) return 0;
