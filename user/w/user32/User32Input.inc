@@ -157,3 +157,24 @@ USER32_API DWORD GetMessagePos(void)
 {
     return (DWORD)SvNtUserGetMessagePos();
 }
+
+/* Carets are currently painted by the EDIT control itself. There is no
+ * queue-owned native caret service for applications which manage their own. */
+USER32_API BOOL CreateCaret(HWND window, HBITMAP bitmap, int width, int height)
+{
+    (void)bitmap; (void)window;
+    if (width < 0 || height < 0) {
+        SetLastError(87);
+        return FALSE;
+    }
+    SetLastError(50);
+    return FALSE;
+}
+USER32_API BOOL DestroyCaret(void)
+{ SetLastError(50); return FALSE; }
+USER32_API BOOL ShowCaret(HWND window)
+{ (void)window; SetLastError(50); return FALSE; }
+USER32_API BOOL HideCaret(HWND window)
+{ (void)window; SetLastError(50); return FALSE; }
+USER32_API BOOL SetCaretPos(int x, int y)
+{ (void)x; (void)y; SetLastError(50); return FALSE; }

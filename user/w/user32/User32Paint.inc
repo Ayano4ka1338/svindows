@@ -104,3 +104,18 @@ USER32_API BOOL RedrawWindow(HWND window, const RECT *rect, HRGN region, UINT fl
     if ((flags & 0x200) && !UpdateWindow(window)) return FALSE;
     return TRUE;
 }
+
+USER32_API int ScrollWindowEx(HWND window, int dx, int dy, const RECT *scroll,
+    const RECT *clip, HRGN update_region, RECT *update, UINT flags)
+{
+    (void)window; (void)dx; (void)dy; (void)scroll; (void)clip;
+    (void)update_region; (void)update; (void)flags;
+    SetLastError(50);
+    return 0; /* ERROR: the native compositor has no scroll operation yet. */
+}
+USER32_API BOOL DrawFocusRect(HDC dc, const RECT *rect)
+{
+    (void)dc; (void)rect;
+    SetLastError(50); /* A reversible patterned focus raster is unavailable. */
+    return FALSE;
+}
