@@ -354,3 +354,4 @@ EXPORTS
     WinSqmSetString
     RtlIoDecodeMemIoResource
     RtlCmDecodeMemIoResource
+    SvNtUserQueryWindowState

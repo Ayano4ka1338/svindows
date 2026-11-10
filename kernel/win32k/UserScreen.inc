@@ -1406,7 +1406,29 @@ static UINT64 NtUserMapWindowPoints(UINT64 *a)
 
 static UINT64 SvNtUserIsIconic(UINT64 *a)
 {
-    return KiUserWindowValid(a[0], TRUE) && g_w32k[(UINT16)a[0]].Minimized;
+    return KiUserWindowValid(a[0], FALSE) && g_w32k[(UINT16)a[0]].Minimized;
+}
+
+/* Public read-only window metadata is visible across processes. Never read
+ * the target process's user arena: its retained kernel state owns these bits. */
+static UINT64 SvNtUserQueryWindowState(UINT64 *a)
+{
+    if (a[0]==SV_DESKTOP_HWND) return GfxAvailable() ? 3 : 0;
+    if (!KiUserWindowValid(a[0],FALSE)) return 0;
+    UINT64 irq=KiIrqSave();
+    UINT16 slot=(UINT16)a[0], ancestor=slot;
+    UINT64 result=1 | (g_w32k[slot].Minimized ? 4 : 0) |
+                      (g_w32k[slot].Maximized ? 8 : 0);
+    BOOLEAN visible=TRUE;
+    unsigned depth=0;
+    for (; ancestor && depth<W32K_SLOTS; depth++) {
+        if (!W32kWindowExists(ancestor) || !g_w32k[ancestor].Visible) { visible=FALSE; break; }
+        ancestor=g_w32k[ancestor].Parent;
+    }
+    if (ancestor && depth==W32K_SLOTS) visible=FALSE;
+    if (visible) result|=2;
+    KiIrqRestore(irq);
+    return result;
 }
 
 static UINT64 SvNtUserSetCursorPos(UINT64 *a)
@@ -1490,7 +1512,7 @@ static UINT64 NtUserSetWindowText(UINT64 *a)
 static UINT64 NtUserGetWindowText(UINT64 *a)
 {
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
-    if (!KiUserWindowValid(a[0], TRUE) || !W32kWindowExists(slot))
+    if (!KiUserWindowValid(a[0], FALSE) || !W32kWindowExists(slot))
         return 0;
     WCHAR *out = (WCHAR *)a[1];
     UINT32 capacity = (UINT32)a[2];

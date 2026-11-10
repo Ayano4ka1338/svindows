@@ -603,3 +603,23 @@ USER32_API BOOL SetProcessDPIAware(void)
 }
 USER32_API BOOL IsProcessDPIAware(void)
 { return g_process_dpi_aware; }
+
+__declspec(dllimport) UINT64 SvNtUserQueryWindowState(HWND window);
+USER32_API BOOL IsWindow(HWND window)
+{ return (SvNtUserQueryWindowState(window)&1)!=0; }
+USER32_API BOOL IsWindowVisible(HWND window)
+{ return (SvNtUserQueryWindowState(window)&2)!=0; }
+USER32_API BOOL IsZoomed(HWND window)
+{ return (SvNtUserQueryWindowState(window)&8)!=0; }
+USER32_API DWORD GetWindowThreadProcessId(HWND window, DWORD *process)
+{
+    DWORD thread=(DWORD)NtUserQueryWindow(window,0);
+    if (!thread) { SetLastError(1400); return 0; }
+    if (process) *process=(DWORD)NtUserQueryWindow(window,4);
+    return thread;
+}
+USER32_API int InternalGetWindowText(HWND window, WCHAR *text, int capacity)
+{
+    if (!text || capacity<=0) return 0;
+    return (int)NtUserGetWindowText(window,text,(ULONG)capacity);
+}
