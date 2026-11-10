@@ -12,3 +12,4 @@ EXPORTS
     DPA_DeleteAllPtrs @337
     DPA_Sort @338
     DPA_CreateEx @340
+    GetEffectiveClientRect @4
