@@ -367,3 +367,21 @@ __declspec(dllexport) void SHAddToRecentDocs(unsigned format, const void *item)
     (void)format;
     (void)item;
 }
+
+/* Svindows has no stock Shell icon resources or system icon cache yet. */
+typedef struct {
+    DWORD Size;
+    HANDLE Icon;
+    int SystemIndex, ResourceIndex;
+    WCHAR Path[MAX_PATH];
+} SHELL_STOCK_ICON_INFO;
+_Static_assert(sizeof(SHELL_STOCK_ICON_INFO) == 544, "SHSTOCKICONINFO x64");
+
+__declspec(dllexport) HRESULT SHGetStockIconInfo(int id, unsigned flags,
+                                                SHELL_STOCK_ICON_INFO *info)
+{
+    (void)flags;
+    if (!info || info->Size != sizeof(*info) || id < 0 || id >= 181)
+        return (HRESULT)0x80070057u;
+    return SHELL_E_NOTIMPL;
+}
