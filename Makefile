@@ -801,3 +801,9 @@ native-delete-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined tools/checks/NativeDeleteChecks.c -o $(BUILD)/NativeDeleteChecks
 	$(BUILD)/NativeDeleteChecks
+
+.PHONY: copy-file-ex-check
+copy-file-ex-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined tools/checks/CopyFileExChecks.c -o $(BUILD)/CopyFileExChecks
+	$(BUILD)/CopyFileExChecks
