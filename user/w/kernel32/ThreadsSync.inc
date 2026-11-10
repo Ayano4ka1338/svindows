@@ -741,6 +741,7 @@ typedef struct _THREADPOOL_WORK_ITEM {
     void *Context;
     void *Environment;
     DWORD (*LegacyCallback)(void *);
+    void (*SimpleCallback)(void *, void *);
     struct _THREADPOOL_WORK_ITEM *Next;
 } THREADPOOL_WORK_ITEM;
 
@@ -809,7 +810,18 @@ static DWORD threadpool_worker_start(void *parameter)
 
         if (!work)
             continue;
-        if (work->LegacyCallback) {
+        if (work->SimpleCallback) {
+            threadpool_lock();
+            work->Running = 1;
+            threadpool_unlock();
+            work->SimpleCallback(work, work->Context);
+            threadpool_lock();
+            work->Running = 0;
+            work->Submitted = 0;
+            work->Used = 0;
+            work->SimpleCallback = 0;
+            threadpool_unlock();
+        } else if (work->LegacyCallback) {
             work->LegacyCallback(work->Context);
             threadpool_lock();
             work->Submitted = 0;
@@ -861,8 +873,11 @@ static BOOL threadpool_ensure_workers(void)
 __declspec(dllexport) BOOL CallbackMayRunLong(void *callback_instance)
 {
     THREADPOOL_WORK_ITEM *work = callback_instance;
-    if (!work || work < g_threadpool_work_items ||
-        work >= g_threadpool_work_items + MAX_THREADPOOL_WORK_ITEMS) {
+    BOOL in_normal = work && work >= g_threadpool_work_items &&
+        work < g_threadpool_work_items + MAX_THREADPOOL_WORK_ITEMS;
+    BOOL in_legacy = work && work >= g_legacy_work_items &&
+        work < g_legacy_work_items + 64;
+    if (!in_normal && !in_legacy) {
         SetLastError(87); /* ERROR_INVALID_PARAMETER */
         return 0;
     }
@@ -888,6 +903,59 @@ __declspec(dllexport) BOOL CallbackMayRunLong(void *callback_instance)
             __atomic_sub_fetch(&g_threadpool_worker_count, 1,
                                __ATOMIC_RELEASE);
         }
+    }
+    SetLastError(0);
+    return 1;
+}
+
+__declspec(dllexport) BOOL TrySubmitThreadpoolCallback(
+    void (*callback)(void *, void *), void *context, void *environment)
+{
+    if (!callback) {
+        SetLastError(87);
+        return 0;
+    }
+    /* Callback environments are opaque ABI records. Until their initialize
+     * and cleanup-group setters are available, reject them explicitly. */
+    if (environment) {
+        SetLastError(50); /* ERROR_NOT_SUPPORTED */
+        return 0;
+    }
+    if (!threadpool_ensure_workers()) {
+        SetLastError(8);
+        return 0;
+    }
+    threadpool_lock();
+    THREADPOOL_WORK_ITEM *work = 0;
+    for (DWORD i = 0; i < 64; ++i) {
+        if (!g_legacy_work_items[i].Used) {
+            work = &g_legacy_work_items[i];
+            break;
+        }
+    }
+    if (!work) {
+        threadpool_unlock();
+        SetLastError(8);
+        return 0;
+    }
+    work->Used = 1;
+    work->Submitted = 1;
+    work->Running = 0;
+    work->Callback = 0;
+    work->LegacyCallback = 0;
+    work->SimpleCallback = callback;
+    work->Context = context;
+    work->Environment = 0;
+    work->Next = 0;
+    if (g_threadpool_work_tail)
+        g_threadpool_work_tail->Next = work;
+    else
+        g_threadpool_work_head = work;
+    g_threadpool_work_tail = work;
+    threadpool_unlock();
+    if (!ReleaseSemaphore(g_threadpool_work_semaphore, 1, 0)) {
+        SetLastError(8);
+        return 0;
     }
     SetLastError(0);
     return 1;
