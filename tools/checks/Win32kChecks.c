@@ -569,6 +569,13 @@ static void check_retained_window_painting(void)
     assert(NtGdiPatBlt(fill));
     assert(NtUserEndPaint(args));
     assert(screen[75 * STRIDE + 60] == 0);
+    assert(W32kWindowAt(60,75)==(UINT16)popup);
+    g_w32k_input_root=slot;
+    assert(W32kWindowAt(60,75)==slot);
+    g_w32k_input_root=0;
+    W32kInputWindowMouse(slot,60,75,0);
+    assert(!g_w32k_input_root && W32kWindowAt(60,75)==(UINT16)popup);
+    puts("PASS explicit X11 destination bypasses unrelated native overlap only during dispatch");
     UINT32 *desktop_target = g_w32k_composite;
     assert(W32kComposeWindow(slot, before, STRIDE));
     assert(before[75 * STRIDE + 60] == 0xFFFFFF);
