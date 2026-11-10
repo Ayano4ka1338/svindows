@@ -653,6 +653,34 @@ static void W32kComposeRect(INT32 x, INT32 y, INT32 width, INT32 height)
     KiIrqRestore(flags);
 }
 
+/* Export one retained window tree without unrelated desktop occluders.
+ * The caller owns a screen-sized scratch raster; no socket I/O occurs while
+ * the composition target is borrowed. */
+static BOOLEAN W32kComposeWindow(UINT16 slot, UINT32 *pixels, UINT32 stride)
+{
+    if (!W32kWindowExists(slot) || !pixels || stride < GfxFramebuffer.Width)
+        return FALSE;
+    UINT64 flags = KiIrqSave();
+    UINT32 *saved = g_w32k_composite;
+    UINT32 saved_w = g_w32k_composite_w;
+    INT32 old_x=g_w32k_clip_x, old_y=g_w32k_clip_y;
+    INT32 old_w=g_w32k_clip_w, old_h=g_w32k_clip_h;
+    g_w32k_composite = pixels; g_w32k_composite_w = stride;
+    g_w32k_clip_x=0; g_w32k_clip_y=0;
+    g_w32k_clip_w=GfxFramebuffer.Width; g_w32k_clip_h=GfxFramebuffer.Height;
+    W32K_WINDOW_STATE *window = &g_w32k[slot];
+    W32kRasterFill(0,0,g_w32k_clip_w,g_w32k_clip_h,GfxColor(255,255,255));
+    if (window->Kind == W32K_KIND_TOPLEVEL)
+        W32kPaintFrame(slot,0,0,g_w32k_clip_w,g_w32k_clip_h);
+    W32kCopyWindowClient(slot,pixels,stride,0,0,g_w32k_clip_w,g_w32k_clip_h);
+    W32kPaintChildren(slot,0,0,g_w32k_clip_w,g_w32k_clip_h,0);
+    g_w32k_composite=saved; g_w32k_composite_w=saved_w;
+    g_w32k_clip_x=old_x; g_w32k_clip_y=old_y;
+    g_w32k_clip_w=old_w; g_w32k_clip_h=old_h;
+    KiIrqRestore(flags);
+    return TRUE;
+}
+
 void W32kScreenDamage(INT32 x, INT32 y, INT32 width, INT32 height)
 {
     W32kComposeRect(x, y, width, height);

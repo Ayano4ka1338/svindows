@@ -27,6 +27,7 @@ typedef struct {
     UINT8 Event[32];
     UINT8 EventHave;
     BOOLEAN Failed;
+    UINT32 *Surface;
     UINT8 *Pixels;
     UINT32 PixelCapacity;
     W32K_XWIN Windows[W32K_SLOTS];
@@ -116,6 +117,7 @@ static void W32kXClose(W32K_XORG *x)
         LinuxSocketClose(x->Socket);
     if (x->Pixels)
         ExFreePool(x->Pixels);
+    if (x->Surface) ExFreePool(x->Surface);
     memset(x, 0, sizeof(*x));
 }
 
@@ -311,14 +313,17 @@ static BOOLEAN W32kXPutWindow(W32K_XORG *x, W32K_XWIN *out,
         x->Pixels = pixels;
         x->PixelCapacity = bytes;
     }
-    UINT32 stride = g_w32k_composite_w;
-    if (!g_w32k_composite || stride < GfxFramebuffer.Width)
+    UINT32 stride = x->Width;
+    if (!x->Surface)
+        x->Surface = ExAllocatePoolWithTag(NonPagedPool,
+                    (SIZE_T)x->Width * x->Height * sizeof(UINT32), 'sXwW');
+    if (!x->Surface || !W32kComposeWindow((UINT16)(guest-g_w32k), x->Surface, stride))
         return FALSE;
     for (UINT32 y = 0; y < height; y += max_rows) {
         UINT32 rows = height - y < max_rows ? height - y : max_rows;
         UINT32 image_bytes = width * rows * 4;
         for (UINT32 row = 0; row < rows; ++row) {
-            const UINT32 *source = g_w32k_composite +
+            const UINT32 *source = x->Surface +
                 (top + (INT32)y + row) * stride + left;
             UINT32 *target = (UINT32 *)x->Pixels + row * width;
             for (UINT32 col = 0; col < width; ++col) {

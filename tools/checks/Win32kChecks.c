@@ -558,6 +558,13 @@ static void check_retained_window_painting(void)
     assert(NtGdiPatBlt(fill));
     assert(NtUserEndPaint(args));
     assert(screen[75 * STRIDE + 60] == 0);
+    UINT32 *desktop_target = g_w32k_composite;
+    assert(W32kComposeWindow(slot, before, STRIDE));
+    assert(before[75 * STRIDE + 60] == 0xFFFFFF);
+    assert(screen[75 * STRIDE + 60] == 0 && g_w32k_composite == desktop_target);
+    assert(W32kComposeWindow((UINT16)popup, before, STRIDE));
+    assert(before[75 * STRIDE + 60] == 0);
+    puts("PASS independent Xorg window rasters exclude unrelated overlapping windows");
     W32kShowWindow(popup, 0);
     assert(screen[75 * STRIDE + 60] == 0xFFFFFF);
     check_damage_matches_full();
