@@ -1,71 +1,44 @@
 # Svindows
 
-<table>
-  <tr>
-    <td width="35%" align="center" valign="middle">
-      <img src="other/Logo123.png" alt="Svindows Logo" width="220">
-    </td>
-    <td width="65%" valign="middle">
-      <h1>Svindows</h1>
-      <p><strong>An experimental NT-compatible operating system for x86-64.</strong></p>
-      <p>An independent OS built from scratch, featuring an NT-inspired kernel and compatibility layers for Windows, Linux and DOS applications.</p>
-      <p>
-        <img src="https://img.shields.io/github/stars/Ayano4ka1338/svindows?style=flat-square" alt="Stars">
-        <img src="https://img.shields.io/github/issues/Ayano4ka1338/svindows?style=flat-square" alt="Issues">
-        <img src="https://img.shields.io/github/last-commit/Ayano4ka1338/svindows?style=flat-square" alt="Last Commit">
-        <img src="https://img.shields.io/github/repo-size/Ayano4ka1338/svindows?style=flat-square" alt="Repository Size">
-        <img src="https://img.shields.io/github/languages/top/Ayano4ka1338/svindows?style=flat-square" alt="Language">
-        <img src="https://img.shields.io/github/license/Ayano4ka1338/svindows?style=flat-square" alt="License">
-      </p>
-    </td>
-  </tr>
-</table>
+<img src="other/Logo123.png" width="150" align="right" alt="Svindows logo">
 
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/71df715c-e44f-4b46-964a-1b1937211be4" alt="Svindows Desktop" width="100%">
-</p>
-
----
-
-## About
-
-Svindows is an experimental x86-64 operating system built from scratch around an NT-inspired kernel. It aims to run software from multiple operating system ecosystems through independent compatibility layers, without using Microsoft source code.
+An experimental x86-64 operating system built from scratch around an NT-inspired kernel.
+It runs software from several ecosystems through independent compatibility layers, without
+Microsoft source code.
 
 ## Features
 
-- **NT Kernel** — Limine Multiboot2 boot with a FAT32 `initrd.fat`, long mode, ring 0/3, virtual memory, processes, threads, scheduler, kernel objects and system calls.
-- **Win32** — PE32+ EXE/DLL loading, PEB/TEB, native `Nt*` services, Win32 runtime, console, USER32 and GDI APIs.
-- **DOS** — COM and MZ executables, DOS/BIOS interrupts, partial 386 protected mode and DPMI, virtual VGA, PIC, PIT and keyboard devices.
-- **Linux ABI** — x86-64 ELF, musl interpreter, Linux-style syscalls, `mmap`, `futex`, `poll`/`epoll`, processes and AF_INET sockets.
-- **Networking** — VirtIO-net, lwIP, IPv4, DHCP, DNS, ICMP, UDP, TCP and basic HTTP client.
-- **Graphics & Storage** — FAT32/VFAT, framebuffer console, Win32 GDI and experimental Xorg/X11 desktop.
-- **Userland** — `cmd.exe`, `curl`, `fastfetch`, Xorg utilities, `feh` and a DOS/4G DOOM compatibility target.
+- **Kernel** — Limine boot, SMP, virtual memory and pools, objects, registry, processes,
+  threads, a preemptive scheduler and call/import tracing.
+- **Win32** — PE32+ loading, PEB/TEB, native `Nt*` calls, kernel32/user32/gdi32/comctl32,
+  GDI+, COM/OLE, common dialogs and x64 exception handling. Original Windows 7 Notepad,
+  Registry Editor and Calculator are bundled and usable.
+- **DOS** — COM/MZ programs, BIOS interrupts, 386 protected mode/DPMI, a JIT CPU, VGA,
+  and bundled Windows 1.0, 2.0 and 3.x applications.
+- **Linux** — ELF64 with musl, Linux syscalls, `mmap`, `futex`, `poll`/`epoll`, `/proc`,
+  AF_INET sockets, the Alpine `apk` client and Xorg applications.
+- **Networking** — VirtIO-net, lwIP, IPv4, DHCP, DNS, ICMP, UDP and TCP.
+- **Graphics** — framebuffer console, GDI/win32k, an Xorg desktop, and Win32 or Win16
+  windows exported as native X11 clients.
 
-Compatibility is experimental and incomplete. DOS/DPMI gameplay, sound, full POSIX/Linux behavior, Linux signals, TLS/HTTPS and broad Windows API coverage are not guaranteed. X11 applications require a running X server. See [`docs/`](docs/) for details.
+Compatibility is experimental and incomplete. Details are in [`docs/`](docs/).
 
 ## Build & Run
 
-**Requirements:** Linux, GCC/binutils, Clang/LLD, NASM, GNU Make, Python 3, xorriso, mtools and QEMU.
+Requires Linux, GCC/binutils, Clang/LLD, NASM, GNU Make, Python 3, xorriso, mtools and QEMU.
 
 ```bash
-git clone https://github.com/Ayano4ka1338/svindows.git
-cd svindows
-
-make             # Build Limine ISO and FAT32 initrd module
-make run         # Boot using QEMU serial console
-make run-gui     # Boot graphical QEMU
-make run-net     # Run network smoke test
-make clean       # Remove generated files
+make          # build the ISO and FAT32 initrd
+make run      # boot with a serial console
+make run-gui  # boot the graphical desktop
+make run-net  # boot and run the network smoke test
+make clean    # remove generated files
 ```
 
-Alpine APK packages (Xorg, `feh`, `curl` and Fastfetch) download in parallel
-and are kept in `~/.cache/svindows/alpine-apk` between builds. `make clean` does
-not delete this cache. Tune concurrency with `ALPINE_DOWNLOAD_JOBS=12` (default)
-or select a nearby mirror with `ALPINE_MIRROR=https://.../alpine`.
+Alpine packages (Xorg, `feh`, `curl`, fastfetch) are cached in
+`~/.cache/svindows/alpine-apk`. Tune downloads with `ALPINE_DOWNLOAD_JOBS` and
+`ALPINE_MIRROR`. Package installation is still experimental.
 
-The disk also includes Alpine's static `apk` client. In the Svindows Linux
-shell, run `apk --version` to check it, or `apk update` to refresh repository
-indexes. The client and Alpine repository keys are staged from the pinned
-v3.22 package; downloaded indexes and package files live on the writable FAT
-drive. Package installation is experimental because FAT and the Linux ABI do
-not yet provide every Unix filesystem feature Alpine packages may require.
+## License
+
+See [`License`](License).
