@@ -13,6 +13,7 @@ __declspec(dllexport) BOOL CopyFileExW(const WCHAR *from, const WCHAR *to,
     if (!NT_SUCCESS(status)) {
         CloseHandle(source); SetLastError(ntstatus_to_win32(status)); return 0;
     }
+    if (info.Attributes & 0x10) { CloseHandle(source); SetLastError(5); return 0; }
     HANDLE destination=CreateFileW(to,0x40000000u,0,0,(flags&1)?1:2,0,0);
     if (destination==NT_INVALID_HANDLE) {
         DWORD error=GetLastError(); CloseHandle(source); SetLastError(error); return 0;
@@ -30,12 +31,13 @@ __declspec(dllexport) BOOL CopyFileExW(const WCHAR *from, const WCHAR *to,
             if (action==1 || action==2) { keep=action==2; error=1235; break; }
             if (action==3) progress=0; /* PROGRESS_QUIET */
         }
+        if (cancel && *cancel) { error=1235; break; }
         if (transferred==info.Size) break;
         DWORD count=info.Size-transferred>65536 ? 65536 : (DWORD)(info.Size-transferred);
         DWORD read=0,written=0;
-        if (!ReadFile(source,buffer,count,&read,0)) { error=GetLastError(); break; }
+        if (!ReadFile(source,buffer,count,&read,0)) { error=GetLastError(); if (!error) error=30; break; }
         if (!read) { error=38; break; }
-        if (!WriteFile(destination,buffer,read,&written,0)) { error=GetLastError(); break; }
+        if (!WriteFile(destination,buffer,read,&written,0)) { error=GetLastError(); if (!error) error=29; break; }
         if (written!=read) { error=29; break; }
         transferred+=read;
         reason=0;
