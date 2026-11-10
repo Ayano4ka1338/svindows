@@ -88,6 +88,7 @@ static UINT16 g_w32k_active;     /* foreground window slot, 0 = none       */
 static INT32 g_w32k_pointer_x, g_w32k_pointer_y;
 static UINT8 g_w32k_pointer_buttons;
 static BOOLEAN g_w32k_pointer_valid;
+static UINT16 g_w32k_input_root; /* explicit X11 event destination during dispatch */
 static UINT16 g_w32k_capture;    /* window holding the mouse capture       */
 static UINT16 g_w32k_drag;       /* caption drag keeps its owner across hit tests */
 static BOOLEAN g_w32k_shift, g_w32k_ctrl, g_w32k_alt;
@@ -316,6 +317,8 @@ void W32kSetZOrder(UINT16 slot, UINT64 after)
 
 static UINT16 W32kWindowAt(INT32 x, INT32 y)
 {
+    if (W32kWindowExists(g_w32k_input_root))
+        return W32kChildAt(g_w32k_input_root,x,y,0);
     for (UINT16 slot = g_w32k_top; slot; slot = g_w32k[slot].ZPrev) {
         W32K_WINDOW_STATE *window = &g_w32k[slot];
         if (!window->Kind || !window->Visible || window->Minimized || window->Parent ||
@@ -1259,6 +1262,16 @@ static UINT8 W32kVirtualKey(UINT16 scan)
         return row[scan - 0x2C];
     }
     return 0;
+}
+
+static void W32kInputWindowMouse(UINT16 root, INT32 x, INT32 y, UINT8 buttons)
+{
+    UINT64 flags=KiIrqSave();
+    UINT16 previous=g_w32k_input_root;
+    g_w32k_input_root=root;
+    W32kInputMouse(x,y,buttons);
+    g_w32k_input_root=previous;
+    KiIrqRestore(flags);
 }
 
 void W32kInputKey(UINT16 event, UINT16 character)

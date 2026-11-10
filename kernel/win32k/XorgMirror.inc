@@ -14,6 +14,7 @@ typedef struct {
     UINT16 Width, Height;
     BOOLEAN Seen, Popup;
     WCHAR Title[W32K_TITLE_CHARS];
+    UINT64 Focus;
     UINT8 Buttons;
     UINT8 Keys[16];
 } W32K_XWIN;
@@ -504,9 +505,18 @@ static void W32kXEvents(W32K_XORG *x)
                 UINT8 mask = e[1] == 1 ? 1 : e[1] == 2 ? 4 : e[1] == 3 ? 2 : 0;
                 if (type == 4) w->Buttons |= mask; else w->Buttons &= (UINT8)~mask;
             }
-            W32kInputMouse(mx, my, w->Buttons);
+            W32kInputWindowMouse(slot, mx, my, w->Buttons);
+        } else if (type == 9 && !w->Popup) {
+            W32kRaise(slot);
+            UINT16 focus=(UINT16)w->Focus;
+            if (!focus || KiUserWindowHandle(focus)!=w->Focus || W32kRootSlot(focus)!=slot)
+                focus=slot;
+            if (W32kRootSlot(W32kFocusWindow())!=slot)
+                W32kSetFocus(KiUserWindowHandle(focus));
         } else if (type == 10) {
-            W32kInputMouse(w->SourceX, w->SourceY, 0); w->Buttons = 0;
+            UINT16 focus=W32kFocusWindow();
+            if (W32kRootSlot(focus)==slot) w->Focus=KiUserWindowHandle(focus);
+            W32kInputWindowMouse(slot,w->SourceX, w->SourceY, 0); w->Buttons = 0;
             for (UINT16 scan = 1; scan < 128; ++scan)
                 if (w->Keys[scan >> 3] & (1u << (scan & 7))) {
                     W32kInputKey((UINT16)(scan | 0x100), 0);
