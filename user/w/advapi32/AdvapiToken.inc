@@ -89,6 +89,18 @@ extern BOOL_K GetComputerNameW(WCHAR *buffer, DWORD *length);
 extern NTSTATUS NtAdjustPrivilegesToken(HANDLE token, BYTE disable_all,
     const void *state, DWORD length, void *previous, DWORD *required);
 
+static BOOL_K advapi_local_system(const WCHAR *system)
+{
+    if (!system || !*system) return TRUE_K;
+    if (system[0] == '\\' && system[1] == '\\') system += 2;
+    if (CompareStringOrdinal(system, -1, L".", -1, TRUE_K) == 2) return TRUE_K;
+
+    WCHAR local[16];
+    DWORD length = sizeof(local) / sizeof(local[0]);
+    return GetComputerNameW(local, &length) &&
+           CompareStringOrdinal(system, -1, local, -1, TRUE_K) == 2;
+}
+
 __declspec(dllexport) BOOL_K LookupPrivilegeValueW(const WCHAR *system,
     const WCHAR *name, TOKEN_LUID *luid)
 {
@@ -101,16 +113,9 @@ __declspec(dllexport) BOOL_K LookupPrivilegeValueW(const WCHAR *system,
         SetLastError(87); /* ERROR_INVALID_PARAMETER */
         return FALSE_K;
     }
-    if (system && *system) {
-        WCHAR local[16];
-        DWORD length = sizeof(local) / sizeof(local[0]);
-        if (system[0] == '\\' && system[1] == '\\') system += 2;
-        if (CompareStringOrdinal(system, -1, L".", -1, TRUE_K) != 2 &&
-            (!GetComputerNameW(local, &length) ||
-             CompareStringOrdinal(system, -1, local, -1, TRUE_K) != 2)) {
-            SetLastError(1722); /* RPC_S_SERVER_UNAVAILABLE */
-            return FALSE_K;
-        }
+    if (!advapi_local_system(system)) {
+        SetLastError(1722); /* RPC_S_SERVER_UNAVAILABLE */
+        return FALSE_K;
     }
     for (unsigned i = 0; i < sizeof(privileges) / sizeof(privileges[0]); i++) {
         if (CompareStringOrdinal(name, -1, privileges[i].Name, -1, TRUE_K) == 2) {
