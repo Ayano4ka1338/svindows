@@ -542,3 +542,26 @@ LONG_PTR NtdllDefWindowProc_A(HANDLE hwnd, UINT msg,
 {
     return NtdllDefWindowProc_W(hwnd, msg, wparam, lparam);
 }
+
+/* No SQM telemetry backend is installed. A zero session identifier means
+ * collection did not start; setters cannot accept a nonexistent session. */
+ULONG WinSqmStartSession(const void *session_guid, ULONG identifier, ULONG flags)
+{
+    (void)session_guid; (void)identifier; (void)flags;
+    return 0;
+}
+ULONG WinSqmEndSession(ULONG session)
+{
+    (void)session;
+    return 0xc0000008u; /* STATUS_INVALID_HANDLE */
+}
+ULONG WinSqmSetDWORD64(void *session, ULONG identifier, ULONGLONG value)
+{
+    (void)session; (void)identifier; (void)value;
+    return 0xc0000008u;
+}
+ULONG WinSqmSetString(void *session, ULONG identifier, const WCHAR *value)
+{
+    (void)session; (void)identifier; (void)value;
+    return 0xc0000008u;
+}

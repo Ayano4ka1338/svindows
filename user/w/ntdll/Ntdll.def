@@ -348,3 +348,7 @@ EXPORTS
     RtlCreateSystemVolumeInformationFolder
     RtlDosPathNameToRelativeNtPathName_U
     RtlReleaseRelativeName
+    WinSqmStartSession
+    WinSqmEndSession
+    WinSqmSetDWORD64
+    WinSqmSetString
