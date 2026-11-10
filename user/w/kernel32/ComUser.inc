@@ -93,6 +93,21 @@ __declspec(dllexport) int StringFromGUID2(const GUID_K *guid, WCHAR *out,
     return p + 1;
 }
 
+__declspec(dllexport) LONG StringFromCLSID(const GUID_K *guid, WCHAR **text)
+{
+    if (!text) return (LONG)0x80004003u; /* E_POINTER */
+    *text=0;
+    if (!guid) return (LONG)0x80070057u;
+    WCHAR *copy=CoTaskMemAlloc(39*sizeof(WCHAR));
+    if (!copy) return (LONG)0x8007000eu;
+    if (!StringFromGUID2(guid,copy,39)) {
+        CoTaskMemFree(copy);
+        return (LONG)0x80070057u;
+    }
+    *text=copy;
+    return 0;
+}
+
 static const GUID_K g_iid_iunknown = {
     0x00000000, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00,
                                    0x00, 0x00, 0x00, 0x46 }
