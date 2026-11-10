@@ -513,6 +513,7 @@ $(USER32): user/w/user32/User32.c user/w/user32/User32.h $(USER32_PARTS) $(CONTR
 	           /export:GetModuleHandleW=kernel32.GetModuleHandleW \
 	           /export:LoadStringW=kernel32.LoadStringW \
 	           /export:RegisterWindowMessageW=kernel32.RegisterWindowMessageW \
+	           /export:RegisterClipboardFormatW=kernel32.RegisterWindowMessageW \
 	           $(BUILD)/user32.obj $(CONTROL_OBJ) $(UXTHEMELIB) $(GDI32LIB) $(KERNEL32LIB) $(NTDLLLIB)
 	@echo "  DLL   $@"
 
