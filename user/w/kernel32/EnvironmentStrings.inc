@@ -575,6 +575,133 @@ __declspec(dllexport) int GetLocaleInfoEx(const WCHAR *locale_name,
     return GetLocaleInfoW(0x0409, type, buffer, capacity);
 }
 
+typedef struct _NUMBERFMT_LOCAL {
+    DWORD NumDigits, LeadingZero, Grouping;
+    const WCHAR *DecimalSeparator, *ThousandSeparator;
+    DWORD NegativeOrder;
+} NUMBERFMT_LOCAL;
+
+static DWORD nls_copy_separator(const WCHAR *source, WCHAR *out,
+                                const WCHAR *fallback)
+{
+    const WCHAR *text = source ? source : fallback;
+    DWORD n = 0;
+    while (text[n] && n < 7) { out[n] = text[n]; n++; }
+    out[n] = 0;
+    return n;
+}
+
+__declspec(dllexport) int GetNumberFormatW(DWORD locale, DWORD flags,
+    const WCHAR *value, const NUMBERFMT_LOCAL *format, WCHAR *output,
+    int capacity)
+{
+    static const WCHAR decimal_default[] = {'.',0};
+    static const WCHAR thousand_default[] = {',',0};
+    if (!value || capacity < 0 || (flags & ~0x80000000u) ||
+        (locale && locale != 0x0400 && locale != 0x0800 &&
+         locale != 0x0409)) {
+        SetLastError(87);
+        return 0;
+    }
+    DWORD digits_after = format ? format->NumDigits : 2;
+    DWORD grouping = format ? format->Grouping : 3;
+    DWORD leading_zero = format ? format->LeadingZero : 1;
+    DWORD negative_order = format ? format->NegativeOrder : 1;
+    if (digits_after > 18 || grouping > 9 || negative_order > 4) {
+        SetLastError(87);
+        return 0;
+    }
+    WCHAR decimal[8], thousand[8];
+    DWORD decimal_len = nls_copy_separator(format ? format->DecimalSeparator : 0,
+                                           decimal, decimal_default);
+    DWORD thousand_len = nls_copy_separator(format ? format->ThousandSeparator : 0,
+                                            thousand, thousand_default);
+    if (decimal_len > 3 || thousand_len > 3) {
+        SetLastError(87);
+        return 0;
+    }
+    const WCHAR *p = value;
+    while (*p == ' ' || *p == '\t') p++;
+    BOOL negative = 0;
+    if (*p == '-' || *p == '+') { negative = *p == '-'; p++; }
+    WCHAR integer[128], fraction[32];
+    DWORD integer_len = 0, fraction_len = 0;
+    BOOL after_decimal = 0, saw_digit = 0;
+    while (*p) {
+        if (!after_decimal && decimal_len && *p == decimal[0]) {
+            BOOL match = 1;
+            for (DWORD i = 0; i < decimal_len; ++i)
+                if (p[i] != decimal[i]) match = 0;
+            if (match) { p += decimal_len; after_decimal = 1; continue; }
+        }
+        if (*p < '0' || *p > '9') { SetLastError(87); return 0; }
+        saw_digit = 1;
+        if (after_decimal) {
+            if (fraction_len < 31) fraction[fraction_len++] = *p;
+        } else if (integer_len < 127) {
+            integer[integer_len++] = *p;
+        } else { SetLastError(87); return 0; }
+        p++;
+    }
+    if (!saw_digit) { SetLastError(87); return 0; }
+    if (!integer_len) integer[integer_len++] = '0';
+    DWORD first = 0;
+    while (first + 1 < integer_len && integer[first] == '0') first++;
+    if (!leading_zero && integer_len == 1 && integer[0] == '0' && fraction_len)
+        first = 1;
+    DWORD fraction_use = fraction_len < digits_after ? fraction_len : digits_after;
+    for (DWORD i = fraction_use; i < digits_after; ++i) fraction[i] = '0';
+    if (fraction_len > digits_after && digits_after < 31 &&
+        fraction[digits_after] >= '5') {
+        DWORD i = digits_after;
+        while (i && fraction[i - 1] == '9') fraction[--i] = '0';
+        if (i) fraction[i - 1]++;
+        else {
+            i = integer_len;
+            while (i > first && integer[i - 1] == '9') integer[--i] = '0';
+            if (i > first) integer[i - 1]++;
+            else if (integer_len < 127) {
+                integer[first] = '1';
+                for (DWORD j = first + 1; j < integer_len; ++j)
+                    integer[j] = '0';
+                integer[integer_len++] = '0';
+            }
+        }
+    }
+
+    WCHAR result[1024];
+    DWORD used = 0;
+    if (negative && negative_order == 0) result[used++] = '(';
+    else if (negative && (negative_order == 1 || negative_order == 2)) {
+        result[used++] = '-'; if (negative_order == 2) result[used++] = ' ';
+    }
+    for (DWORD i = first; i < integer_len; ++i) {
+        result[used++] = integer[i];
+        DWORD remaining = integer_len - i - 1;
+        if (grouping && remaining && remaining % grouping == 0)
+            for (DWORD j = 0; j < thousand_len; ++j) result[used++] = thousand[j];
+    }
+    if (digits_after) {
+        for (DWORD i = 0; i < decimal_len; ++i) result[used++] = decimal[i];
+        for (DWORD i = 0; i < digits_after; ++i) result[used++] = fraction[i];
+    }
+    if (negative && negative_order == 0) result[used++] = ')';
+    else if (negative && (negative_order == 3 || negative_order == 4)) {
+        if (negative_order == 4) result[used++] = ' ';
+        result[used++] = '-';
+    }
+    result[used] = 0;
+    DWORD required = used + 1;
+    if (!capacity) return (int)required;
+    if (!output || (DWORD)capacity < required) {
+        SetLastError(output ? 122 : 87);
+        return 0;
+    }
+    for (DWORD i = 0; i < required; ++i) output[i] = result[i];
+    SetLastError(0);
+    return (int)required;
+}
+
 /* CompareString returns CSTR_LESS_THAN/EQUAL/GREATER_THAN (1/2/3), never
  * strcmp-style zero on success.  Supporting NORM_IGNORECASE is sufficient for
  * command-line parsers and path matching while SVINDOWS remains ASCII-only. */
