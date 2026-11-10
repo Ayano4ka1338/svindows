@@ -545,6 +545,7 @@ GDI32_API int GetDeviceCaps(HDC hdc, int index)
 }
 
 #include "GdiDraw.inc"
+#include "GdiPrint.inc"
 
 __declspec(dllexport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
                                          int count, LPRECT rect, UINT format)
