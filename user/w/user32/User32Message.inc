@@ -87,6 +87,12 @@ USER32_API void PostQuitMessage(int exit_code)
     NtUserPostMessage(NULL, WM_QUIT, (WPARAM)(INT_PTR)exit_code, 0);
 }
 
+USER32_API LRESULT CallWindowProcW(WNDPROC proc, HWND hwnd, UINT message,
+                                   WPARAM wparam, LPARAM lparam)
+{
+    return proc ? proc(hwnd, message, wparam, lparam) : 0;
+}
+
 USER32_API LRESULT DefWindowProcW(HWND hwnd, UINT message, WPARAM wparam,
                                   LPARAM lparam)
 {

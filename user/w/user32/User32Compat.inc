@@ -196,6 +196,14 @@ USER32_API HANDLE SetClipboardData(UINT format, HANDLE data)
 #include "User32Menus.inc"
 #include "User32Scroll.inc"
 
+USER32_API BOOL BringWindowToTop(HWND hwnd)
+{
+    if (!SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE))
+        return FALSE;
+    SetActiveWindow(hwnd);
+    return TRUE;
+}
+
 USER32_API BOOL SetForegroundWindow(HWND hwnd)
 { return SetActiveWindow(hwnd) != 0 || sv_user_state(hwnd) != 0; }
 USER32_API HWND GetAncestor(HWND hwnd, UINT flags)
@@ -256,6 +264,13 @@ USER32_API BOOL SetWindowPlacement(HWND hwnd, const SV_WINDOWPLACEMENT *placemen
 }
 USER32_API BOOL GetProcessDefaultLayout(DWORD *layout)
 { if(!layout)return FALSE;*layout=0;return TRUE; }
+
+USER32_API BOOL SetRect(LPRECT rect, int left, int top, int right, int bottom)
+{
+    if (!rect) return FALSE;
+    *rect = (RECT){left, top, right, bottom};
+    return TRUE;
+}
 
 USER32_API BOOL OffsetRect(LPRECT rect, int dx, int dy)
 { if(!rect)return FALSE;rect->left+=dx;rect->right+=dx;rect->top+=dy;rect->bottom+=dy;return TRUE; }
@@ -364,6 +379,14 @@ USER32_API int GetDlgCtrlID(HWND control)
 
 USER32_API BOOL IsDlgButtonChecked(HWND dialog, int id)
 { return (BOOL)SendDlgItemMessageW(dialog,id,0x00f0,0,0); }
+USER32_API BOOL CheckDlgButton(HWND dialog, int id, UINT check)
+{
+    HWND button = GetDlgItem(dialog, id);
+    if (!button || check > 2) return FALSE;
+    SendMessageW(button, BM_SETCHECK, check, 0);
+    return TRUE;
+}
+
 USER32_API BOOL SetDlgItemInt(HWND dialog, int id, UINT value, BOOL signed_value)
 {
     WCHAR text[16];UINT n=value,i=0;if(signed_value&&(int)value<0)n=(UINT)-(int)value;
