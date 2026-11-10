@@ -929,3 +929,11 @@ __declspec(dllexport) WCHAR *_wcslwr(WCHAR *text)
         if (*p >= 'A' && *p <= 'Z') *p += 'a' - 'A';
     return text;
 }
+
+/* The native fixed-size stacks cannot restore a consumed Windows guard page.
+ * Return failure so an overflow handler cannot resume on a damaged stack. */
+__declspec(dllexport) int _resetstkoflw(void)
+{
+    g_errno = 38; /* ENOSYS */
+    return 0;
+}

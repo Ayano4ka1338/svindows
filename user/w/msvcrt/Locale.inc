@@ -153,3 +153,19 @@ __declspec(dllexport) unsigned long long wcsftime(unsigned short *out,
     if (capacity) out[i] = 0;
     return i;
 }
+
+/* The only selectable locale is C: conversions are stateless single bytes. */
+__declspec(dllexport) int mbtowc(WCHAR *out, const char *text, SIZE_T count)
+{
+    if (!text) return 0;
+    if (!count) { g_errno = 42; return -1; } /* EILSEQ */
+    if (out) *out = (unsigned char)*text;
+    return *text ? 1 : 0;
+}
+__declspec(dllexport) int wctomb(char *out, WCHAR character)
+{
+    if (!out) return 0;
+    if (character > 255) { g_errno = 42; return -1; }
+    *out = (char)character;
+    return 1;
+}
