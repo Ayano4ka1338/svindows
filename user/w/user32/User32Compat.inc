@@ -644,6 +644,20 @@ USER32_API void *GetThreadDesktop(DWORD thread_id)
     return (void *)(UINT_PTR)desktop;
 }
 
+__declspec(dllimport) UINT64 NtUserPostThreadMessage(DWORD, UINT, WPARAM, LPARAM);
+USER32_API BOOL PostThreadMessageW(DWORD thread_id, UINT message,
+                                   WPARAM wparam, LPARAM lparam)
+{
+    if (!thread_id) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return FALSE;
+    }
+    if (NtUserPostThreadMessage(thread_id, message, wparam, lparam))
+        return TRUE;
+    SetLastError(1444); /* ERROR_INVALID_THREAD_ID */
+    return FALSE;
+}
+
 __declspec(dllimport) UINT64 NtUserGetClassInfoEx(HINSTANCE, const void *, WNDCLASSEXW *, void *, UINT);
 USER32_API BOOL GetClassInfoExW(HINSTANCE instance, const WCHAR *name, WNDCLASSEXW *out)
 {
