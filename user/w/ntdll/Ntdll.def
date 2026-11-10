@@ -357,3 +357,4 @@ EXPORTS
     SvNtUserQueryWindowState
     NtUserGetClassInfoEx
     NtUserGetThreadDesktop
+    SvNtQueryThreadExitStatus

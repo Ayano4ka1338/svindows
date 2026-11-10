@@ -22,6 +22,7 @@
 typedef struct _THREAD_OBJECT {
     DISPATCHER_HEADER Header;   /* signaled on thread exit */
     PKTHREAD          Thread;
+    NTSTATUS          ExitStatus;
 } THREAD_OBJECT;
 
 static POBJECT_TYPE g_event_type;
@@ -104,6 +105,7 @@ UINT64 NtOpenThread(UINT64 *a)
         to->Header.SignalState = 0;
         InitializeListHead(&to->Header.WaitListHead);
         to->Thread = thread;
+        to->ExitStatus = thread->ExitStatus;
         created = TRUE;
     }
     HANDLE handle;
@@ -1050,6 +1052,7 @@ UINT64 NtCreateThreadEx(UINT64 *a)
     to->Header.Type = ThreadObject;
     to->Header.SignalState = 0;
     InitializeListHead(&to->Header.WaitListHead);
+    to->ExitStatus = STATUS_PENDING;
 
     /* Install the handle before publishing the runnable KTHREAD. This leaves
      * no allocation that can fail after the child has been enqueued. */
@@ -1111,4 +1114,19 @@ rollback_mappings:
         stack_base + (THREAD_STACK_PAGES + PROCESS_TEB_SIZE / PAGE_SIZE) * PAGE_SIZE)
         process->ThreadAllocationNext = allocation_start;
     return (UINT64)STATUS_NO_MEMORY;
+}
+
+/* Private query used by GetExitCodeThread. The handle type and requested
+ * information access are checked before exposing the retained exit status. */
+UINT64 SvNtQueryThreadExitStatus(UINT64 *a)
+{
+    if (!a[1] || !MmProbeForWrite(a[1], sizeof(ULONG)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    POBJECT object = NULL;
+    NTSTATUS status = ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)a[0],
+        0x0040u, g_thread_type, &object);
+    if (!NT_SUCCESS(status)) return (UINT64)status;
+    *(ULONG *)a[1] = (ULONG)((THREAD_OBJECT *)object)->ExitStatus;
+    ObDereferenceObject(object);
+    return (UINT64)STATUS_SUCCESS;
 }

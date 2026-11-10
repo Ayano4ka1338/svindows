@@ -1227,6 +1227,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F14] = SvNtUserSetCursorPos;
     KiServiceTable[0x1F15] = SvNtUserGetMessagePos;
     KiServiceTable[0x1F16] = SvNtUserQueryWindowState;
+    KiServiceTable[0x1F19] = SvNtQueryThreadExitStatus;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

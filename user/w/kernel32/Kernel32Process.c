@@ -31,6 +31,18 @@ extern long NtDuplicateObject(HANDLE source_process, HANDLE source_handle,
                               DWORD options);
 extern long NtOpenProcess(HANDLE *process, DWORD access, void *attributes,
                           const void *client_id);
+extern long SvNtQueryThreadExitStatus(HANDLE thread, DWORD *exit_status);
+
+__declspec(dllexport) BOOL GetExitCodeThread(HANDLE thread, DWORD *exit_code)
+{
+    if (!exit_code) { SetLastError(87); return 0; }
+    DWORD status = 0;
+    long result = SvNtQueryThreadExitStatus(thread, &status);
+    if (result < 0) { SetLastError(6); return 0; }
+    *exit_code = status == 0x00000103u ? 259u : status;
+    SetLastError(0);
+    return 1;
+}
 
 __declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit,
                                          DWORD process_id)
