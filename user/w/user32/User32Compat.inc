@@ -655,6 +655,12 @@ USER32_API BOOL ChangeWindowMessageFilterEx(HWND window, UINT message,
     SetLastError(0);
     return TRUE;
 }
+__declspec(dllimport) DWORD Kernel32GetGuiResources(HANDLE process,
+                                                      DWORD flags);
+USER32_API DWORD GetGuiResources(HANDLE process, DWORD flags)
+{
+    return Kernel32GetGuiResources(process, flags);
+}
 USER32_API int InternalGetWindowText(HWND window, WCHAR *text, int capacity)
 {
     if (!text || capacity<=0) return 0;

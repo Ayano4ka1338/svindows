@@ -319,7 +319,7 @@ __declspec(dllexport) DWORD GetProcessId(HANDLE process)
     return (DWORD)info.UniqueProcessId;
 }
 
-__declspec(dllexport) DWORD GetGuiResources(HANDLE process, DWORD flags)
+__declspec(dllexport) DWORD Kernel32GetGuiResources(HANDLE process, DWORD flags)
 {
     if (flags > 1) { SetLastError(87); return 0; }
     DWORD process_id = GetProcessId(process);
@@ -327,6 +327,11 @@ __declspec(dllexport) DWORD GetGuiResources(HANDLE process, DWORD flags)
     DWORD count = SvNtQueryGuiResources(process_id, flags);
     SetLastError(0);
     return count;
+}
+
+__declspec(dllexport) DWORD GetGuiResources(HANDLE process, DWORD flags)
+{
+    return Kernel32GetGuiResources(process, flags);
 }
 
 __declspec(dllexport) BOOL ReadProcessMemory(HANDLE process,
