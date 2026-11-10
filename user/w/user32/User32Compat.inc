@@ -200,6 +200,8 @@ USER32_API BOOL SetForegroundWindow(HWND hwnd)
 { return SetActiveWindow(hwnd) != 0 || sv_user_state(hwnd) != 0; }
 USER32_API HWND GetAncestor(HWND hwnd, UINT flags)
 { return (HWND)(UINT_PTR)NtUserGetAncestor(hwnd, flags); }
+#include "User32WindowBatch.inc"
+
 USER32_API DWORD GetMessageExtraInfo(void) { return 0; }
 #include "User32Accelerators.inc"
 USER32_API BOOL IsDialogMessageW(HWND dialog, MSG *message)
