@@ -81,3 +81,57 @@ __declspec(dllexport) BOOL_K CheckTokenMembership(void *token, void *sid,
     if (own) NtClose(own);
     return ok;
 }
+
+typedef struct { DWORD LowPart; LONG HighPart; } TOKEN_LUID;
+
+extern int CompareStringOrdinal(const WCHAR *, int, const WCHAR *, int, BOOL_K);
+extern BOOL_K GetComputerNameW(WCHAR *buffer, DWORD *length);
+extern NTSTATUS NtAdjustPrivilegesToken(HANDLE token, BYTE disable_all,
+    const void *state, DWORD length, void *previous, DWORD *required);
+
+__declspec(dllexport) BOOL_K LookupPrivilegeValueW(const WCHAR *system,
+    const WCHAR *name, TOKEN_LUID *luid)
+{
+    static const struct { const WCHAR *Name; DWORD Id; } privileges[] = {
+        { L"SeSecurityPrivilege", 8 },
+        { L"SeBackupPrivilege", 17 },
+        { L"SeRestorePrivilege", 18 }
+    };
+    if (!name || !luid) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return FALSE_K;
+    }
+    if (system && *system) {
+        WCHAR local[16];
+        DWORD length = sizeof(local) / sizeof(local[0]);
+        if (system[0] == '\\' && system[1] == '\\') system += 2;
+        if (CompareStringOrdinal(system, -1, L".", -1, TRUE_K) != 2 &&
+            (!GetComputerNameW(local, &length) ||
+             CompareStringOrdinal(system, -1, local, -1, TRUE_K) != 2)) {
+            SetLastError(1722); /* RPC_S_SERVER_UNAVAILABLE */
+            return FALSE_K;
+        }
+    }
+    for (unsigned i = 0; i < sizeof(privileges) / sizeof(privileges[0]); i++) {
+        if (CompareStringOrdinal(name, -1, privileges[i].Name, -1, TRUE_K) == 2) {
+            *luid = (TOKEN_LUID){privileges[i].Id, 0};
+            return TRUE_K;
+        }
+    }
+    SetLastError(1313); /* ERROR_NO_SUCH_PRIVILEGE */
+    return FALSE_K;
+}
+
+__declspec(dllexport) BOOL_K AdjustTokenPrivileges(HANDLE token, BOOL_K disable_all,
+    const void *state, DWORD length, void *previous, DWORD *required)
+{
+    if ((!disable_all && !state) || (previous && !required)) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return FALSE_K;
+    }
+    NTSTATUS status = NtAdjustPrivilegesToken(token, disable_all != 0,
+        state, length, previous, required);
+    if (!token_result(status)) return FALSE_K;
+    SetLastError(status == 0x106 ? 1300 /* ERROR_NOT_ALL_ASSIGNED */ : 0);
+    return TRUE_K;
+}

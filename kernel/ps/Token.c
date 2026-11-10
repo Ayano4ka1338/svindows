@@ -6,6 +6,7 @@
 #include <nt/Ntstatus.h>
 
 #define TOKEN_QUERY 0x0008u
+#define TOKEN_ADJUST_PRIVILEGES 0x0020u
 #define SE_GROUP_MANDATORY 0x00000001u
 #define SE_GROUP_ENABLED_BY_DEFAULT 0x00000002u
 #define SE_GROUP_ENABLED 0x00000004u
@@ -26,8 +27,9 @@ UINT64 NtOpenProcessToken(UINT64 *a)
     HANDLE *out = (HANDLE *)a[2];
     if (!MmProbeForWrite((UINT64)out, sizeof(*out)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
-    if (((ULONG)a[1] & TOKEN_QUERY) == 0 ||
-        ((ULONG)a[1] & ~(TOKEN_QUERY | 0x00020000u | 0x00100000u)))
+    const ULONG token_access = TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES;
+    if (((ULONG)a[1] & token_access) == 0 ||
+        ((ULONG)a[1] & ~(token_access | 0x00020000u | 0x00100000u)))
         return (UINT64)STATUS_ACCESS_DENIED;
 
     PKPROCESS process = NULL;
@@ -152,4 +154,39 @@ UINT64 NtQueryInformationToken(UINT64 *a)
     }
     ObDereferenceObject(object);
     return (UINT64)STATUS_SUCCESS;
+}
+
+/* Tokens have an empty privilege set. A request to change any named privilege
+ * returns the partial-success status without elevating the token. */
+UINT64 NtAdjustPrivilegesToken(UINT64 *a)
+{
+    POBJECT object;
+    ACCESS_MASK access = TOKEN_ADJUST_PRIVILEGES;
+    if (a[4]) access |= TOKEN_QUERY;
+    NTSTATUS status = ObReferenceObjectByHandle((HANDLE)a[0], access,
+                                                g_token_type, &object);
+    if (!NT_SUCCESS(status)) return (UINT64)status;
+    ObDereferenceObject(object);
+
+    ULONG count = 0;
+    if (!(UINT8)a[1]) {
+        if (!MmProbeForRead(a[2], sizeof(count)))
+            return (UINT64)STATUS_ACCESS_VIOLATION;
+        memcpy(&count, (const void *)a[2], sizeof(count));
+        if (count && !MmProbeForRead(a[2], sizeof(count) + (UINT64)count * 12))
+            return (UINT64)STATUS_ACCESS_VIOLATION;
+    }
+
+    if (a[4]) {
+        ULONG *required = (ULONG *)a[5];
+        if (!MmProbeForWrite((UINT64)required, sizeof(*required)))
+            return (UINT64)STATUS_ACCESS_VIOLATION;
+        *required = sizeof(ULONG);
+        if ((ULONG)a[3] < sizeof(ULONG)) return (UINT64)STATUS_BUFFER_TOO_SMALL;
+        if (!MmProbeForWrite(a[4], sizeof(ULONG)))
+            return (UINT64)STATUS_ACCESS_VIOLATION;
+        *(ULONG *)a[4] = 0;
+    }
+
+    return count ? (UINT64)STATUS_NOT_ALL_ASSIGNED : (UINT64)STATUS_SUCCESS;
 }

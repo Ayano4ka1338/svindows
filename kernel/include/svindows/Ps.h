@@ -112,6 +112,7 @@ UINT64 NtSetInformationJobObject(UINT64 *args);
 UINT64 NtQueryInformationJobObject(UINT64 *args);
 NTSTATUS PsValidateThreadHandle(HANDLE handle);
 UINT64 NtQueryInformationToken(UINT64 *args);
+UINT64 NtAdjustPrivilegesToken(UINT64 *args);
 void PsInitializeTimerObjects(void);
 BOOLEAN PsIsTimerObjectType(struct _OBJECT_TYPE *type);
 UINT64 NtCreateTimer(UINT64 *args);
