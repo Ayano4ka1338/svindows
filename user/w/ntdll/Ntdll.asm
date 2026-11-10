@@ -422,6 +422,7 @@ SYSCALL_STUB SvNtUserCreateIconHandle, 0x1F11
 SYSCALL_STUB SvNtUserDestroyIcon,   0x1F12
 SYSCALL_STUB SvNtUserGetDesktopWindow, 0x1F13
 SYSCALL_STUB SvNtUserSetCursorPos,  0x1F14
+SYSCALL_STUB SvNtUserGetMessagePos, 0x1F15
 SYSCALL_STUB NtOpenThread,           0x10E
 SYSCALL_STUB NtOpenEvent,            0x10F
 SYSCALL_STUB NtCreateJobObject,      0x110

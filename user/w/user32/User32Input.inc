@@ -150,3 +150,10 @@ USER32_API BOOL KillTimer(HWND window, UINT_PTR id)
     SetLastError(87); /* ERROR_INVALID_PARAMETER */
     return FALSE;
 }
+
+__declspec(dllimport) UINT64 SvNtUserGetMessagePos(void);
+
+USER32_API DWORD GetMessagePos(void)
+{
+    return (DWORD)SvNtUserGetMessagePos();
+}

@@ -1225,6 +1225,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F12] = SvNtUserDestroyIcon;
     KiServiceTable[0x1F13] = SvNtUserGetDesktopWindow;
     KiServiceTable[0x1F14] = SvNtUserSetCursorPos;
+    KiServiceTable[0x1F15] = SvNtUserGetMessagePos;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

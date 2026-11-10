@@ -40,6 +40,7 @@ typedef struct _USER_MSG_QUEUE {
     UINT32 Head;
     UINT32 Tail;
     UINT8 KeyState[256];
+    INT32 LastMessageX, LastMessageY;
     /* The thread's USER "input event": a notification event ring 3 waits on
      * through MsgWaitForMultipleObjects. Created lazily the first time the
      * thread asks for it, signaled while the queue is non-empty. */
@@ -315,6 +316,8 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
     }
     *out = queue->Msgs[queue->Tail];
     if (remove) {
+        queue->LastMessageX = out->PtX;
+        queue->LastMessageY = out->PtY;
         queue->Tail = (queue->Tail + 1) % USER_MESSAGE_QUEUE_CAPACITY;
         if ((out->Message == 0x0100 || out->Message == 0x0101 ||
              out->Message == 0x0104 || out->Message == 0x0105) && out->WParam < 256)
@@ -521,6 +524,15 @@ static UINT64 NtUserSetProcessUIAccessZorder(UINT64 *a)
     /* The single interactive process owns the only desktop and therefore has
      * no cross-integrity z-order boundary to enforce. */
     return 1;
+}
+
+static UINT64 SvNtUserGetMessagePos(UINT64 *a)
+{
+    (void)a;
+    PKTHREAD thread = KeGetCurrentThread();
+    USER_MSG_QUEUE *queue = KiUserQueueForThread(thread ? thread->ThreadId : 0);
+    if (!queue) return 0;
+    return (UINT16)queue->LastMessageX | ((UINT32)(UINT16)queue->LastMessageY << 16);
 }
 
 static UINT64 NtUserPeekMessage(UINT64 *a)
