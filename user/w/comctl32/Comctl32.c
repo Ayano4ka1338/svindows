@@ -10,6 +10,7 @@ void SvComctlFree(void *memory)
 { if (memory) HeapFree(GetProcessHeap(), 0, memory); }
 #include "PointerArray.inc"
 #include "ClientRect.inc"
+#include "MenuHelp.inc"
 
 void SvComctlFill(HDC dc, const RECT *rect, COLORREF color)
 {

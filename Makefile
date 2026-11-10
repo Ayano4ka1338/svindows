@@ -420,7 +420,7 @@ $(UXTHEME): user/w/uxtheme/Uxtheme.c user/w/uxtheme/Uxtheme.h $(GDI32) $(KERNEL3
 
 # Shared common controls are a separate Win32 library layered on USER32/GDI32.
 COMCTL32_SRC := user/w/comctl32/Comctl32.c user/w/comctl32/Progress.c user/w/comctl32/Status.c \
-                user/w/comctl32/Trackbar.c user/w/comctl32/Tab.c user/w/comctl32/ListView.c user/w/comctl32/Toolbar.c user/w/comctl32/DateTime.c user/w/comctl32/UpDown.c user/w/comctl32/TaskDialog.c user/w/comctl32/TreeView.c user/w/comctl32/ClientRect.inc
+                user/w/comctl32/Trackbar.c user/w/comctl32/Tab.c user/w/comctl32/ListView.c user/w/comctl32/Toolbar.c user/w/comctl32/DateTime.c user/w/comctl32/UpDown.c user/w/comctl32/TaskDialog.c user/w/comctl32/TreeView.c user/w/comctl32/ClientRect.inc user/w/comctl32/MenuHelp.inc
 COMCTL32_HEADERS := user/w/comctl32/Comctl32.h user/w/comctl32/Internal.h user/w/comctl32/PointerArray.inc
 $(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) user/w/comctl32/Comctl32.def $(USER32) $(GDI32) $(KERNEL32)
 	@mkdir -p $(BUILD)

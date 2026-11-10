@@ -4,7 +4,9 @@ typedef struct STATUS_STATE {
     struct STATUS_STATE *next;
     HWND hwnd;
     WCHAR *text;
-    DWORD flags;
+    DWORD flags, simple_flags;
+    WCHAR *simple_text;
+    BOOL simple;
 } STATUS_STATE;
 static STATUS_STATE *states;
 static unsigned state_lock;
@@ -16,14 +18,13 @@ static STATUS_STATE *find_state(HWND hwnd)
     for(STATUS_STATE *s=states;s;s=s->next)if(s->hwnd==hwnd){found=s;break;}
     unlock_states(); return found;
 }
-static BOOL set_text(STATUS_STATE *s, const WCHAR *src, BOOL reset_flags)
+static BOOL set_text(WCHAR **slot, const WCHAR *src)
 {
     ULONG_PTR count=0;
     while(src && src[count]) { if(count >= 0x7fffffffu/sizeof(WCHAR)-1) return FALSE; ++count; }
     WCHAR *copy=SvComctlAlloc((count+1)*sizeof(WCHAR)); if(!copy)return FALSE;
     for(ULONG_PTR i=0;i<count;++i)copy[i]=src[i]; copy[count]=0;
-    WCHAR *old=s->text; s->text=copy; SvComctlFree(old);
-    if(reset_flags)s->flags=0;
+    WCHAR *old=*slot; *slot=copy; SvComctlFree(old);
     return TRUE;
 }
 static void draw_status(HWND hwnd, STATUS_STATE *s)
@@ -31,7 +32,8 @@ static void draw_status(HWND hwnd, STATUS_STATE *s)
     PAINTSTRUCT ps; HDC dc=BeginPaint(hwnd,&ps); if(!dc)return;
     RECT r; GetClientRect(hwnd,&r); SvComctlFill(dc,&r,RGB(240,240,240));
     RECT top={r.left,r.top,r.right,r.top+1}; SvComctlFill(dc,&top,RGB(204,204,204));
-    if (!(s->flags&SBT_NOBORDERS)) {
+    DWORD flags = s->simple ? s->simple_flags : s->flags;
+    if (!(flags&SBT_NOBORDERS)) {
         RECT left={r.left,r.top+3,r.left+1,r.bottom-3};
         SvComctlFill(dc,&left,RGB(255,255,255));
         RECT right={r.right-2,r.top+3,r.right-1,r.bottom-3};
@@ -39,7 +41,8 @@ static void draw_status(HWND hwnd, STATUS_STATE *s)
     }
     SetBkMode(dc,1); SetTextColor(dc,RGB(0,0,0));
     RECT t={r.left+6,r.top+2,r.right-5,r.bottom-2};
-    DrawTextW(dc,s->text ? s->text : L"",-1,&t,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+    const WCHAR *text = s->simple ? s->simple_text : s->text;
+    DrawTextW(dc,text ? text : L"",-1,&t,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
     EndPaint(hwnd,&ps);
 }
 LRESULT SvStatusProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp)
@@ -57,15 +60,24 @@ LRESULT SvStatusProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp)
     case WM_PAINT: draw_status(hwnd,s);return 0;
     case WM_ERASEBKGND:return 1;
     case WM_SETTEXT:{
-        if(!set_text(s,(const WCHAR *)lp,TRUE))return 0;
+        if(!set_text(&s->text,(const WCHAR *)lp))return 0;
+        s->flags=0;
         InvalidateRect(hwnd,NULL,FALSE);return 1; }
     case SB_SETTEXTW:
-        if ((wp & 0xffu) != 0 || (wp & SBT_OWNERDRAW)) return FALSE;
-        if(!set_text(s,(const WCHAR *)lp,FALSE))return 0;
-        s->flags=(DWORD)wp; InvalidateRect(hwnd,NULL,FALSE); return 1;
+        if (((wp & 0xffu) != 0 && (wp & 0xffu) != 255) || (wp & SBT_OWNERDRAW)) return FALSE;
+        if ((wp & 0xffu) == 255) {
+            if (!set_text(&s->simple_text, (const WCHAR *)lp)) return FALSE;
+            s->simple_flags = (DWORD)wp;
+        } else {
+            if (!set_text(&s->text, (const WCHAR *)lp)) return FALSE;
+            s->flags = (DWORD)wp;
+        }
+        InvalidateRect(hwnd,NULL,FALSE); return 1;
+    case WM_USER+9: s->simple = wp != 0; InvalidateRect(hwnd,NULL,FALSE); return 0;
+    case WM_USER+14: return s->simple;
     case WM_SIZE:InvalidateRect(hwnd,NULL,FALSE);return 0;
-    case WM_NCDESTROY:{STATUS_STATE **link=&states;while(*link&&*link!=s)link=&(*link)->next;
-        if(*link)*link=s->next;unlock_states();SvComctlFree(s->text);SvComctlFree(s);return 0;}
+    case WM_NCDESTROY:{lock_states();STATUS_STATE **link=&states;while(*link&&*link!=s)link=&(*link)->next;
+        if(*link)*link=s->next;unlock_states();SvComctlFree(s->text);SvComctlFree(s->simple_text);SvComctlFree(s);return 0;}
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
