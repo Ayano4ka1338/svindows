@@ -486,6 +486,16 @@ typedef struct _KPROCESS {
     struct _LINUX_PROCESS_CONTEXT *LinuxContext;
 } KPROCESS, *PKPROCESS;
 
+typedef struct _KE_PROCESS_THREAD_INFO {
+    ULONG ThreadId;
+    LONG Priority;
+    LONG BasePriority;
+    ULONG State;
+    NTSTATUS ExitStatus;
+} KE_PROCESS_THREAD_INFO;
+ULONG KeSnapshotProcessThreads(PKPROCESS process,
+                               KE_PROCESS_THREAD_INFO *buffer, ULONG capacity);
+
 void      KeInitializeScheduler(void);
 PKTHREAD  KeCreateThread(const char *name, PKSTART_ROUTINE routine,
                          PVOID context, LONG priority);

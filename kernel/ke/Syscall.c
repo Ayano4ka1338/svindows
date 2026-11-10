@@ -638,6 +638,10 @@ static UINT64 NtQuerySystemInformation(UINT64 *a)
     UINT32 length = (UINT32)a[2];
     UINT32 *return_length = (UINT32 *)a[3];
 
+    if (info_class == 5) /* SystemProcessInformation */
+        return (UINT64)PsQuerySystemProcessInformation(
+            (void *)buffer, length, return_length);
+
     if (info_class == SystemBasicInformation) {
         UINT32 required = sizeof(SYSTEM_BASIC_INFORMATION_LOCAL);
         if (return_length &&

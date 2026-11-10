@@ -36,6 +36,12 @@ static POBJECT_TYPE g_process_type;
 static ULONG g_next_process_id = 8;
 static LIST_ENTRY g_process_list = {&g_process_list, &g_process_list};
 static KSPIN_LOCK g_process_list_lock;
+#define PS_SYSTEM_SNAPSHOT_LIMIT 256
+static POBJECT g_system_snapshot_processes[PS_SYSTEM_SNAPSHOT_LIMIT];
+static KE_PROCESS_THREAD_INFO
+    g_system_snapshot_threads[PS_SYSTEM_SNAPSHOT_LIMIT][128];
+static ULONG g_system_snapshot_thread_counts[PS_SYSTEM_SNAPSHOT_LIMIT];
+static volatile ULONG g_system_snapshot_lock;
 
 static void delete_process(POBJECT raw)
 {
@@ -410,6 +416,131 @@ PKPROCESS PsGetProcessFromObject(PVOID raw)
     if (!raw || !PsIsProcessObjectType(ObHeaderFromObject(raw)->Type))
         return NULL;
     return &((PROCESS_OBJECT *)raw)->Process;
+}
+
+NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
+                                         ULONG *return_length)
+{
+    if (return_length && !MmProbeForWrite((UINT64)return_length, sizeof(ULONG)))
+        return STATUS_ACCESS_VIOLATION;
+    while (__atomic_exchange_n(&g_system_snapshot_lock, 1, __ATOMIC_ACQUIRE))
+        __asm__ volatile("pause");
+
+    ULONG process_count = 0, cursor = 0;
+    while (process_count < PS_SYSTEM_SNAPSHOT_LIMIT) {
+        ULONG pid = 0;
+        POBJECT object = PsReferenceNextProcess(cursor, &pid);
+        if (!object) break;
+        g_system_snapshot_processes[process_count] = object;
+        PKPROCESS process = PsGetProcessFromObject(object);
+        ULONG threads = KeSnapshotProcessThreads(process, NULL, 0);
+        if (threads > 128) {
+            ObDereferenceObject(object);
+            break;
+        }
+        g_system_snapshot_thread_counts[process_count] = threads;
+        KeSnapshotProcessThreads(process, g_system_snapshot_threads[process_count],
+                                 threads);
+        process_count++;
+        cursor = pid;
+    }
+
+    ULONG required = 0;
+    for (ULONG i = 0; i < process_count; ++i) {
+        PKPROCESS process = PsGetProcessFromObject(g_system_snapshot_processes[i]);
+        const char *name = process->ImagePath;
+        ULONG chars = 0, base = 0;
+        while (name[chars] && chars < 259) {
+            if (name[chars] == '\\' || name[chars] == '/') base = chars + 1;
+            chars++;
+        }
+        ULONG visible_chars = chars - base;
+        ULONG threads = g_system_snapshot_thread_counts[i];
+        ULONG row = 256 + threads * 80 + (visible_chars + 1) * sizeof(WCHAR);
+        row = (row + 7) & ~7u;
+        if (row > 0xffffffffu - required) {
+            required = 0xffffffffu;
+            break;
+        }
+        required += row;
+    }
+    if (return_length) *return_length = required;
+    NTSTATUS result = STATUS_SUCCESS;
+    if (required == 0xffffffffu || length < required) {
+        result = STATUS_INFO_LENGTH_MISMATCH;
+        goto cleanup;
+    }
+    if (required && !MmProbeForWrite((UINT64)buffer, required)) {
+        result = STATUS_ACCESS_VIOLATION;
+        goto cleanup;
+    }
+
+    UINT8 *bytes = buffer;
+    ULONG offset = 0;
+    for (ULONG i = 0; i < process_count; ++i) {
+        PKPROCESS process = PsGetProcessFromObject(g_system_snapshot_processes[i]);
+        UINT8 *row = bytes + offset;
+        ULONG thread_count = g_system_snapshot_thread_counts[i];
+        const char *image = process->ImagePath;
+        ULONG chars = 0, base = 0;
+        while (image[chars] && chars < 259) {
+            if (image[chars] == '\\' || image[chars] == '/') base = chars + 1;
+            chars++;
+        }
+        ULONG visible_chars = chars - base;
+        ULONG row_size = 256 + thread_count * 80 +
+                         (visible_chars + 1) * sizeof(WCHAR);
+        row_size = (row_size + 7) & ~7u;
+        for (ULONG z = 0; z < row_size; ++z) row[z] = 0;
+        *(ULONG *)(row + 4) = thread_count;
+        *(ULONG *)(row + 16) = 0; /* hard faults are not counted per process */
+        *(UINT64 *)(row + 32) = 0; /* process create time not yet accounted */
+        *(INT64 *)(row + 40) = 0;  /* user CPU time not yet accounted */
+        *(INT64 *)(row + 48) = 0;  /* kernel CPU time not yet accounted */
+        *(UINT16 *)(row + 56) = (UINT16)(visible_chars * sizeof(WCHAR));
+        *(UINT16 *)(row + 58) = (UINT16)((visible_chars + 1) * sizeof(WCHAR));
+        *(UINT64 *)(row + 64) = (UINT64)(row + 256 + thread_count * 80);
+        *(LONG *)(row + 72) = process->BasePriority;
+        *(UINT64 *)(row + 80) = process->ProcessId;
+        *(UINT64 *)(row + 88) = process->ParentProcessId;
+        *(ULONG *)(row + 96) = 0; /* process handle counts are not tracked */
+        *(ULONG *)(row + 100) = 0; /* this build has one interactive session */
+        UINT64 virtual_bytes = 0, committed_bytes = 0;
+        for (ULONG r = 0; r < MM_MAX_PROCESS_REGIONS; ++r) {
+            MM_PROCESS_REGION *region = &process->VmRegions[r];
+            if (!region->InUse) continue;
+            virtual_bytes += region->ReserveSize;
+            committed_bytes += region->CommittedPages * PAGE_SIZE;
+        }
+        *(UINT64 *)(row + 112) = virtual_bytes;
+        *(UINT64 *)(row + 120) = virtual_bytes;
+        *(UINT64 *)(row + 136) = 0; /* resident working sets are not accounted */
+        *(UINT64 *)(row + 144) = 0;
+        *(UINT64 *)(row + 184) = committed_bytes;
+        *(UINT64 *)(row + 192) = committed_bytes;
+        *(UINT64 *)(row + 200) = committed_bytes;
+        for (ULONG c = 0; c < visible_chars; ++c)
+            *(UINT16 *)(row + 256 + thread_count * 80 + c * 2) =
+                (UINT8)image[base + c];
+        UINT8 *thread_out = row + 256;
+        for (ULONG t = 0; t < thread_count; ++t) {
+            KE_PROCESS_THREAD_INFO *thread = &g_system_snapshot_threads[i][t];
+            UINT8 *entry = thread_out + t * 80;
+            *(UINT64 *)(entry + 40) = process->ProcessId;
+            *(UINT64 *)(entry + 48) = thread->ThreadId;
+            *(LONG *)(entry + 56) = thread->Priority;
+            *(LONG *)(entry + 60) = thread->BasePriority;
+            *(ULONG *)(entry + 68) = thread->State;
+        }
+        if (i + 1 < process_count) *(ULONG *)row = row_size;
+        offset += row_size;
+    }
+
+cleanup:
+    for (ULONG i = 0; i < process_count; ++i)
+        ObDereferenceObject(g_system_snapshot_processes[i]);
+    __atomic_store_n(&g_system_snapshot_lock, 0, __ATOMIC_RELEASE);
+    return result;
 }
 
 /* Return a referenced process with the smallest ID greater than the cursor.

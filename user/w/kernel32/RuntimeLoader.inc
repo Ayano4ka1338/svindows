@@ -690,6 +690,8 @@ __declspec(dllexport) HANDLE CreateFileW(const WCHAR *name, DWORD access,
 
 __declspec(dllexport) BOOL CloseHandle(HANDLE h)
 {
+    if (ToolhelpCloseSnapshot(h))
+        return 1;
     NtClose(h);
     return 1;
 }

@@ -163,6 +163,38 @@ PKTHREAD KeLookupThreadById(ULONG thread_id)
     return result;
 }
 
+ULONG KeSnapshotProcessThreads(PKPROCESS process,
+                               KE_PROCESS_THREAD_INFO *buffer, ULONG capacity)
+{
+    if (!process) return 0;
+    UINT64 flags = KiAcquireRawSpinLock(&g_scheduler_lock);
+    ULONG count = 0;
+    for (PLIST_ENTRY entry = process->ThreadListHead.Flink;
+         entry != &process->ThreadListHead; entry = entry->Flink) {
+        PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
+        if (!thread->UserMode || thread->State == ThreadStateTerminated)
+            continue;
+        if (buffer && count < capacity) {
+            KE_PROCESS_THREAD_INFO *info = &buffer[count];
+            info->ThreadId = thread->ThreadId;
+            info->Priority = thread->Priority;
+            info->BasePriority = thread->Priority - thread->RelativePriority;
+            info->ExitStatus = thread->ExitStatus;
+            switch (thread->State) {
+                case ThreadStateReady: info->State = 1; break;
+                case ThreadStateRunning:
+                case ThreadStateSwitching: info->State = 2; break;
+                case ThreadStateTerminating:
+                case ThreadStateTerminated: info->State = 4; break;
+                default: info->State = 5; break; /* waiting */
+            }
+        }
+        count++;
+    }
+    KiReleaseRawSpinLock(&g_scheduler_lock, flags);
+    return count;
+}
+
 NTSTATUS KeSuspendThread(PKTHREAD thread, ULONG *previous_count)
 {
     if (!thread) return STATUS_INVALID_HANDLE;

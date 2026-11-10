@@ -21,6 +21,7 @@ typedef void             (*FARPROC)(void);
 typedef DWORD (*LPTHREAD_START_ROUTINE)(LPVOID);
 
 __declspec(dllexport) void SetLastError(DWORD error);
+BOOL ToolhelpCloseSnapshot(HANDLE handle);
 
 /* libgcc's SEH personality imports this helper even when an image never
  * throws. Full frame unwinding remains owned by ntdll; this facade currently
@@ -498,6 +499,7 @@ static HANDLE nt_open_w(const WCHAR *name, DWORD access, DWORD share,
 #include "Completion.inc"
 #include "SList.inc"
 #include "HeapTime.inc"
+#include "Toolhelp.inc"
 #include "LocalMemory.inc"
 #include "EnvironmentStrings.inc"
 #include "ThreadsSync.inc"
