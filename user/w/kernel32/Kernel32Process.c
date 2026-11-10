@@ -2,6 +2,7 @@
 typedef void *HANDLE;
 typedef void *LPVOID;
 typedef unsigned long DWORD;
+typedef unsigned long long SIZE_T;
 typedef int BOOL;
 
 typedef struct _PROCESS_INFORMATION {
@@ -32,6 +33,9 @@ extern long NtDuplicateObject(HANDLE source_process, HANDLE source_handle,
 extern long NtOpenProcess(HANDLE *process, DWORD access, void *attributes,
                           const void *client_id);
 extern long SvNtQueryThreadExitStatus(HANDLE thread, DWORD *exit_status);
+extern long SvNtReadProcessMemory(HANDLE process, const void *source,
+                                  void *destination, SIZE_T size,
+                                  SIZE_T *bytes_read);
 extern long NtQuerySystemInformation(DWORD info_class, void *buffer,
                                      DWORD length, DWORD *return_length);
 
@@ -299,6 +303,21 @@ __declspec(dllexport) DWORD GetProcessId(HANDLE process)
         return 0;
     }
     return (DWORD)info.UniqueProcessId;
+}
+
+__declspec(dllexport) BOOL ReadProcessMemory(HANDLE process,
+    const void *source, void *destination, SIZE_T size, SIZE_T *bytes_read)
+{
+    SIZE_T copied = 0;
+    long status = SvNtReadProcessMemory(process, source, destination, size,
+                                       &copied);
+    if (bytes_read) *bytes_read = copied;
+    if (status < 0) {
+        SetLastError(copied ? 299 : 6); /* partial copy / invalid access */
+        return 0;
+    }
+    SetLastError(0);
+    return 1;
 }
 
 __declspec(dllexport) BOOL QueryFullProcessImageNameW(HANDLE process,

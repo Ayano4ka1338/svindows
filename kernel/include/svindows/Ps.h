@@ -145,6 +145,7 @@ UINT64 NtQueryInformationProcess(UINT64 *args);
 UINT64 SvNtQueryThreadExitStatus(UINT64 *args);
 NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
                                          ULONG *return_length);
+UINT64 SvNtReadProcessMemory(UINT64 *args);
 UINT64 NtSetInformationProcess(UINT64 *args);
 UINT64 NtDuplicateObject(UINT64 *args);
 UINT64 NtCreateThreadEx(UINT64 *args);

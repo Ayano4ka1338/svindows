@@ -358,3 +358,4 @@ EXPORTS
     NtUserGetClassInfoEx
     NtUserGetThreadDesktop
     SvNtQueryThreadExitStatus
+    SvNtReadProcessMemory

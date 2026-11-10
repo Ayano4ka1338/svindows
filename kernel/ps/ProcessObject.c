@@ -543,6 +543,51 @@ cleanup:
     return result;
 }
 
+UINT64 SvNtReadProcessMemory(UINT64 *a)
+{
+    HANDLE handle = (HANDLE)(ULONG_PTR)a[0];
+    UINT64 source = a[1], destination = a[2], size = a[3];
+    UINT64 *bytes_read = (UINT64 *)a[4];
+    if (bytes_read && !MmProbeForWrite((UINT64)bytes_read, sizeof(*bytes_read)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    if (bytes_read) *bytes_read = 0;
+    if (size > 0x7fffffffULL || source + size < source ||
+        (size && !MmProbeForWrite(destination, size)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    PKPROCESS process = NULL;
+    POBJECT referenced = NULL;
+    if ((ULONG_PTR)handle == ~(ULONG_PTR)0) {
+        PKTHREAD thread = KeGetCurrentThread();
+        process = thread ? thread->Process : NULL;
+    } else {
+        NTSTATUS status = ObReferenceObjectByHandle(handle, 0x0010u, NULL,
+                                                    &referenced);
+        if (!NT_SUCCESS(status)) return (UINT64)status;
+        process = PsGetProcessFromObject(referenced);
+    }
+    if (!process) {
+        if (referenced) ObDereferenceObject(referenced);
+        return (UINT64)STATUS_INVALID_HANDLE;
+    }
+    UINT64 copied = 0;
+    while (copied < size) {
+        UINT64 address = source + copied;
+        UINT64 physical = MmGetPhysicalAddressInAddressSpace(
+            process->DirectoryTableBase, address);
+        if (physical == MM_INVALID_PHYS) break;
+        UINT64 chunk = PAGE_SIZE - (address & PAGE_MASK);
+        if (chunk > size - copied) chunk = size - copied;
+        const UINT8 *input = MmPhysToVirt(physical);
+        UINT8 *output = (UINT8 *)(ULONG_PTR)(destination + copied);
+        for (UINT64 i = 0; i < chunk; ++i) output[i] = input[i];
+        copied += chunk;
+    }
+    if (bytes_read) *bytes_read = copied;
+    if (referenced) ObDereferenceObject(referenced);
+    return copied == size ? (UINT64)STATUS_SUCCESS
+                          : (UINT64)STATUS_ACCESS_VIOLATION;
+}
+
 /* Return a referenced process with the smallest ID greater than the cursor.
  * Callers can enumerate safely without retaining the process-list lock while
  * they inspect or act on a process. */
