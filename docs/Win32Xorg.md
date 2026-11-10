@@ -38,3 +38,11 @@ between both applications and verify it reaches the focused application.
 The 2026-11-10 QEMU captures are in `build/diagnostics/xorg-*.png`; serial
 transcripts and build/check logs are in the same directory. The user's
 already-running VM is left alone; rebuilt images take effect after a reboot.
+
+Verified on the rebuilt GUI ISO: Calculator remains intact after Notepad
+opens and is raised again; mouse input computes 2+2=4. After focusing Notepad,
+keyboard input adds `svindows` to its editor. Moving Notepad by its TWM caption
+and reopening Format leaves the menu anchored below Format without a TWM
+caption or an extra application frame. Final captures:
+`xorg-calc-four-final.png`, `xorg-notepad-typed-final.png`, and
+`xorg-moved-menu-final.png` in `build/diagnostics`.
