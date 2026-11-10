@@ -50,7 +50,6 @@ GDI32_API int EnumFontsW(HDC dc, const WCHAR *name,
     return callback(&font, &metrics, 1 /* RASTER_FONTTYPE */, param);
 }
 
-__declspec(dllimport) void RtlSetLastWin32Error(DWORD);
 typedef struct { UINT Charset, CodePage; DWORD Unicode[4], CodePages[2]; } SV_CHARSET_INFO;
 GDI32_API BOOL TranslateCharsetInfo(DWORD *source, SV_CHARSET_INFO *out, DWORD flags)
 {

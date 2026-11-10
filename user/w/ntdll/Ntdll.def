@@ -359,3 +359,4 @@ EXPORTS
     NtUserGetThreadDesktop
     SvNtQueryThreadExitStatus
     SvNtReadProcessMemory
+    NtGdiGetDCObject

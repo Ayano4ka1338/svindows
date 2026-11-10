@@ -27,6 +27,8 @@ typedef long long          INT64;
 #include "Gdi32.h"
 #include <String.h>
 
+__declspec(dllimport) void RtlSetLastWin32Error(DWORD);
+
 
 /* ------------------------------------------------------------------ */
 /* Native services (user/w/ntdll/Ntdll.asm -> kernel/win32k/gdi)          */
@@ -475,6 +477,20 @@ GDI32_API HGDIOBJ SelectObject(HDC hdc, HGDIOBJ object)
          * case: deleting or selecting it would corrupt the drawing state. */
         return NULL;
     }
+}
+
+__declspec(dllimport) UINT64 NtGdiGetDCObject(HDC dc, int type);
+GDI32_API HGDIOBJ GetCurrentObject(HDC dc, UINT type)
+{
+    UINT native_type;
+    switch (type) {
+    case 1: native_type = SV_GDI_TYPE_PEN; break;    /* OBJ_PEN */
+    case 2: native_type = SV_GDI_TYPE_BRUSH; break;  /* OBJ_BRUSH */
+    case 6: native_type = SV_GDI_TYPE_FONT; break;   /* OBJ_FONT */
+    case 7: native_type = SV_GDI_TYPE_BITMAP; break; /* OBJ_BITMAP */
+    default: RtlSetLastWin32Error(87); return NULL;
+    }
+    return (HGDIOBJ)(ULONG_PTR)NtGdiGetDCObject(dc, (int)native_type);
 }
 
 /* Stock objects this DLL materialised, so DeleteObject can leave them alone
