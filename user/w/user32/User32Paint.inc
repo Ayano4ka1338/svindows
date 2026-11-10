@@ -86,3 +86,21 @@ USER32_API int ReleaseDC(HWND hwnd, HDC hdc)
     (void)hdc;
     return 1;
 }
+
+__declspec(dllimport) void SetLastError(DWORD error);
+
+/* RedrawWindow supports invalidating/validating the client and synchronously
+ * updating it. Nonclient regions are repainted by the window manager. */
+USER32_API BOOL RedrawWindow(HWND window, const RECT *rect, HRGN region, UINT flags)
+{
+    if (region) {
+        SetLastError(50);
+        return FALSE;
+    }
+    RECT bounds;
+    if (!GetClientRect(window, &bounds)) return FALSE;
+    if ((flags & 1) && !InvalidateRect(window, rect, (flags & 4) != 0)) return FALSE;
+    if ((flags & 8) && !ValidateRect(window, rect)) return FALSE;
+    if ((flags & 0x200) && !UpdateWindow(window)) return FALSE;
+    return TRUE;
+}
