@@ -456,7 +456,7 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         }
         ULONG visible_chars = chars - base;
         ULONG threads = g_system_snapshot_thread_counts[i];
-        ULONG row = 256 + threads * 80 + (visible_chars + 1) * sizeof(WCHAR);
+        ULONG row = 256 + threads * 80 + (visible_chars + 1) * sizeof(UINT16);
         row = (row + 7) & ~7u;
         if (row > 0xffffffffu - required) {
             required = 0xffffffffu;
@@ -489,7 +489,7 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         }
         ULONG visible_chars = chars - base;
         ULONG row_size = 256 + thread_count * 80 +
-                         (visible_chars + 1) * sizeof(WCHAR);
+                         (visible_chars + 1) * sizeof(UINT16);
         row_size = (row_size + 7) & ~7u;
         for (ULONG z = 0; z < row_size; ++z) row[z] = 0;
         *(ULONG *)(row + 4) = thread_count;
@@ -497,8 +497,8 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         *(UINT64 *)(row + 32) = 0; /* process create time not yet accounted */
         *(INT64 *)(row + 40) = 0;  /* user CPU time not yet accounted */
         *(INT64 *)(row + 48) = 0;  /* kernel CPU time not yet accounted */
-        *(UINT16 *)(row + 56) = (UINT16)(visible_chars * sizeof(WCHAR));
-        *(UINT16 *)(row + 58) = (UINT16)((visible_chars + 1) * sizeof(WCHAR));
+        *(UINT16 *)(row + 56) = (UINT16)(visible_chars * sizeof(UINT16));
+        *(UINT16 *)(row + 58) = (UINT16)((visible_chars + 1) * sizeof(UINT16));
         *(UINT64 *)(row + 64) = (UINT64)(row + 256 + thread_count * 80);
         *(LONG *)(row + 72) = process->BasePriority;
         *(UINT64 *)(row + 80) = process->ProcessId;
