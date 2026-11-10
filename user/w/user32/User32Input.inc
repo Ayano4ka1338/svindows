@@ -76,3 +76,30 @@ USER32_API short GetKeyState(int key)
 {
     return (short)NtUserGetKeyState(key);
 }
+
+typedef void (*SV_WINEVENTPROC)(HANDLE, DWORD, HWND, LONG, LONG, DWORD, DWORD);
+__declspec(dllimport) UINT64 NtUserSetWinEventHook(DWORD first, DWORD last,
+    HINSTANCE module, const void *module_name, SV_WINEVENTPROC callback,
+    DWORD process, DWORD thread, DWORD flags);
+__declspec(dllimport) UINT64 NtUserUnhookWinEvent(HANDLE hook);
+extern void SetLastError(DWORD error);
+
+USER32_API HANDLE SetWinEventHook(DWORD first, DWORD last, HINSTANCE module,
+    SV_WINEVENTPROC callback, DWORD process, DWORD thread, DWORD flags)
+{
+    if (!callback || first > last || (flags & ~7u)) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return NULL;
+    }
+    HANDLE hook = (HANDLE)(UINT_PTR)NtUserSetWinEventHook(first, last, module,
+        NULL, callback, process, thread, flags);
+    if (!hook) SetLastError(50); /* ERROR_NOT_SUPPORTED */
+    return hook;
+}
+
+USER32_API BOOL UnhookWinEvent(HANDLE hook)
+{
+    if (hook && NtUserUnhookWinEvent(hook)) return TRUE;
+    SetLastError(6); /* ERROR_INVALID_HANDLE */
+    return FALSE;
+}
