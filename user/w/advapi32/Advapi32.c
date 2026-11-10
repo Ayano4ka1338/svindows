@@ -571,6 +571,28 @@ __declspec(dllexport) LONG RegCreateKeyW(HKEY hKey, const WCHAR *subKey,
     return RegCreateKeyExW(hKey, subKey, 0, 0, 0, 0, 0, result, 0);
 }
 
+__declspec(dllexport) LONG RegSetValueW(HKEY key, const WCHAR *subkey,
+    DWORD type, const WCHAR *data, DWORD bytes)
+{
+    const DWORD reg_sz = 1;
+    const DWORD key_set_value = 2;
+    (void)bytes;
+    if (!data || type != reg_sz) return 87; /* ERROR_INVALID_PARAMETER */
+
+    HKEY target = key;
+    LONG status = ERROR_SUCCESS;
+    if (subkey && *subkey)
+        status = RegCreateKeyExW(key, subkey, 0, 0, 0, key_set_value, 0, &target, 0);
+    else if (is_predefined(key))
+        status = RegOpenKeyExW(key, 0, 0, key_set_value, &target);
+    if (status != ERROR_SUCCESS) return status;
+
+    DWORD size = ((DWORD)wide_len(data) + 1) * sizeof(*data);
+    status = RegSetValueExW(target, 0, 0, type, (const BYTE *)data, size);
+    if (target != key) NtClose(target);
+    return status;
+}
+
 __declspec(dllexport) LONG RegQueryValueW(HKEY hKey, const WCHAR *subKey,
                                           void *data, LONG *data_size)
 {
