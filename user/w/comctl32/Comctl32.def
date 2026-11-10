@@ -5,3 +5,10 @@ EXPORTS
     SvOrdinal380 @380 NONAME
     SvOrdinal392 @392 NONAME
     TaskDialogIndirect @345
+    InitCommonControls @17
+    Str_SetPtrW @236
+    DPA_Destroy @329
+    DPA_InsertPtr @334
+    DPA_DeleteAllPtrs @337
+    DPA_Sort @338
+    DPA_CreateEx @340

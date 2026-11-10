@@ -8,6 +8,7 @@ void *SvComctlAlloc(ULONG_PTR bytes)
 { return HeapAlloc(GetProcessHeap(), 8, bytes ? bytes : 1); }
 void SvComctlFree(void *memory)
 { if (memory) HeapFree(GetProcessHeap(), 0, memory); }
+#include "PointerArray.inc"
 
 void SvComctlFill(HDC dc, const RECT *rect, COLORREF color)
 {
