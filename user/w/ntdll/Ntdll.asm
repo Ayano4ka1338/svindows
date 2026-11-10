@@ -526,6 +526,8 @@ ntuser_pfn1: dq 0
 ntuser_pfn2: dq 0
 ntuser_pfn3: dq 0
 
+; Keep syscall entry points in executable code, separate from callback data.
+section .text
 SYSCALL_STUB NtUserMenuBar,                  0x1F05
 
 SYSCALL_STUB NtUserWindowRelation,            0x1F06
