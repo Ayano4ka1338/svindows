@@ -165,6 +165,8 @@ USER32_API BOOL EnableWindow(HWND hwnd, BOOL enable)
 USER32_API BOOL IsWindowEnabled(HWND hwnd)
 { SV_USER_WINDOW_STATE *s = sv_user_state(hwnd); return s ? s->Enabled : FALSE; }
 
+#include "User32Characters.inc"
+
 USER32_API const char *CharNextA(const char *text)
 {
     if (!text || !*text) return (char *)text;
