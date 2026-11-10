@@ -261,6 +261,22 @@ GDI32_API BOOL GetTextExtentPoint32W(HDC hdc, const WCHAR *text, int count,
     return NtGdiGetTextExtent(hdc, text, count, size, 0) != 0;
 }
 
+GDI32_API BOOL GetCharWidth32W(HDC hdc, UINT first, UINT last, int *widths)
+{
+    if (last < first || !widths || last - first > 4095) {
+        RtlSetLastWin32Error(87);
+        return FALSE;
+    }
+    for (UINT code = first; code <= last; ++code) {
+        WCHAR character = (WCHAR)code;
+        SIZE extent;
+        if (!GetTextExtentPoint32W(hdc, &character, 1, &extent))
+            return FALSE;
+        widths[code - first] = extent.cx;
+    }
+    return TRUE;
+}
+
 GDI32_API BOOL GetTextMetricsW(HDC hdc, LPTEXTMETRICW metrics)
 {
     if (!metrics)
