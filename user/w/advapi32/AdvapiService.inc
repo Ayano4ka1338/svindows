@@ -366,3 +366,17 @@ __declspec(dllexport) int StartServiceW(HANDLE handle, DWORD argc,
     if (child.Thread) CloseHandle(child.Thread);
     return 1;
 }
+
+__declspec(dllexport) BOOL_K ControlService(HANDLE handle, DWORD control,
+    SCM_STATUS *status)
+{
+    if (!status) { SetLastError(87); return FALSE_K; }
+    scm_lock();
+    SCM_HANDLE_SLOT *slot=scm_slot(handle,SCM_SERVICE);
+    scm_unlock();
+    if (!slot) { SetLastError(6); return FALSE_K; }
+    (void)control;
+    /* A child executable is not a service-control dispatcher. */
+    SetLastError(1061); /* ERROR_SERVICE_CANNOT_ACCEPT_CTRL */
+    return FALSE_K;
+}

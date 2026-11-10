@@ -625,6 +625,7 @@ __declspec(dllexport) LONG RegGetValueW(HKEY hKey, const WCHAR *subKey,
 
 #include "AdvapiSid.inc"
 #include "AdvapiToken.inc"
+#include "AdvapiWaitChain.inc"
 #include "AdvapiRegistryHive.inc"
 /* Encoding detection is a heuristic for unmarked files. Sample pairs of
  * bytes directly so the buffer need not be aligned as WCHAR. */

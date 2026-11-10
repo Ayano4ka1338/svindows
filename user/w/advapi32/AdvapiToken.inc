@@ -198,3 +198,25 @@ __declspec(dllexport) BOOL_K LookupAccountSidW(const WCHAR *system, const void *
     SetLastError(1332); /* ERROR_NONE_MAPPED */
     return FALSE_K;
 }
+
+/* Native threads currently have no impersonation-token state. */
+__declspec(dllexport) BOOL_K ImpersonateLoggedOnUser(HANDLE token)
+{ (void)token; SetLastError(50); return FALSE_K; }
+__declspec(dllexport) BOOL_K RevertToSelf(void)
+{ return TRUE_K; }
+__declspec(dllexport) BOOL_K DuplicateTokenEx(HANDLE token, DWORD access,
+    const void *security, int level, int type, HANDLE *copy)
+{
+    (void)token; (void)access; (void)security;
+    if (!copy || level<0 || level>3 || (type!=1 && type!=2)) {
+        SetLastError(87); return FALSE_K;
+    }
+    *copy=0;
+    SetLastError(50); return FALSE_K;
+}
+__declspec(dllexport) BOOL_K SetTokenInformation(HANDLE token, DWORD information,
+    const void *buffer, DWORD length)
+{
+    (void)token; (void)information; (void)buffer; (void)length;
+    SetLastError(50); return FALSE_K;
+}
