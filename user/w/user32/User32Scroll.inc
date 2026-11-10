@@ -58,3 +58,22 @@ USER32_API int SetScrollInfo(HWND hwnd, int bar, const SV_SCROLLINFO *info, BOOL
     if (redraw) InvalidateRect(hwnd, 0, FALSE);
     return scroll->Position;
 }
+
+USER32_API BOOL GetScrollInfo(HWND hwnd, int bar, SV_SCROLLINFO *info)
+{
+    if (!info || info->Size != sizeof(*info)) {
+        SetLastError(87);
+        return FALSE;
+    }
+    if (bar == 2)
+        return SendMessageW(hwnd, 0x00eb /* SBM_GETSCROLLINFO */, 0,
+                            (LPARAM)info) != 0;
+    SV_SCROLL_STATE *scroll = window_scroll(hwnd, bar);
+    if (!scroll) return FALSE;
+    UINT mask = info->Mask;
+    if (mask & 1) { info->Min = scroll->Min; info->Max = scroll->Max; }
+    if (mask & 2) info->Page = scroll->Page;
+    if (mask & 4) info->Position = scroll->Position;
+    if (mask & 0x10) info->TrackPosition = scroll->Position;
+    return TRUE;
+}
