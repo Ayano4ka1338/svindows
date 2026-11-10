@@ -1,10 +1,14 @@
 # Svindows
 
-<img src="other/Logo123.png" width="150" align="right" alt="Svindows logo">
+<img src="other/Logo123.png" width="90" align="right" alt="Svindows logo">
 
 An experimental x86-64 operating system built from scratch around an NT-inspired kernel.
 It runs software from several ecosystems through independent compatibility layers, without
 Microsoft source code.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/71df715c-e44f-4b46-964a-1b1937211be4" alt="Svindows desktop" width="100%">
+</p>
 
 ## Features
 
