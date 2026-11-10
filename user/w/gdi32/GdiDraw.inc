@@ -270,8 +270,8 @@ GDI32_API BOOL GetTextMetricsW(HDC hdc, LPTEXTMETRICW metrics)
     return NtGdiGetTextMetricsW(hdc, metrics, (ULONG)sizeof(TEXTMETRICW)) != 0;
 }
 
-GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
-                        UINT format)
+static int draw_text(HDC hdc, const WCHAR *text, int count, LPRECT rect,
+                     UINT format, UINT *processed)
 {
     /* Win32's DrawText is a formatting routine, not a kernel primitive: it
      * breaks the string into lines and calls ExtTextOut for each one. This
@@ -282,9 +282,9 @@ GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
         return 0;
     if (count < 0)
         count = sv_wcslen(text);
-    if (format & (0x00040000u /* PATH */ |
-                  0x00000080u /* DT_TABSTOP */ | 0x00010000u /* WORD_ELLIPSIS */ |
-                  0u))
+    if (format & (0x00004000u /* DT_PATH_ELLIPSIS */ |
+                  0x00000080u /* DT_TABSTOP */ | 0x00040000u /* DT_WORD_ELLIPSIS */ |
+                  0x00010000u /* DT_MODIFYSTRING */))
         return 0;
 
     TEXTMETRICW metrics;
@@ -298,6 +298,7 @@ GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
     int box_height = (int)(rect->bottom - rect->top);
 
     if (format & DT_SINGLELINE) {
+        if (processed) *processed = (UINT)count;
         SIZE extent = {0, 0};
         GetTextExtentPoint32W(hdc, text, count, &extent);
         int draw_count=count;
@@ -330,8 +331,10 @@ GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
         }
         /* The caller's rectangle is a clipping box, not an output: only
          * DT_CALCRECT is allowed to write to it. */
-        ExtTextOutW(hdc, x, y, ETO_CLIPPED, rect, text, (UINT)draw_count, NULL);
-        if(ellipsize)ExtTextOutW(hdc,x+prefix_extent.cx,y,ETO_CLIPPED,rect,dots,3,NULL);
+        UINT options = format & DT_NOCLIP ? 0 : ETO_CLIPPED;
+        ExtTextOutW(hdc, x, y, options, rect, text, (UINT)draw_count, NULL);
+        if (ellipsize)
+            ExtTextOutW(hdc, x + prefix_extent.cx, y, options, rect, dots, 3, NULL);
         return line_height;
     }
 
@@ -363,18 +366,20 @@ GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
             int x=(int)rect->left;
             if(format&DT_RIGHT)x=(int)rect->right-line_extent.cx;
             else if(format&DT_CENTER)x+=(box_width-line_extent.cx)/2;
-            ExtTextOutW(hdc, x, y, ETO_CLIPPED, rect, text + index,
+            UINT options = format & DT_NOCLIP ? 0 : ETO_CLIPPED;
+            ExtTextOutW(hdc, x, y, options, rect, text + index,
                         (UINT)line_length, NULL);
         }
         y += line_height;
         lines++;
-        if (y + line_height > (int)rect->bottom && !(format & DT_CALCRECT) &&
-            !(format & DT_NOCLIP))
-            break;
         index = line_end;
         while (index < count && (text[index] == '\n' || text[index] == ' '))
             index++;
+        if (y + line_height > (int)rect->bottom && !(format & DT_CALCRECT) &&
+            !(format & DT_NOCLIP))
+            break;
     }
+    if (processed) *processed = (UINT)index;
     if (format & DT_CALCRECT) {
         SIZE widest = {0, 0};
         /* For a calculation pass the widest line decides the box. */
@@ -392,4 +397,17 @@ GDI32_API int DrawTextW(HDC hdc, const WCHAR *text, int count, LPRECT rect,
         rect->bottom = rect->top + lines * line_height;
     }
     return y - (int)rect->top;
+}
+
+
+GDI32_API int DrawTextW(HDC dc, const WCHAR *text, int count, LPRECT rect,
+                        UINT format)
+{
+    return draw_text(dc, text, count, rect, format, NULL);
+}
+
+__declspec(dllexport) int SvGdiDrawTextExW(HDC dc, const WCHAR *text, int count,
+    LPRECT rect, UINT format, UINT *processed)
+{
+    return draw_text(dc, text, count, rect, format, processed);
 }

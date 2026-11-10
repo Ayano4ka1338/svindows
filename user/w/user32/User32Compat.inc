@@ -459,6 +459,45 @@ USER32_API int DrawTextW(HDC dc,const WCHAR *text,int count,LPRECT rect,UINT for
 { return SvGdiDrawTextW(dc,text,count,rect,format); }
 
 
+typedef struct {
+    UINT Size;
+    int TabLength, LeftMargin, RightMargin;
+    UINT LengthDrawn;
+} SV_DRAWTEXTPARAMS;
+
+__declspec(dllimport) int SvGdiDrawTextExW(HDC dc, const WCHAR *text, int count,
+    LPRECT rect, UINT format, UINT *processed);
+
+USER32_API int DrawTextExW(HDC dc, WCHAR *text, int count, LPRECT rect, UINT format,
+    SV_DRAWTEXTPARAMS *params)
+{
+    if (!params) return DrawTextW(dc, text, count, rect, format);
+    if (!rect || params->Size != sizeof(*params)) return 0;
+    params->LengthDrawn = 0;
+    RECT layout = *rect;
+    INT64 right_margin = 0;
+    if (params->LeftMargin || params->RightMargin) {
+        TEXTMETRICW metrics;
+        if (!GetTextMetricsW(dc, &metrics)) return 0;
+        INT64 left = layout.left + (INT64)params->LeftMargin * metrics.tmAveCharWidth;
+        right_margin = (INT64)params->RightMargin * metrics.tmAveCharWidth;
+        INT64 right = layout.right - right_margin;
+        if (left < -2147483648LL || left > 2147483647LL ||
+            right < -2147483648LL || right > 2147483647LL) return 0;
+        layout.left = (LONG)left;
+        layout.right = (LONG)right;
+    }
+    int height = SvGdiDrawTextExW(dc, text, count, &layout, format,
+                                  &params->LengthDrawn);
+    if (height && (format & DT_CALCRECT)) {
+        INT64 right = layout.right + right_margin;
+        if (right < -2147483648LL || right > 2147483647LL) return 0;
+        rect->right = (LONG)right;
+        rect->bottom = layout.bottom;
+    }
+    return height;
+}
+
 USER32_API BOOL WinHelpW(HWND owner, const WCHAR *file, UINT command, ULONG_PTR data)
 {
     (void)owner;
