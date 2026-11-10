@@ -754,3 +754,9 @@ common-controls-check:
 	$(BUILD)/ComboChecks
 	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/EditChecks.c -Wl,--gc-sections -o $(BUILD)/EditChecks
 	$(BUILD)/EditChecks
+
+.PHONY: tree-view-check
+tree-view-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/TreeViewChecks.c -Wl,--gc-sections -o $(BUILD)/TreeViewChecks
+	$(BUILD)/TreeViewChecks
