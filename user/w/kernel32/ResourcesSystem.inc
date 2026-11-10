@@ -385,8 +385,8 @@ __declspec(dllexport) void *LocalReAlloc(void *h, SIZE_T bytes, UINT flags)
 
 __declspec(dllexport) SIZE_T LocalSize(void *h)
 {
-    (void)h;
-    return 0;
+    SIZE_T size = HeapSize(GetProcessHeap(), 0, h);
+    return size == (SIZE_T)-1 ? 0 : size;
 }
 
 /* ------------------------------------------------------------------ */
