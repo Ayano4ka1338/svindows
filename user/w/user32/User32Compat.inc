@@ -592,3 +592,14 @@ USER32_API HWND GetLastActivePopup(HWND owner)
     }
     return owner;
 }
+
+/* All native display metrics are currently 96 DPI. Awareness is process-local
+ * state; no coordinate virtualization is necessary at this display scale. */
+static BOOL g_process_dpi_aware;
+USER32_API BOOL SetProcessDPIAware(void)
+{
+    g_process_dpi_aware=TRUE;
+    return TRUE;
+}
+USER32_API BOOL IsProcessDPIAware(void)
+{ return g_process_dpi_aware; }
