@@ -567,3 +567,28 @@ USER32_API BOOL WinHelpW(HWND owner, const WCHAR *file, UINT command, ULONG_PTR 
     SetLastError(50); /* ERROR_NOT_SUPPORTED */
     return FALSE;
 }
+
+USER32_API BOOL DrawAnimatedRects(HWND window, int animation,
+    const RECT *from, const RECT *to)
+{
+    (void)window;
+    (void)animation;
+    (void)from;
+    (void)to;
+    SetLastError(50); /* ERROR_NOT_SUPPORTED: animated window transitions. */
+    return FALSE;
+}
+
+USER32_API HWND GetLastActivePopup(HWND owner)
+{
+    RECT rect;
+    if (!GetWindowRect(owner, &rect)) return 0;
+    HWND active = GetForegroundWindow();
+    SV_USER_WINDOW_STATE *state = sv_user_state(active);
+    for (UINT depth = 0; state && depth < SV_USER_WINDOWS; depth++) {
+        if (state->Window == owner) return active;
+        if ((state->Style & WS_CHILD) || !state->Parent) break;
+        state = sv_user_state(state->Parent);
+    }
+    return owner;
+}
