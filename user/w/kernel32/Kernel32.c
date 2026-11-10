@@ -510,3 +510,4 @@ static HANDLE nt_open_w(const WCHAR *name, DWORD access, DWORD share,
 #include "Volumes.inc"
 #include "ConsoleCompat.inc"
 #include "FileInformation.inc"
+#include "CopyFileEx.inc"
