@@ -732,3 +732,17 @@ NTSTATUS RtlGetLastNtStatus(void)
 {
     return (NTSTATUS)read_teb_dword(0x50); /* TEB LastStatusValue */
 }
+
+BOOLEAN RtlCreateUnicodeString(UNICODE_STRING_NT *out, const WCHAR *source)
+{
+    if (!out || !source) return 0;
+    ULONG count = 0;
+    while (count < 32767 && source[count]) count++;
+    if (count == 32767) return 0;
+    WCHAR *copy = RtlAllocateHeap(0, 0, (count + 1) * sizeof(*copy));
+    if (!copy) return 0;
+    memcpy(copy, source, (count + 1) * sizeof(*copy));
+    *out = (UNICODE_STRING_NT){(WORD)(count * sizeof(*copy)),
+        (WORD)((count + 1) * sizeof(*copy)), copy};
+    return 1;
+}
