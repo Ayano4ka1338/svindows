@@ -452,11 +452,11 @@ $(SHELL32): user/w/shell32/Shell32.c user/w/shell32/Shell32.def $(KERNEL32) $(US
 	           $(BUILD)/shell32.obj $(KERNEL32LIB) $(USER32LIB)
 	@echo "  DLL   $@"
 
-$(SHLWAPI): user/w/shlwapi/Shlwapi.c user/w/shlwapi/Shlwapi.def $(KERNEL32)
+$(SHLWAPI): user/w/shlwapi/Shlwapi.c user/w/shlwapi/Shlwapi.def $(KERNEL32) $(USER32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/w/shlwapi/Shlwapi.c -o $(BUILD)/shlwapi.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x270000000 \
-	           /def:user/w/shlwapi/Shlwapi.def /out:$@ $(BUILD)/shlwapi.obj $(KERNEL32LIB)
+	           /def:user/w/shlwapi/Shlwapi.def /out:$@ $(BUILD)/shlwapi.obj $(KERNEL32LIB) $(USER32LIB)
 	@echo "  DLL   $@"
 
 $(GDIPLUS): user/w/gdiplus/Gdiplus.c user/w/gdiplus/Gdiplus.def $(GDI32) $(KERNEL32) $(MSVCRT)

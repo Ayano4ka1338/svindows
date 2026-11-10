@@ -1,3 +1,5 @@
 LIBRARY SHLWAPI
 EXPORTS
     SHStripMneumonicW @225
+    QISearch @219
+    ShellMessageBoxW @388

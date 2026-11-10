@@ -93,3 +93,85 @@ __declspec(dllexport) int StrToIntW(const WCHAR *text)
     while (*text >= '0' && *text <= '9') value = value * 10 + (*text++ - '0');
     return (int)(negative ? 0u - value : value);
 }
+
+typedef struct { unsigned char Bytes[16]; } SHELL_IID;
+typedef struct { const SHELL_IID *Id; unsigned long Offset; } SHELL_QITAB;
+typedef struct SHELL_UNKNOWN SHELL_UNKNOWN;
+typedef struct {
+    long (*Query)(SHELL_UNKNOWN *, const SHELL_IID *, void **);
+    unsigned long (*AddRef)(SHELL_UNKNOWN *);
+    unsigned long (*Release)(SHELL_UNKNOWN *);
+} SHELL_UNKNOWN_VTABLE;
+struct SHELL_UNKNOWN { const SHELL_UNKNOWN_VTABLE *Methods; };
+static int shell_same_iid(const SHELL_IID *a, const SHELL_IID *b)
+{
+    for (unsigned i = 0; i < 16; i++) if (a->Bytes[i] != b->Bytes[i]) return 0;
+    return 1;
+}
+__declspec(dllexport) long QISearch(void *object, const SHELL_QITAB *table,
+    const SHELL_IID *id, void **out)
+{
+    static const SHELL_IID unknown = {{0,0,0,0,0,0,0,0,0xc0,0,0,0,0,0,0,0x46}};
+    if (!out) return (long)0x80004003u;
+    *out = 0;
+    if (!object || !table || !id) return (long)0x80070057u;
+    int identity = shell_same_iid(id, &unknown);
+    for (; table->Id; table++) {
+        if (identity || shell_same_iid(id, table->Id)) {
+            SHELL_UNKNOWN *found = (SHELL_UNKNOWN *)((char *)object + table->Offset);
+            found->Methods->AddRef(found);
+            *out = found;
+            return 0;
+        }
+    }
+    return (long)0x80004002u;
+}
+
+__declspec(dllimport) int LoadStringW(void *, unsigned, WCHAR *, int);
+__declspec(dllimport) int GetWindowTextW(void *, WCHAR *, int);
+__declspec(dllimport) int MessageBoxW(void *, const WCHAR *, const WCHAR *, unsigned);
+__declspec(dllimport) unsigned long FormatMessageW(unsigned long, const void *,
+    unsigned long, unsigned long, WCHAR *, unsigned long, void *);
+__declspec(dllimport) void *LocalFree(void *);
+__declspec(dllimport) void CoTaskMemFree(void *);
+__declspec(dllimport) void SetLastError(unsigned long);
+
+__declspec(dllexport) int ShellMessageBoxW(void *instance, void *owner,
+    const WCHAR *text, const WCHAR *title, unsigned flags, ...)
+{
+    WCHAR title_resource[512];
+    WCHAR *text_resource = 0;
+    unsigned long long text_id = (unsigned long long)text;
+    unsigned long long title_id = (unsigned long long)title;
+    if (text_id <= 0xffff) {
+        const WCHAR *raw = 0;
+        int count = LoadStringW(instance, (unsigned)text_id, (WCHAR *)&raw, 0);
+        if (!count) return 0;
+        text_resource = CoTaskMemAlloc(((unsigned long long)count + 1) * sizeof(WCHAR));
+        if (!text_resource) { SetLastError(8); return 0; }
+        for (int i = 0; i < count; i++) text_resource[i] = raw[i];
+        text_resource[count] = 0;
+        text = text_resource;
+    }
+    if (title_id && title_id <= 0xffff) {
+        if (!LoadStringW(instance, (unsigned)title_id, title_resource, 512)) {
+            CoTaskMemFree(text_resource); return 0;
+        }
+        title = title_resource;
+    } else if (owner) {
+        title_resource[0] = 0;
+        GetWindowTextW(owner, title_resource, 512);
+        title = title_resource;
+    }
+    WCHAR *message = 0;
+    __builtin_va_list args;
+    __builtin_va_start(args, flags);
+    unsigned long length = FormatMessageW(0x500, text, 0, 0,
+                                          (WCHAR *)&message, 0, &args);
+    __builtin_va_end(args);
+    CoTaskMemFree(text_resource);
+    if (!length) return 0;
+    int result = MessageBoxW(owner, message, title ? title : L"", flags);
+    LocalFree(message);
+    return result;
+}
