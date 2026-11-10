@@ -434,12 +434,12 @@ $(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) user/w/comctl32/Comctl32.def $(
 	           $(USER32LIB) $(GDI32LIB) $(KERNEL32LIB)
 	@echo "  DLL   $@"
 
-$(SHELL32): user/w/shell32/Shell32.c user/w/shell32/Shell32.def $(KERNEL32)
+$(SHELL32): user/w/shell32/Shell32.c user/w/shell32/Shell32.def $(KERNEL32) $(USER32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/w/shell32/Shell32.c -o $(BUILD)/shell32.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x260000000 \
 	           /def:user/w/shell32/Shell32.def /out:$@ /implib:$(SHELL32LIB) \
-	           $(BUILD)/shell32.obj $(KERNEL32LIB)
+	           $(BUILD)/shell32.obj $(KERNEL32LIB) $(USER32LIB)
 	@echo "  DLL   $@"
 
 $(SHLWAPI): user/w/shlwapi/Shlwapi.c user/w/shlwapi/Shlwapi.def
