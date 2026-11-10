@@ -36,8 +36,11 @@ static void W32kScreenPosition(UINT16 slot, INT32 *x, INT32 *y)
 
 void W32kScreenSetParent(UINT16 slot, UINT16 parent)
 {
-    if (!W32kWindowExists(slot) || !W32kWindowExists(parent) || slot == parent ||
-        g_w32k[slot].Kind != W32K_KIND_CHILD) return;
+    if (!W32kWindowExists(slot) || !W32kWindowExists(parent) || slot == parent) return;
+    if (g_w32k[slot].Kind != W32K_KIND_CHILD) {
+        g_w32k[slot].Owner = KiUserWindowHandle(parent);
+        return;
+    }
     for (UINT16 ancestor = parent; ancestor; ancestor = W32kWindowParent(ancestor))
         if (ancestor == slot) return;
     UINT64 flags = KiIrqSave();

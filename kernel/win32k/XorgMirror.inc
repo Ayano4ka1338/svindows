@@ -12,7 +12,8 @@ typedef struct {
     UINT32 Id;
     INT32 X, Y, SourceX, SourceY, GuestX, GuestY;
     UINT16 Width, Height;
-    BOOLEAN Seen;
+    BOOLEAN Seen, Popup;
+    WCHAR Title[W32K_TITLE_CHARS];
     UINT8 Buttons;
     UINT8 Keys[16];
 } W32K_XWIN;
@@ -22,7 +23,7 @@ typedef struct {
     UINT32 Root, Visual, Gc, Base, Mask, NextId;
     UINT16 Width, Height;
     UINT8 Depth;
-    UINT32 WmProtocols, WmDelete;
+    UINT32 WmProtocols, WmDelete, Utf8, NetName;
     BOOLEAN InputActive;
     UINT8 Event[32];
     UINT8 EventHave;
@@ -184,6 +185,8 @@ static BOOLEAN W32kXOpen(W32K_XORG *x)
         goto fail;
     stage = 4;
 
+    x->Utf8 = W32kXInternAtom(x, "UTF8_STRING");
+    x->NetName = W32kXInternAtom(x, "_NET_WM_NAME");
     x->WmProtocols = W32kXInternAtom(x, "WM_PROTOCOLS");
     x->WmDelete = W32kXInternAtom(x, "WM_DELETE_WINDOW");
 
@@ -204,6 +207,54 @@ fail:
     return FALSE;
 }
 
+static BOOLEAN W32kXSetTitle(W32K_XORG *x, W32K_XWIN *out,
+                              const W32K_WINDOW_STATE *guest)
+{
+    UINT8 request[24 + W32K_TITLE_CHARS * 4 + 4] = {18,0};
+    UINT32 length=0;
+    for (UINT32 i=0; i<W32K_TITLE_CHARS && guest->Title[i]; i++) {
+        UINT32 ch=guest->Title[i];
+        if (ch>=0xd800 && ch<=0xdbff && i+1<W32K_TITLE_CHARS &&
+            guest->Title[i+1]>=0xdc00 && guest->Title[i+1]<=0xdfff)
+            ch=0x10000+((ch-0xd800)<<10)+(guest->Title[++i]-0xdc00);
+        else if (ch>=0xd800 && ch<=0xdfff) ch=0xfffd;
+        if (ch<0x80) request[24+length++]=(UINT8)ch;
+        else if (ch<0x800) {
+            request[24+length++]=0xc0|(ch>>6);
+            request[24+length++]=0x80|(ch&63);
+        } else {
+            if (ch>=0x10000) request[24+length++]=0xf0|(ch>>18);
+            if (ch>=0x10000) request[24+length++]=0x80|((ch>>12)&63);
+            else request[24+length++]=0xe0|(ch>>12);
+            request[24+length++]=0x80|((ch>>6)&63);
+            request[24+length++]=0x80|(ch&63);
+        }
+    }
+    UINT32 bytes=24+((length+3)&~3u);
+    W32kXPut16(request+2,bytes/4); W32kXPut32(request+4,out->Id);
+    W32kXPut32(request+12,x->Utf8 ? x->Utf8 : 31);
+    request[16]=8; W32kXPut32(request+20,length);
+    W32kXPut32(request+8,39);
+    if (!W32kXRequest(x,request,bytes)) return FALSE;
+    if (x->NetName && x->Utf8) {
+        W32kXPut32(request+8,x->NetName);
+        if (!W32kXRequest(x,request,bytes)) return FALSE;
+    }
+    memcpy(out->Title,guest->Title,sizeof(out->Title));
+    return TRUE;
+}
+
+static void W32kXPopupPosition(W32K_XORG *x, W32K_XWIN *out,
+                                const W32K_WINDOW_STATE *guest)
+{
+    UINT16 owner=(UINT16)guest->Owner;
+    if (!out->Popup || !owner || owner>=W32K_SLOTS ||
+        KiUserWindowHandle(owner)!=guest->Owner || !x->Windows[owner].Id) return;
+    W32K_XWIN *parent=&x->Windows[owner];
+    out->X=parent->X+out->SourceX-parent->SourceX;
+    out->Y=parent->Y+out->SourceY-parent->SourceY;
+}
+
 static BOOLEAN W32kXCreateWindow(W32K_XORG *x, W32K_XWIN *out,
                                  const W32K_WINDOW_STATE *guest)
 {
@@ -212,13 +263,15 @@ static BOOLEAN W32kXCreateWindow(W32K_XORG *x, W32K_XWIN *out,
     W32kClientOrigin(slot, &cx, &cy, &cw, &ch);
     if (guest->MenuPresent) { cy -= W32K_MENU_HEIGHT; ch += W32K_MENU_HEIGHT; }
     out->Id = W32kXResource(x);
+    out->Popup = (guest->Style & WS_POPUP) && !(guest->Style & WS_CAPTION);
     out->X = guest->X;
     out->Y = guest->Y;
     out->GuestX = guest->X; out->GuestY = guest->Y;
     out->SourceX = cx; out->SourceY = cy;
     out->Width = (UINT16)cw;
     out->Height = (UINT16)ch;
-    UINT8 create[36] = {1, 0, 9, 0};
+    W32kXPopupPosition(x,out,guest);
+    UINT8 create[40] = {1, 0, 10, 0};
     create[1] = x->Depth;
     W32kXPut32(create + 4, out->Id);
     W32kXPut32(create + 8, x->Root);
@@ -228,20 +281,15 @@ static BOOLEAN W32kXCreateWindow(W32K_XORG *x, W32K_XWIN *out,
     W32kXPut16(create + 18, out->Height);
     W32kXPut16(create + 22, 1); /* InputOutput */
     W32kXPut32(create + 24, x->Visual);
-    W32kXPut32(create + 28, 1u << 11); /* CWEventMask */
-    W32kXPut32(create + 32, (1u << 0) | (1u << 1) | (1u << 2) |
+    W32kXPut32(create + 28, (1u << 9) | (1u << 11));
+    W32kXPut32(create + 32, out->Popup ? 1 : 0); /* CWEventMask */
+    W32kXPut32(create + 36, (1u << 0) | (1u << 1) | (1u << 2) |
         (1u << 3) | (1u << 6) | (1u << 15) | (1u << 17) | (1u << 21));
     if (!W32kXRequest(x, create, sizeof(create)))
         return FALSE;
     /* WM_NAME and WM_CLASS make this a regular managed application window. */
-    const char *title = "Calculator";
-    UINT8 prop[64] = {18, 0};
-    UINT32 n = (UINT32)strlen(title);
-    W32kXPut16(prop + 2, (UINT16)((24 + ((n + 3) & ~3u)) / 4));
-    W32kXPut32(prop + 4, out->Id); W32kXPut32(prop + 8, 39);
-    W32kXPut32(prop + 12, 31); prop[16] = 8;
-    W32kXPut32(prop + 20, n); memcpy(prop + 24, title, n);
-    if (!W32kXRequest(x, prop, 24 + ((n + 3) & ~3u))) return FALSE;
+    if (!W32kXSetTitle(x,out,guest)) return FALSE;
+    UINT8 prop[64];
     static const UINT8 class_name[] = "svindows\0Svindows\0";
     memset(prop, 0, sizeof(prop)); prop[0] = 18;
     W32kXPut16(prop + 2, 11); W32kXPut32(prop + 4, out->Id);
@@ -273,16 +321,23 @@ static BOOLEAN W32kXConfigureWindow(W32K_XORG *x, W32K_XWIN *out,
     INT32 cx, cy, cw, ch;
     W32kClientOrigin(slot, &cx, &cy, &cw, &ch);
     if (guest->MenuPresent) { cy -= W32K_MENU_HEIGHT; ch += W32K_MENU_HEIGHT; }
-    UINT8 r[20] = {12, 0, 5, 0};
-    W32kXPut32(r + 4, out->Id);
-    W32kXPut16(r + 8, (1u << 2) | (1u << 3)); /* width, height */
-    W32kXPut16(r + 12, (UINT16)cw);
-    W32kXPut16(r + 14, (UINT16)ch);
-    if (!W32kXRequest(x, r, sizeof(r)))
-        return FALSE;
     out->GuestX = guest->X; out->GuestY = guest->Y;
     out->SourceX = cx; out->SourceY = cy;
     out->Width = (UINT16)cw; out->Height = (UINT16)ch;
+    W32kXPopupPosition(x,out,guest);
+    UINT8 r[28] = {12, 0};
+    UINT32 bytes = out->Popup ? 28 : 20;
+    W32kXPut16(r+2,bytes/4);
+    W32kXPut32(r + 4, out->Id);
+    W32kXPut16(r + 8, out->Popup ? 15 : 12);
+    UINT32 at=12;
+    if (out->Popup) {
+        W32kXPut32(r+at,(UINT32)out->X); at+=4;
+        W32kXPut32(r+at,(UINT32)out->Y); at+=4;
+    }
+    W32kXPut32(r+at,(UINT32)cw);
+    W32kXPut32(r+at+4,(UINT32)ch);
+    if (!W32kXRequest(x, r, bytes)) return FALSE;
     return TRUE;
 }
 
@@ -373,11 +428,15 @@ static BOOLEAN W32kXPresent(W32K_XORG *x)
             if (guest->MenuPresent) { cy -= W32K_MENU_HEIGHT; ch += W32K_MENU_HEIGHT; }
             out->GuestX = guest->X; out->GuestY = guest->Y;
             out->SourceX = cx; out->SourceY = cy;
-            if (out->Width != cw || out->Height != ch) {
+            INT32 old_x=out->X, old_y=out->Y;
+            W32kXPopupPosition(x,out,guest);
+            if (out->Width != cw || out->Height != ch || out->X!=old_x || out->Y!=old_y) {
             if (!W32kXConfigureWindow(x, out, guest))
                 return FALSE;
             }
         }
+        if (memcmp(out->Title,guest->Title,sizeof(out->Title)) &&
+            !W32kXSetTitle(x,out,guest)) return FALSE;
         if (!W32kXPutWindow(x, out, guest))
             return FALSE;
     }
@@ -437,6 +496,8 @@ static void W32kXEvents(W32K_XORG *x)
             if (type == 2) w->Keys[scan >> 3] |= (UINT8)(1u << (scan & 7));
             else w->Keys[scan >> 3] &= (UINT8)~(1u << (scan & 7));
         } else if (type == 4 || type == 5 || type == 6) {
+            w->X=(INT16)W32kXGet16(e+20)-(INT16)W32kXGet16(e+24);
+            w->Y=(INT16)W32kXGet16(e+22)-(INT16)W32kXGet16(e+26);
             INT32 mx = w->SourceX + (INT16)W32kXGet16(e + 24);
             INT32 my = w->SourceY + (INT16)W32kXGet16(e + 26);
             if (type != 6) {
@@ -457,11 +518,13 @@ static void W32kXEvents(W32K_XORG *x)
             W32K_WINDOW_STATE *guest = &g_w32k[slot];
             (void)W32kXPutWindow(x, w, guest);
         } else if (type == 22) {
+            if (w->Popup) continue;
             UINT16 width = W32kXGet16(e + 20), height = W32kXGet16(e + 22);
             if (width && height && (width != w->Width || height != w->Height))
                 W32kMoveWindow(KiUserWindowHandle(slot), g_w32k[slot].X,
                     g_w32k[slot].Y, width + 2 * W32K_BORDER,
-                    height + W32K_CAPTION_HEIGHT + W32K_BORDER);
+                    height + W32K_CAPTION_HEIGHT + W32K_BORDER -
+                    (g_w32k[slot].MenuPresent ? W32K_MENU_HEIGHT : 0));
         } else if (type == 33 && W32kXGet32(e + 8) == x->WmProtocols &&
                    W32kXGet32(e + 12) == x->WmDelete) {
             W32kSendWindowMessage(slot, 0x0010, 0, 0);

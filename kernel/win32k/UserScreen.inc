@@ -71,6 +71,7 @@ typedef struct _W32K_WINDOW_STATE {
     INT32   DragOriginX, DragOriginY;
     UINT32  RestoreX, RestoreY, RestoreW, RestoreH;
     UINT16  Parent;
+    UINT64  Owner;
     UINT16  ZPrev, ZNext;   /* z-order list, ZNext toward the top           */
     UINT32  Style;          /* cached: the record lives in user memory      */
     UINT32  ExStyle;

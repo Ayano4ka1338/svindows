@@ -718,7 +718,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
                                 (INT32)a[6], (UINT32)a[7], (UINT32)a[8], kind);
         static const WCHAR static_class[]={'S','T','A','T','I','C',0};
         W32kScreenSetStatic(index,KiWideEqual(cls->Name,static_class));
-        if (kind == W32K_KIND_CHILD) W32kScreenSetParent(index, (UINT16)a[9]);
+        if (a[9]) W32kScreenSetParent(index, (UINT16)a[9]);
     }
     g_window_menus[index] = ((UINT32)a[4] & 0x40000000u) ? 0 : a[10];
     if(g_window_menus[index])W32kSetMenuBar(index,NULL,0,TRUE);
