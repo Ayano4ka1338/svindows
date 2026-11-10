@@ -336,6 +336,8 @@ $(KERNEL32): user/w/kernel32/Kernel32.c user/w/kernel32/Kernel32Process.c $(KERN
 	           /export:RtlCaptureContext=ntdll.RtlCaptureContext \
 	           /export:RtlLookupFunctionEntry=ntdll.RtlLookupFunctionEntry \
 	           /export:RtlVirtualUnwind=ntdll.RtlVirtualUnwind \
+	           /export:RegOpenKeyExA=advapi32.RegOpenKeyExA \
+	           /export:RegQueryValueExA=advapi32.RegQueryValueExA \
 	           $(BUILD)/kernel32.obj $(BUILD)/kernel32_process.obj $(NTDLLLIB)
 	@echo "  DLL   $(KERNEL32)"
 
