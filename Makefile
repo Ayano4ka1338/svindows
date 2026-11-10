@@ -788,3 +788,9 @@ storage-medium-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined tools/checks/StorageMediumChecks.c -o $(BUILD)/StorageMediumChecks
 	$(BUILD)/StorageMediumChecks
+
+.PHONY: native-delete-check
+native-delete-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined tools/checks/NativeDeleteChecks.c -o $(BUILD)/NativeDeleteChecks
+	$(BUILD)/NativeDeleteChecks
