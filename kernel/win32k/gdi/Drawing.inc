@@ -352,8 +352,8 @@ UINT64 NtGdiBitBlt(UINT64 *a)
     INT32 sx = (INT32)a[6], sy = (INT32)a[7];
     for (INT32 row = 0; row < h; row++) {
         for (INT32 col = 0; col < w; col++) {
-            INT32 source_x = src->OrgX + sx + col;
-            INT32 source_y = src->OrgY + sy + row;
+            INT64 source_x = (INT64)src->OrgX + src->ViewX + sx + col;
+            INT64 source_y = (INT64)src->OrgY + src->ViewY + sy + row;
             if (source_x < 0 || source_y < 0 ||
                 source_x >= (INT32)src->Surface->Width ||
                 source_y >= (INT32)src->Surface->Height)
@@ -394,18 +394,19 @@ UINT64 NtGdiStretchBlt(UINT64 *a)
     if (!dc_clip(dst, &clipped_x, &clipped_y, &clipped_width,
                  &clipped_height))
         return 1;
-    INT32 origin_x = dst->OrgX + x, origin_y = dst->OrgY + y;
+    INT64 origin_x = (INT64)dst->OrgX + dst->ViewX + x;
+    INT64 origin_y = (INT64)dst->OrgY + dst->ViewY + y;
     for (INT32 row = 0; row < clipped_height; ++row) {
         INT32 dest_y = clipped_y + row;
-        INT32 original_y = dest_y - origin_y;
-        INT32 source_y = src->OrgY + sy +
-            (INT32)((INT64)original_y * source_height / height);
+        INT64 original_y = dest_y - origin_y;
+        INT64 source_y = (INT64)src->OrgY + src->ViewY + sy +
+            original_y * source_height / height;
         if (source_y < 0 || source_y >= (INT32)src->Surface->Height) continue;
         for (INT32 col = 0; col < clipped_width; ++col) {
             INT32 dest_x = clipped_x + col;
-            INT32 original_x = dest_x - origin_x;
-            INT32 source_x = src->OrgX + sx +
-                (INT32)((INT64)original_x * source_width / width);
+            INT64 original_x = dest_x - origin_x;
+            INT64 source_x = (INT64)src->OrgX + src->ViewX + sx +
+                original_x * source_width / width;
             if (source_x < 0 || source_x >= (INT32)src->Surface->Width ||
                 (dst->Surface->IsScreen && dst->Hwnd &&
                  !W32kScreenPixelVisible(dst->Hwnd, dest_x, dest_y)))
@@ -454,7 +455,7 @@ UINT64 NtGdiBlitUserBuffer(UINT64 *a)
         return 0;
 
     INT32 x = 0, y = 0, w = (INT32)copy_width, h = (INT32)copy_height;
-    if (!dc_clip(dc, &x, &y, &w, &h))
+    if (!dc_clip_coords(dc, &x, &y, &w, &h, FALSE))
         return 1;
     dc_damage(dc, x, y, w, h);
     BOOLEAN unobscured = !dc->Surface->IsScreen || !dc->Hwnd ||

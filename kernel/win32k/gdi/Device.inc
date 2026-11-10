@@ -68,6 +68,35 @@ UINT64 SvNtGdiCreateDisplayDC(UINT64 *args)
     return hdc;
 }
 
+/* A null input origin queries the current mapping. */
+UINT64 SvNtGdiViewportOrigin(UINT64 *a)
+{
+    W32K_DC *dc = dc_from_handle(a[0]);
+    if (!dc) return 0;
+    const INT32 *input = (const INT32 *)a[1];
+    INT32 *previous = (INT32 *)a[2];
+    if ((input && !MmProbeForRead(a[1], 2 * sizeof(*input))) ||
+        (previous && !MmProbeForWrite(a[2], 2 * sizeof(*previous))))
+        return 0;
+    INT32 x = 0, y = 0;
+    if (input) {
+        x = input[0];
+        y = input[1];
+    }
+    UINT64 flags = KiIrqSave();
+    INT32 old_x = dc->ViewX, old_y = dc->ViewY;
+    if (input) {
+        dc->ViewX = x;
+        dc->ViewY = y;
+    }
+    KiIrqRestore(flags);
+    if (previous) {
+        previous[0] = old_x;
+        previous[1] = old_y;
+    }
+    return 1;
+}
+
 void W32kDestroyWindowDc(UINT64 hwnd)
 {
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);

@@ -1218,6 +1218,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F0B] = SvNtGdiCreateDisplayDC;
     KiServiceTable[0x1F0C] = SvNtUserGetCursorPos;
     KiServiceTable[0x1F0D] = SvNtUserChildWindowFromPoint;
+    KiServiceTable[0x1F0E] = SvNtGdiViewportOrigin;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

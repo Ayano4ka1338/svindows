@@ -67,7 +67,8 @@ typedef struct _W32K_DC {
     BOOLEAN StandaloneDisplay;
     INT32 DirtyLeft, DirtyTop, DirtyRight, DirtyBottom;
     UINT64 Hwnd;
-    INT32  OrgX, OrgY;           /* where (0,0) of the DC lands on the surface */
+    INT32  OrgX, OrgY;           /* where the device origin lands on the surface */
+    INT32  ViewX, ViewY;         /* logical origin in device coordinates */
     INT32  ClipX, ClipY, ClipW, ClipH; /* in surface coordinates */
     INT32  CurX, CurY;           /* current position for MoveTo/LineTo */
     UINT64 SelectedBrush;
@@ -269,13 +270,19 @@ static void surface_pixel(W32K_SURFACE *surface, INT32 x, INT32 y, UINT32 pixel)
     surface->Bits[(UINT32)y * surface->Stride + (UINT32)x] = pixel;
 }
 
-/* Intersect a DC-relative rectangle with the DC's clip box and translate it
- * into surface coordinates. Returns FALSE when nothing is left. */
-static BOOLEAN dc_clip(W32K_DC *dc, INT32 *x, INT32 *y, INT32 *w, INT32 *h)
+/* Translate to the surface and intersect with the DC's clip box. The
+ * internal bitmap transfer uses device coordinates to copy raw DIB pixels. */
+static BOOLEAN dc_clip_coords(W32K_DC *dc, INT32 *x, INT32 *y,
+                              INT32 *w, INT32 *h, BOOLEAN logical)
 {
-    INT32 left = dc->OrgX + *x, top = dc->OrgY + *y;
-    INT32 right = left + *w, bottom = top + *h;
-    INT32 clip_right = dc->ClipX + dc->ClipW, clip_bottom = dc->ClipY + dc->ClipH;
+    INT64 left = (INT64)dc->OrgX + *x, top = (INT64)dc->OrgY + *y;
+    if (logical) {
+        left += dc->ViewX;
+        top += dc->ViewY;
+    }
+    INT64 right = left + *w, bottom = top + *h;
+    INT64 clip_right = (INT64)dc->ClipX + dc->ClipW;
+    INT64 clip_bottom = (INT64)dc->ClipY + dc->ClipH;
 
     if (left < dc->ClipX) left = dc->ClipX;
     if (top < dc->ClipY) top = dc->ClipY;
@@ -288,6 +295,11 @@ static BOOLEAN dc_clip(W32K_DC *dc, INT32 *x, INT32 *y, INT32 *w, INT32 *h)
     *w = right - left;
     *h = bottom - top;
     return TRUE;
+}
+
+static BOOLEAN dc_clip(W32K_DC *dc, INT32 *x, INT32 *y, INT32 *w, INT32 *h)
+{
+    return dc_clip_coords(dc, x, y, w, h, TRUE);
 }
 
 static void dc_fill(W32K_DC *dc, INT32 x, INT32 y, INT32 w, INT32 h,

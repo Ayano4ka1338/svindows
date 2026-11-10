@@ -1,4 +1,6 @@
-/* The current raster operates in device pixels with a zero viewport origin. */
+/* The current raster operates in device pixels, with an optional offset. */
+__declspec(dllimport) UINT64 SvNtGdiViewportOrigin(HDC dc, const POINT *origin,
+                                                  POINT *previous);
 #define SV_MM_TEXT 1
 
 GDI32_API int SetMapMode(HDC dc, int mode)
@@ -8,16 +10,24 @@ GDI32_API int SetMapMode(HDC dc, int mode)
     return SV_MM_TEXT;
 }
 
+GDI32_API BOOL SetViewportOrgEx(HDC dc, int x, int y, POINT *previous)
+{
+    const POINT origin = {x, y};
+    return SvNtGdiViewportOrigin(dc, &origin, previous) != 0;
+}
+
 GDI32_API BOOL LPtoDP(HDC dc, POINT *points, int count)
 {
-    if (object_type(dc) != SV_GDI_TYPE_DC || count < 0 || (count && !points))
+    POINT origin;
+    if (count < 0 || (count && !points) || !SvNtGdiViewportOrigin(dc, 0, &origin))
         return FALSE;
+    const LONG min = -(1L << 26);
+    const LONG max = (1L << 26) - 1;
     for (int i = 0; i < count; i++) {
-        const LONG min = -(1L << 26);
-        const LONG max = (1L << 26) - 1;
-        if (points[i].x < min || points[i].x > max ||
-            points[i].y < min || points[i].y > max)
-            return FALSE;
+        INT64 x = (INT64)points[i].x + origin.x;
+        INT64 y = (INT64)points[i].y + origin.y;
+        if (x < min || x > max || y < min || y > max) return FALSE;
+        points[i] = (POINT){(LONG)x, (LONG)y};
     }
     return TRUE;
 }
