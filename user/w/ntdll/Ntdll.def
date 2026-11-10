@@ -134,6 +134,8 @@ EXPORTS
     NtUserGetClientRect
     SvNtUserGetCursorPos
     SvNtUserIsIconic
+    SvNtUserCreateIconHandle
+    SvNtUserDestroyIcon
     SvNtUserChildWindowFromPoint
     NtUserSetFocus
     NtUserGetFocus

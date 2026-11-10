@@ -20,6 +20,7 @@ typedef struct _USER_OBJECT_OWNER {
     PKPROCESS Process;
     UINT16 Generation;
     UINT8 Type;
+    BOOLEAN Icon, SharedIcon;
 } USER_OBJECT_OWNER;
 static USER_OBJECT_OWNER g_user_objects[USER_OBJECT_SLOTS];
 
@@ -35,6 +36,7 @@ static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
     USER_OBJECT_OWNER *object = &g_user_objects[index];
     object->Generation++;
     object->Type = type;
+    object->Icon = object->SharedIcon = FALSE;
     object->Process = caller->Process;
     UINT64 head = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)index * 0x200;
     memset((void *)head, 0, 0x200);
@@ -74,38 +76,48 @@ static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
 typedef struct _CURSOR_KEY {
     UINT64 Module, Resource, Handle;
     PKPROCESS Process;
+    BOOLEAN Icon;
 } CURSOR_KEY;
 static CURSOR_KEY g_cursor_cache[USER_CURSOR_CACHE];
 
-static UINT64 NtUserFindExistingCursorIcon(UINT64 *a)
+static UINT64 KiUserLoadCursorIcon(UINT64 module, UINT64 key,
+                                   BOOLEAN icon, BOOLEAN shared)
 {
     PKTHREAD caller = KeGetCurrentThread();
     if (!caller || !caller->Process) return 0;
     CURSOR_KEY *empty = NULL;
+    if (shared) {
+        for (UINT32 i = 0; i < USER_CURSOR_CACHE; i++) {
+            CURSOR_KEY *cache = &g_cursor_cache[i];
+            if (cache->Process == caller->Process && cache->Module == module &&
+                cache->Resource == key && cache->Icon == icon)
+                return cache->Handle;
+            if (!cache->Process && !empty) empty = cache;
+        }
+        if (!empty) return 0;
+    }
 
-    /* The resource id is what distinguishes stock cursors; for a string name
-     * the pointer to the captured name serves as the key. */
-    UINT64 module = a[0], resource = a[1];
-    UINT64 key = resource;
+    UINT64 handle = KiUserAllocateObject(USER_TYPE_CURSOR, NULL);
+    if (!handle) return 0;
+    USER_OBJECT_OWNER *object = &g_user_objects[(UINT16)handle];
+    object->Icon = icon;
+    object->SharedIcon = icon && shared;
+    if (empty)
+        *empty = (CURSOR_KEY){module, key, handle, caller->Process, icon};
+    return handle;
+}
+
+static UINT64 NtUserFindExistingCursorIcon(UINT64 *a)
+{
+    UINT64 resource = a[1], key = resource;
     if (resource && MmProbeForRead(resource, 16))
         key = *(volatile UINT64 *)(resource + 8); /* UNICODE_STRING.Buffer */
+    return KiUserLoadCursorIcon(a[0], key, FALSE, TRUE);
+}
 
-    for (UINT32 i = 0; i < USER_CURSOR_CACHE; i++) {
-        CURSOR_KEY *cache = &g_cursor_cache[i];
-        if (cache->Process == caller->Process && cache->Module == module && cache->Resource == key)
-            return cache->Handle;
-        if (!cache->Process && !empty) empty = cache;
-    }
-    if (!empty) return 0;
-
-    UINT64 head = 0;
-    UINT64 handle = KiUserAllocateObject(USER_TYPE_CURSOR, &head);
-    if (!handle)
-        return 0;
-    *empty = (CURSOR_KEY){module, key, handle, caller->Process};
-    KeLog("[user] cursor for module %p resource %p -> %p\n", (void *)module,
-          (void *)key, (void *)handle);
-    return handle;
+static UINT64 SvNtUserCreateIconHandle(UINT64 *a)
+{
+    return KiUserLoadCursorIcon(a[0], a[1], TRUE, a[2] != 0);
 }
 
 /* HACCEL NtUserCreateAcceleratorTable(LPACCEL entries, ULONG count) */
@@ -142,6 +154,15 @@ static UINT64 KiUserDestroyObject(UINT64 handle, UINT8 type)
 }
 static UINT64 NtUserDestroyAcceleratorTable(UINT64 *a) { return KiUserDestroyObject(a[0], USER_TYPE_ACCEL); }
 static UINT64 NtUserDestroyCursor(UINT64 *a) { return KiUserDestroyObject(a[0], USER_TYPE_CURSOR); }
+static UINT64 SvNtUserDestroyIcon(UINT64 *a)
+{
+    UINT16 index = (UINT16)a[0];
+    if (index < 200 || index >= USER_OBJECT_SLOTS ||
+        !g_user_objects[index].Icon || g_user_objects[index].SharedIcon)
+        return 0;
+    return KiUserDestroyObject(a[0], USER_TYPE_CURSOR);
+}
+
 static UINT64 NtUserSetCursor(UINT64 *a) { return 0; }
 
 /* PAINTSTRUCT on x64: HDC hdc (0), BOOL fErase (8), RECT rcPaint (12..28),
