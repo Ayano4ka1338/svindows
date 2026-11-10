@@ -607,6 +607,13 @@ USER32_API BOOL IsProcessDPIAware(void)
 __declspec(dllimport) UINT64 SvNtUserQueryWindowState(HWND window);
 USER32_API BOOL IsWindow(HWND window)
 { return (SvNtUserQueryWindowState(window)&1)!=0; }
+USER32_API BOOL IsHungAppWindow(HWND window)
+{
+    if (!IsWindow(window)) { SetLastError(1400); return FALSE; }
+    /* No hang monitor is active; valid windows are not marked hung. */
+    SetLastError(0);
+    return FALSE;
+}
 USER32_API BOOL IsWindowVisible(HWND window)
 { return (SvNtUserQueryWindowState(window)&2)!=0; }
 USER32_API BOOL IsZoomed(HWND window)
