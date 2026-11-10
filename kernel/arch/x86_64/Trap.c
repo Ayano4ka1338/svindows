@@ -364,10 +364,9 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
             return;
         dump_frame(frame, fault_address);
         if ((frame->cs & 3) == 3) {
-            const UINT64 cfg_trace_va = 0x0000000000088ff8ULL;
-            if (MmProbeForRead(cfg_trace_va, sizeof(UINT64)))
+            if (MmProbeForRead(LDR_CFG_TRACE_VA, sizeof(UINT64)))
                 KeLog("[user] last CFG indirect target: %p\n",
-                      (void *)*(volatile UINT64 *)cfg_trace_va);
+                      (void *)*(volatile UINT64 *)LDR_CFG_TRACE_VA);
             PKTHREAD thread = KeGetCurrentThread();
             KeLog("[user] unhandled exception in thread '%s' (id %u); "
                   "terminating thread only\n",

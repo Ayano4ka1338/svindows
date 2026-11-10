@@ -10,6 +10,12 @@
 #include <nt/Ntdef.h>
 #include <nt/Ntstatus.h>
 
+/* Keep the optional CFG trampoline arena separate from the PEB, process
+ * parameters and environment, which are mapped after image imports. */
+#define LDR_STUB_ARENA_VA   0x0000000000A00000ULL
+#define LDR_STUB_ARENA_SIZE 0x20000ULL
+#define LDR_CFG_TRACE_VA    (LDR_STUB_ARENA_VA + LDR_STUB_ARENA_SIZE - 8)
+
 struct _LDR_PROCESS_CONTEXT;
 typedef struct _LDR_PROCESS_CONTEXT LDR_PROCESS_CONTEXT,
                                    *PLDR_PROCESS_CONTEXT;

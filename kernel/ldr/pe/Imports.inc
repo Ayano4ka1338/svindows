@@ -146,22 +146,18 @@ static UINT64 LdrpProcByOrdinal(UINT64 base, UINT16 ordinal)
 }
 
 /* CFG bootstrap trampolines. W^X/CFG enforcement remains separate work. */
-#define LDR_STUB_ARENA_VA    0x0000000000069000ULL
-#define LDR_STUB_ARENA_PAGES 32     /* legacy CFG bootstrap arena; not callbacks */
-#define LDR_STUB_SLOT_SIZE   16
-#define LDR_CFG_TRACE_VA     (LDR_STUB_ARENA_VA + \
-                              LDR_STUB_ARENA_PAGES * PAGE_SIZE - 8)
+#define LDR_STUB_SLOT_SIZE 16
 
 static BOOLEAN LdrpEnsureStubArena(void)
 {
     if (!g_stub_arena) {
         if (!image_range_free(LDR_STUB_ARENA_VA,
-                              LDR_STUB_ARENA_PAGES * PAGE_SIZE) ||
+                              LDR_STUB_ARENA_SIZE) ||
             !NT_SUCCESS(LdrpAllocateImagePages(LDR_STUB_ARENA_VA,
-                              LDR_STUB_ARENA_PAGES * PAGE_SIZE)))
+                              LDR_STUB_ARENA_SIZE)))
             return FALSE;
         memset((void *)LDR_STUB_ARENA_VA, 0,
-               LDR_STUB_ARENA_PAGES * PAGE_SIZE);
+               LDR_STUB_ARENA_SIZE);
         g_stub_arena = LDR_STUB_ARENA_VA;
         /* The Windows loader initializes these two process-wide CFG targets.
          * Guard-check is a no-op (`ret`); guard-dispatch transfers control to

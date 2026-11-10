@@ -104,7 +104,7 @@ static void LdrpRollbackModules(const LDR_PROCESS_CONTEXT *before)
         }
     }
     if (context->StubArena && !before->StubArena)
-        LdrpReleaseImagePages(context->StubArena, LDR_STUB_ARENA_PAGES * PAGE_SIZE);
+        LdrpReleaseImagePages(context->StubArena, LDR_STUB_ARENA_SIZE);
     NTSTATUS failure = context->LoadStatus;
     *context = *before;
     context->LoadStatus = failure;
