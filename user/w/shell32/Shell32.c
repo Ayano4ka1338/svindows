@@ -174,3 +174,196 @@ __declspec(dllexport) void DragFinish(HANDLE drop)
 {
     GlobalFree(drop);
 }
+
+__declspec(dllimport) void *CoTaskMemAlloc(unsigned long long bytes);
+__declspec(dllimport) void CoTaskMemFree(void *memory);
+__declspec(dllimport) DWORD GetFullPathNameW(const WCHAR *, DWORD, WCHAR *, WCHAR **);
+__declspec(dllimport) DWORD GetFileAttributesW(const WCHAR *);
+__declspec(dllimport) int CompareStringOrdinal(const WCHAR *, int, const WCHAR *, int, BOOL);
+
+typedef struct {
+    DWORD Data1;
+    unsigned short Data2, Data3;
+    unsigned char Data4[8];
+} SHELL_GUID;
+
+typedef struct SHELL_ITEM SHELL_ITEM;
+typedef struct {
+    HRESULT (*QueryInterface)(SHELL_ITEM *, const SHELL_GUID *, void **);
+    DWORD (*AddRef)(SHELL_ITEM *);
+    DWORD (*Release)(SHELL_ITEM *);
+    HRESULT (*BindToHandler)(SHELL_ITEM *, void *, const SHELL_GUID *,
+                            const SHELL_GUID *, void **);
+    HRESULT (*GetParent)(SHELL_ITEM *, SHELL_ITEM **);
+    HRESULT (*GetDisplayName)(SHELL_ITEM *, DWORD, WCHAR **);
+    HRESULT (*GetAttributes)(SHELL_ITEM *, DWORD, DWORD *);
+    HRESULT (*Compare)(SHELL_ITEM *, SHELL_ITEM *, DWORD, int *);
+} SHELL_ITEM_VTABLE;
+
+struct SHELL_ITEM {
+    const SHELL_ITEM_VTABLE *Vtable;
+    DWORD References, Attributes;
+    WCHAR Path[MAX_PATH];
+};
+
+static const SHELL_GUID iid_shell_item = {0x43826d1e, 0xe718, 0x42ee,
+    {0xbc, 0x55, 0xa1, 0xe2, 0x61, 0xc3, 0x7b, 0xfe}};
+static const SHELL_GUID iid_unknown = {0, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+
+#define SHELL_E_POINTER ((HRESULT)0x80004003u)
+#define SHELL_E_NOTIMPL ((HRESULT)0x80004001u)
+#define SHELL_E_NOINTERFACE ((HRESULT)0x80004002u)
+
+static BOOL equal_guid(const SHELL_GUID *a, const SHELL_GUID *b)
+{
+    if (!a || a->Data1 != b->Data1 || a->Data2 != b->Data2 || a->Data3 != b->Data3)
+        return 0;
+    for (unsigned i = 0; i < sizeof(a->Data4); i++)
+        if (a->Data4[i] != b->Data4[i]) return 0;
+    return 1;
+}
+
+static DWORD shell_item_add_ref(SHELL_ITEM *item)
+{
+    return __atomic_add_fetch(&item->References, 1, __ATOMIC_RELAXED);
+}
+
+static DWORD shell_item_release(SHELL_ITEM *item)
+{
+    DWORD count = __atomic_sub_fetch(&item->References, 1, __ATOMIC_ACQ_REL);
+    if (!count) CoTaskMemFree(item);
+    return count;
+}
+
+static HRESULT shell_item_query(SHELL_ITEM *item, const SHELL_GUID *iid, void **out)
+{
+    if (!out) return SHELL_E_POINTER;
+    *out = 0;
+    if (!equal_guid(iid, &iid_shell_item) && !equal_guid(iid, &iid_unknown))
+        return SHELL_E_NOINTERFACE;
+    *out = item;
+    shell_item_add_ref(item);
+    return S_OK;
+}
+
+static HRESULT shell_item_bind(SHELL_ITEM *item, void *ctx, const SHELL_GUID *handler,
+    const SHELL_GUID *iid, void **out)
+{
+    (void)item; (void)ctx; (void)handler; (void)iid;
+    if (out) *out = 0;
+    return SHELL_E_NOTIMPL;
+}
+
+static HRESULT make_shell_item(const WCHAR *path, SHELL_ITEM **out);
+
+static const WCHAR *item_basename(const WCHAR *path)
+{
+    const WCHAR *name = path;
+    for (const WCHAR *p = path; *p; p++)
+        if (*p == '\\' && p[1]) name = p + 1;
+    return name;
+}
+
+static HRESULT shell_item_parent(SHELL_ITEM *item, SHELL_ITEM **out)
+{
+    if (!out) return SHELL_E_POINTER;
+    *out = 0;
+    const WCHAR *name = item_basename(item->Path);
+    if (name == item->Path) return (HRESULT)0x80070490u;
+    WCHAR parent[MAX_PATH];
+    unsigned n = (unsigned)(name - item->Path);
+    if (n > 3) n--;
+    for (unsigned i = 0; i < n; i++) parent[i] = item->Path[i];
+    parent[n] = 0;
+    return make_shell_item(parent, out);
+}
+
+static HRESULT shell_item_name(SHELL_ITEM *item, DWORD format, WCHAR **out)
+{
+    if (!out) return SHELL_E_POINTER;
+    *out = 0;
+    const WCHAR *text;
+    switch (format) {
+    case 0: /* SIGDN_NORMALDISPLAY */
+    case 0x80080001u: /* SIGDN_PARENTRELATIVEEDITING */
+        text = item_basename(item->Path);
+        break;
+    case 0x80028000u: /* SIGDN_DESKTOPABSOLUTEPARSING */
+    case 0x80058000u: /* SIGDN_FILESYSPATH */
+        text = item->Path;
+        break;
+    default: return SHELL_E_NOTIMPL;
+    }
+    unsigned size = 1;
+    while (text[size - 1]) size++;
+    WCHAR *copy = CoTaskMemAlloc(size * sizeof(*copy));
+    if (!copy) return (HRESULT)0x8007000eu;
+    for (unsigned i = 0; i < size; i++) copy[i] = text[i];
+    *out = copy;
+    return S_OK;
+}
+
+static HRESULT shell_item_attributes(SHELL_ITEM *item, DWORD mask, DWORD *out)
+{
+    if (!out) return SHELL_E_POINTER;
+    *out = item->Attributes & mask;
+    return *out == mask ? S_OK : 1; /* S_FALSE */
+}
+
+static HRESULT shell_item_compare(SHELL_ITEM *item, SHELL_ITEM *other, DWORD hint, int *order)
+{
+    (void)hint;
+    if (!other || !order) return SHELL_E_POINTER;
+    WCHAR *path = 0;
+    HRESULT status = other->Vtable->GetDisplayName(other, 0x80058000u, &path);
+    if (status < 0) return status;
+    int result = CompareStringOrdinal(item->Path, -1, path, -1, 1);
+    CoTaskMemFree(path);
+    if (!result) return E_FAIL;
+    *order = result - 2;
+    return S_OK;
+}
+
+static const SHELL_ITEM_VTABLE shell_item_vtable = {
+    shell_item_query, shell_item_add_ref, shell_item_release, shell_item_bind,
+    shell_item_parent, shell_item_name, shell_item_attributes, shell_item_compare
+};
+
+static HRESULT make_shell_item(const WCHAR *path, SHELL_ITEM **out)
+{
+    WCHAR full[MAX_PATH];
+    DWORD size = GetFullPathNameW(path, MAX_PATH, full, 0);
+    if (!size || size >= MAX_PATH) return (HRESULT)0x80070057u;
+    DWORD attributes = GetFileAttributesW(full);
+    if (attributes == (DWORD)-1) return (HRESULT)0x80070002u;
+    SHELL_ITEM *item = CoTaskMemAlloc(sizeof(*item));
+    if (!item) return (HRESULT)0x8007000eu;
+    item->Vtable = &shell_item_vtable;
+    item->References = 1;
+    item->Attributes = 0x40000000u; /* SFGAO_FILESYSTEM */
+    if (attributes & 0x10) item->Attributes |= 0x20000000u; /* SFGAO_FOLDER */
+    copy_path(item->Path, full);
+    *out = item;
+    return S_OK;
+}
+
+__declspec(dllexport) HRESULT SHCreateItemFromParsingName(const WCHAR *name,
+    void *context, const SHELL_GUID *iid, void **out)
+{
+    (void)context;
+    if (!out) return SHELL_E_POINTER;
+    *out = 0;
+    SHELL_ITEM *item = 0;
+    HRESULT status = make_shell_item(name, &item);
+    if (status < 0) return status;
+    status = shell_item_query(item, iid, out);
+    shell_item_release(item);
+    return status;
+}
+
+__declspec(dllexport) void SHAddToRecentDocs(unsigned format, const void *item)
+{
+    /* The shell does not maintain a recent-items folder. */
+    (void)format;
+    (void)item;
+}
