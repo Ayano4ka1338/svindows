@@ -1,0 +1,3 @@
+LIBRARY ACLUI
+EXPORTS
+    EditSecurity @2
