@@ -7,6 +7,7 @@
 void LdrResetProcessContext(void)
 {
     memset(g_loaded, 0, sizeof(g_loaded));
+    LdrpCurrentContext()->ApplicationDirectory[0] = 0;
     g_dynamic_image_next = 0x0000000400000000ULL;
     g_stub_arena = 0;
     g_ldr_depth = 0;
@@ -452,6 +453,15 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
     KeLog("[ldr]  exe base=%p entry_rva=0x%x size=0x%x sections=%u\n",
           (void *)base, nt->OptionalHeader.AddressOfEntryPoint,
           nt->OptionalHeader.SizeOfImage, nt->FileHeader.NumberOfSections);
+
+    char *app_directory = LdrpCurrentContext()->ApplicationDirectory;
+    SIZE_T directory_length = 0;
+    for (SIZE_T i = 0; filename[i]; i++)
+        if (filename[i] == '/' || filename[i] == '\\') directory_length = i + 1;
+    if (directory_length < sizeof(LdrpCurrentContext()->ApplicationDirectory)) {
+        memcpy(app_directory, filename, directory_length);
+        app_directory[directory_length] = 0;
+    }
 
     /* Register the exe itself as the first module (load-order head), before its
      * dependencies get pulled in by import resolution. */

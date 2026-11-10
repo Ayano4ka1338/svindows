@@ -53,6 +53,7 @@ typedef struct _LDR_TLS_MODULE {
 
 struct _LDR_PROCESS_CONTEXT {
     LDR_LOADED Loaded[MAX_LOADED_MODULES];
+    char ApplicationDirectory[260];
     UINT64 DynamicImageNext;
     UINT64 StubArena;
     UINT32 Depth;

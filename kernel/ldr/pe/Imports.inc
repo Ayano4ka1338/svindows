@@ -583,6 +583,19 @@ static UINT64 LdrpLoadModuleWorker(const char *name)
             file_status = FatLoadFile(system_path, &buf, &size, NULL);
         }
     }
+    if (!NT_SUCCESS(file_status) && !has_path_separator) {
+        /* Private dependencies shipped beside the image are considered after
+         * installed system libraries and the legacy volume-root search. */
+        const char *directory = LdrpCurrentContext()->ApplicationDirectory;
+        SIZE_T prefix = strlen(directory);
+        SIZE_T name_length = strlen(name);
+        char path[sizeof(LdrpCurrentContext()->ApplicationDirectory)];
+        if (prefix && name_length < sizeof(path) - prefix) {
+            memcpy(path, directory, prefix);
+            memcpy(path + prefix, name, name_length + 1);
+            file_status = FatLoadFile(path, &buf, &size, NULL);
+        }
+    }
     if (!NT_SUCCESS(file_status)) {
         KeLog("[ldr]  dependency '%s' not found on disk\n", name);
         LdrpCurrentContext()->LoadStatus = STATUS_DLL_NOT_FOUND;
