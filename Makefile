@@ -760,3 +760,9 @@ tree-view-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/TreeViewChecks.c -Wl,--gc-sections -o $(BUILD)/TreeViewChecks
 	$(BUILD)/TreeViewChecks
+
+.PHONY: client-rect-check
+client-rect-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/ClientRectChecks.c -o $(BUILD)/ClientRectChecks
+	$(BUILD)/ClientRectChecks
