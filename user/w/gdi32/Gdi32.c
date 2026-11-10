@@ -545,6 +545,7 @@ GDI32_API int GetDeviceCaps(HDC hdc, int index)
 }
 
 #include "GdiDraw.inc"
+#include "GdiFonts.inc"
 #include "GdiMapping.inc"
 #include "GdiPrint.inc"
 
