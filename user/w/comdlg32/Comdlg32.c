@@ -361,7 +361,7 @@ typedef struct {
     SV_FINDREPLACEW *Request;
     HWND Find, Replace, WholeWord, MatchCase;
     UINT Notification;
-    BOOL Closing;
+    BOOL Ready, Closing;
 } SV_SEARCH_DIALOG;
 
 static LRESULT search_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -378,13 +378,12 @@ static LRESULT search_proc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     }
     if (message == WM_NCDESTROY) {
-        if (!dialog->Closing) {
-            dialog->Closing = TRUE;
-            dialog->Request->Flags &= ~(FIND_NEXT | FIND_REPLACE | FIND_REPLACE_ALL);
-            dialog->Request->Flags |= FIND_DIALOG_TERM;
-            SendMessageW(dialog->Request->Owner, dialog->Notification, 0,
-                         (LPARAM)dialog->Request);
-        }
+        if (!dialog->Ready || dialog->Closing) return 0;
+        dialog->Closing = TRUE;
+        dialog->Request->Flags &= ~(FIND_NEXT | FIND_REPLACE | FIND_REPLACE_ALL);
+        dialog->Request->Flags |= FIND_DIALOG_TERM;
+        SendMessageW(dialog->Request->Owner, dialog->Notification, 0,
+                     (LPARAM)dialog->Request);
         HeapFree(GetProcessHeap(), 0, dialog);
         return 0;
     }
@@ -472,9 +471,11 @@ static HWND search_dialog(SV_FINDREPLACEW *request, BOOL replace)
     path_control(window, L"BUTTON", L"Cancel", WS_TABSTOP, 320, options_y + 33, 102, 26, IDCANCEL);
     if (!state->Find || (replace && !state->Replace)) {
         DestroyWindow(window);
+        HeapFree(GetProcessHeap(), 0, state);
         set_dialog_error(CDERR_DIALOGFAILURE);
         return 0;
     }
+    state->Ready = TRUE;
     SendMessageW(state->WholeWord, BM_SETCHECK, (request->Flags & FIND_WHOLE_WORD) != 0, 0);
     SendMessageW(state->MatchCase, BM_SETCHECK, (request->Flags & FIND_MATCH_CASE) != 0, 0);
     request->Flags |= 1; /* FR_DOWN: search forward. */
