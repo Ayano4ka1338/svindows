@@ -37,6 +37,22 @@ int main(void)
     CHECK(DestroyMenu(root));CHECK(GetMenuItemCount(sub)==-1);
     root=CreateMenu();cursor=(const unsigned char*)resource;
     CHECK(!sv_menu_parse(root,&cursor,(const unsigned char*)resource+3,0));CHECK(DestroyMenu(root));
+    /* Extended menu with one popup, a help ID, and a checked command. */
+    static const DWORD extended[] = {
+        0, 0, 99, 0x00560081, 0, 123,
+        0, 8, 401, 0x00410080, 0
+    };
+    root = CreateMenu();
+    cursor = (const unsigned char *)extended;
+    CHECK(sv_menu_parse_ex(root, &cursor, (const unsigned char *)(extended + 11), 0));
+    sub = GetSubMenu(root, 0);
+    CHECK(sub && GetMenuItemCount(sub) == 1);
+    CHECK(GetMenuItemID(sub, 0) == 401 && (GetMenuState(sub, 401, 0) & 8));
+    CHECK(DestroyMenu(root));
+    root = CreateMenu();
+    cursor = (const unsigned char *)extended;
+    CHECK(!sv_menu_parse_ex(root, &cursor, (const unsigned char *)extended + 22, 0));
+    CHECK(DestroyMenu(root));
     SV_USER_WINDOW_STATE *old=sv_user_state((HWND)0x10011);CHECK(old);
     old->Longs[0]=42;old->Menu=CreateMenu();HMENU stale=old->Menu;
     SV_USER_WINDOW_STATE *fresh=sv_user_state((HWND)0x20011);CHECK(fresh&&fresh->Longs[0]==0);

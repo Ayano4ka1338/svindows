@@ -290,14 +290,65 @@ static BOOL sv_menu_parse(HMENU menu,const unsigned char **cursor,const unsigned
         if(flags&0x80)return TRUE;
     }
 }
+/* MENUEX items carry DWORD type/state/id, a WORD resInfo, a terminated
+ * UTF-16 label, and (for popup items) an aligned help ID before children. */
+static BOOL sv_menu_parse_ex(HMENU menu, const unsigned char **cursor,
+                              const unsigned char *end, UINT depth)
+{
+    if (depth > 16) return FALSE;
+    for (;;) {
+        const unsigned char *p = (const unsigned char *)
+            (((UINT_PTR)*cursor + 3) & ~(UINT_PTR)3);
+        if (p > end || (UINT_PTR)(end - p) < 14) return FALSE;
+        SV_MENU_ITEM pending = {0};
+        pending.Type = *(const DWORD *)p;
+        pending.State = *(const DWORD *)(p + 4);
+        pending.Id = *(const DWORD *)(p + 8);
+        WORD info = *(const WORD *)(p + 12);
+        p += 14;
+        const WCHAR *text = (const WCHAR *)p;
+        do {
+            if (p + 2 > end) return FALSE;
+            p += 2;
+        } while (*(const WORD *)(p - 2));
+        sv_menu_text(pending.Text, text);
+        if (info & 1) {
+            p = (const unsigned char *)(((UINT_PTR)p + 3) & ~(UINT_PTR)3);
+            if (p > end || (UINT_PTR)(end - p) < 4) return FALSE;
+            p += 4; /* Popup help ID. */
+            pending.Sub = CreatePopupMenu();
+            if (!pending.Sub) return FALSE;
+            if (!sv_menu_parse_ex(pending.Sub, &p, end, depth + 1)) {
+                DestroyMenu(pending.Sub);
+                return FALSE;
+            }
+        }
+        SV_MENU_ITEM *item = sv_menu_insert(sv_menu(menu), SV_MENU_ITEMS);
+        if (!item) {
+            if (pending.Sub) DestroyMenu(pending.Sub);
+            return FALSE;
+        }
+        *item = pending;
+        *cursor = p;
+        if (info & 0x80) return TRUE;
+    }
+}
+
 USER32_API HMENU LoadMenuW(HINSTANCE instance,const WCHAR *name)
 {
     HANDLE r=FindResourceW(instance,name,MAKEINTRESOURCEW(4));if(!r)return 0;
     const unsigned char *data=LockResource(LoadResource(instance,r));DWORD size=SizeofResource(instance,r);
-    if(!data||size<4||*(const WORD*)data!=0)return 0;
-    UINT start=4+*(const WORD*)(data+2);if(start>size)return 0;
-    HMENU menu=CreateMenu();if(!menu)return 0;
-    const unsigned char *p=data+start;if(!sv_menu_parse(menu,&p,data+size,0)){DestroyMenu(menu);return 0;}
+    if (!data || size < 4) return 0;
+    WORD version = *(const WORD *)data;
+    if (version > 1) return 0;
+    UINT start = 4 + *(const WORD *)(data + 2);
+    if (start > size || (version == 1 && start < 8)) return 0;
+    HMENU menu = CreateMenu();
+    if (!menu) return 0;
+    const unsigned char *p = data + start;
+    BOOL parsed = version ? sv_menu_parse_ex(menu, &p, data + size, 0) :
+                            sv_menu_parse(menu, &p, data + size, 0);
+    if (!parsed) { DestroyMenu(menu); return 0; }
     return menu;
 }
 USER32_API HMENU GetMenu(HWND hwnd){return (HMENU)(UINT_PTR)NtUserMenuBar(hwnd,0,0,0,0);}
