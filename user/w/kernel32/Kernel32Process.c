@@ -32,6 +32,7 @@ extern long NtDuplicateObject(HANDLE source_process, HANDLE source_handle,
                               DWORD options);
 extern long NtOpenProcess(HANDLE *process, DWORD access, void *attributes,
                           const void *client_id);
+extern BOOL CloseHandle(HANDLE handle);
 extern long SvNtQueryThreadExitStatus(HANDLE thread, DWORD *exit_status);
 extern long SvNtReadProcessMemory(HANDLE process, const void *source,
                                   void *destination, SIZE_T size,
@@ -143,6 +144,18 @@ __declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit,
         return 0;
     }
     return process;
+}
+
+__declspec(dllexport) BOOL ProcessIdToSessionId(DWORD process_id,
+                                                DWORD *session_id)
+{
+    if (!process_id || !session_id) { SetLastError(87); return 0; }
+    HANDLE process = OpenProcess(0x1000u, 0, process_id);
+    if (!process) return 0;
+    CloseHandle(process);
+    *session_id = 0; /* all processes use the single interactive session */
+    SetLastError(0);
+    return 1;
 }
 
 /* Private process information class; the kernel owns these values so they
