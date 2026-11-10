@@ -740,9 +740,11 @@ user-menu-check:
 	clang -fdeclspec -fshort-wchar -Wno-ignored-attributes -ffunction-sections -fdata-sections $(NOTEPAD_INC) tools/checks/UserMenuChecks.c -Wl,--gc-sections -o $(BUILD)/UserMenuChecks
 	$(BUILD)/UserMenuChecks
 
+# Keep GCC from packing unrelated syscall function pointers into shared
+# vector constants, which prevents dead-section removal in this host harness.
 win32k-check:
 	mkdir -p $(BUILD)
-	cc -O2 -g -ffunction-sections -fdata-sections -Wno-multichar -idirafter kernel/include -Ikernel/net/lwip -I$(LWIP_ROOT)/include tools/checks/Win32kChecks.c -Wl,--gc-sections -o $(BUILD)/Win32kChecks
+	cc -O2 -g -fno-tree-slp-vectorize -ffunction-sections -fdata-sections -Wno-multichar -idirafter kernel/include -Ikernel/net/lwip -I$(LWIP_ROOT)/include tools/checks/Win32kChecks.c -Wl,--gc-sections -o $(BUILD)/Win32kChecks
 	$(BUILD)/Win32kChecks
 
 .PHONY: common-controls-check

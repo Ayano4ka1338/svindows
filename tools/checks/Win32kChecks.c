@@ -15,6 +15,17 @@ static void HostIrqRestore(UINT64 flags) { (void)flags; }
 #include "../../kernel/win32k/Gdiobj.c"
 #include "../../kernel/ob/ObHandle.c"
 
+static UINT8 x11_requests[16384];
+static SIZE_T x11_length;
+UINT64 LinuxLocalTransfer(LINUX_SOCKET *socket, BOOLEAN write, void *data,
+                          UINT64 length, UINT64 flags)
+{
+    (void)socket; (void)flags;
+    assert(write && x11_length+length<=sizeof(x11_requests));
+    memcpy(x11_requests+x11_length,data,length); x11_length+=length;
+    return length;
+}
+
 static KPROCESS process_a, process_b;
 static KTHREAD thread_a, thread_b;
 static PKTHREAD current;
@@ -565,6 +576,33 @@ static void check_retained_window_painting(void)
     assert(W32kComposeWindow((UINT16)popup, before, STRIDE));
     assert(before[75 * STRIDE + 60] == 0);
     puts("PASS independent Xorg window rasters exclude unrelated overlapping windows");
+    W32K_XORG *export = calloc(1,sizeof(*export)); assert(export);
+    export->Socket=(LINUX_SOCKET *)1; export->Mask=0xffff; export->Depth=24;
+    export->Root=1; export->Visual=2; export->Utf8=300; export->NetName=301;
+    x11_length=0;
+    assert(W32kXCreateWindow(export,&export->Windows[slot],&g_w32k[slot]));
+    assert(x11_requests[0]==1 && W32kXGet32(x11_requests+32)==0);
+    WCHAR unicode_title[]={'N','o','t','e',0x43f,0x430,0x434,0};
+    W32kScreenSetTitle(slot,unicode_title);
+    x11_length=0;
+    assert(W32kXSetTitle(export,&export->Windows[slot],&g_w32k[slot]));
+    assert(W32kXGet32(x11_requests+20)==10);
+    assert(!memcmp(x11_requests+24,"Note\xd0\xbf\xd0\xb0\xd0\xb4",10));
+    x11_length=0;
+    assert(W32kXConfigureWindow(export,&export->Windows[slot],&g_w32k[slot]));
+    assert(x11_length==20 && W32kXGet32(x11_requests+12)==(UINT32)cw);
+    assert(W32kXGet32(x11_requests+16)==(UINT32)ch);
+    UINT16 popup_slot=(UINT16)popup;
+    g_w32k[popup_slot].Style=WS_POPUP;
+    W32kScreenSetParent(popup_slot,slot);
+    export->Windows[slot].X+=35; export->Windows[slot].Y+=45;
+    x11_length=0;
+    assert(W32kXCreateWindow(export,&export->Windows[popup_slot],&g_w32k[popup_slot]));
+    assert(W32kXGet32(x11_requests+32)==1);
+    assert(export->Windows[popup_slot].X==export->Windows[slot].X+
+        export->Windows[popup_slot].SourceX-export->Windows[slot].SourceX);
+    free(export);
+    puts("PASS X11 managed and popup attributes, UTF-8 titles, owner placement and 32-bit resize values");
     W32kShowWindow(popup, 0);
     assert(screen[75 * STRIDE + 60] == 0xFFFFFF);
     check_damage_matches_full();
