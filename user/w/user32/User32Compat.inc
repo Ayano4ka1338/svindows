@@ -23,7 +23,7 @@ typedef struct {
     WCHAR ClassName[96], Title[160];
     DWORD Style, ExStyle, Id;
     HINSTANCE Instance;
-    HMENU Menu;
+    HMENU Menu, SystemMenu;
     LONG_PTR Longs[8], ExtraLongs[8];
     WORD ClassWords[8];
     BOOL Enabled, Used;

@@ -69,6 +69,38 @@ USER32_API BOOL AppendMenuW(HMENU menu,UINT flags,UINT_PTR id,const WCHAR *text)
     else sv_menu_text(item->Text,text);
     return TRUE;
 }
+USER32_API HMENU GetSystemMenu(HWND hwnd, BOOL revert)
+{
+    RECT bounds;
+    if (!GetWindowRect(hwnd, &bounds)) return 0;
+    SV_USER_WINDOW_STATE *window = sv_user_state(hwnd);
+    if (!window || (window->Style & WS_CHILD) || !(window->Style & WS_SYSMENU))
+        return 0;
+
+    if (revert) {
+        if (window->SystemMenu) DestroyMenu(window->SystemMenu);
+        window->SystemMenu = 0;
+        return 0;
+    }
+    if (sv_menu(window->SystemMenu)) return window->SystemMenu;
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return 0;
+    BOOL ok = AppendMenuW(menu, 0, 0xf120, L"&Restore") &&
+              AppendMenuW(menu, window->Style & WS_MINIMIZEBOX ? 0 : MF_DISABLED_,
+                          0xf020, L"Mi&nimize") &&
+              AppendMenuW(menu, window->Style & WS_MAXIMIZEBOX ? 0 : MF_DISABLED_,
+                          0xf030, L"Ma&ximize") &&
+              AppendMenuW(menu, MF_SEPARATOR_, 0, 0) &&
+              AppendMenuW(menu, 0, SC_CLOSE, L"&Close");
+    if (!ok) {
+        DestroyMenu(menu);
+        return 0;
+    }
+    window->SystemMenu = menu;
+    return menu;
+}
+
 static BOOL sv_menu_apply(SV_MENU_ITEM *item,const SV_MENU_INFO *info)
 {
     if(!item||!info||info->cbSize<sizeof(SV_MENU_INFO))return FALSE;
@@ -309,7 +341,11 @@ USER32_API BOOL TrackPopupMenu(HMENU menu,UINT flags,int x,int y,int reserved,HW
     if(old_focus)SetFocus(old_focus);if(old_capture)SetCapture(old_capture);
     SendMessageW(owner,0x125,(WPARAM)menu,0);SendMessageW(owner,0x212,1,0);
     if(flags&0x100)return (BOOL)run.Command;
-    if(run.Command&&!(flags&0x80))PostMessageW(owner,WM_COMMAND,run.Command,0);
+    if (run.Command && !(flags & 0x80)) {
+        SV_USER_WINDOW_STATE *window = sv_user_state(owner);
+        UINT message = window && window->SystemMenu == menu ? WM_SYSCOMMAND : WM_COMMAND;
+        PostMessageW(owner, message, run.Command, 0);
+    }
     return run.Command!=0;
 }
 static BOOL sv_user_menu_command(HWND hwnd,WPARAM wp,LPARAM lp)
@@ -336,8 +372,10 @@ static void sv_user_forget_window(HWND hwnd)
 {
     for(UINT i=0;i<SV_USER_WINDOWS;i++)if(g_sv_windows[i].Used&&g_sv_windows[i].Window==hwnd){
         HMENU owned=(g_sv_windows[i].Style&WS_CHILD)?0:g_sv_windows[i].Menu;
+        HMENU system = g_sv_windows[i].SystemMenu;
         g_sv_windows[i]=(SV_USER_WINDOW_STATE){0};
         if(sv_menu(owned))DestroyMenu(owned);
+        if(sv_menu(system))DestroyMenu(system);
         return;
     }
 }
