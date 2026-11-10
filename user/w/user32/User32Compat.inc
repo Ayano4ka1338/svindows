@@ -265,6 +265,35 @@ __declspec(dllimport) UINT64 NtUserMapWindowPoints(HWND,HWND,POINT*,UINT);
 USER32_API int MapWindowPoints(HWND from, HWND to, POINT *points, UINT count)
 { return (int)NtUserMapWindowPoints(from,to,points,count); }
 
+__declspec(dllimport) UINT64 SvNtUserGetCursorPos(POINT *point);
+__declspec(dllimport) UINT64 SvNtUserChildWindowFromPoint(HWND parent, LONG x, LONG y);
+
+USER32_API BOOL GetCursorPos(POINT *point)
+{
+    return SvNtUserGetCursorPos(point) != 0;
+}
+
+USER32_API BOOL ScreenToClient(HWND hwnd, POINT *point)
+{
+    RECT client;
+    if (!point || !GetClientRect(hwnd, &client)) return FALSE;
+    MapWindowPoints(0, hwnd, point, 1);
+    return TRUE;
+}
+
+USER32_API BOOL ClientToScreen(HWND hwnd, POINT *point)
+{
+    RECT client;
+    if (!point || !GetClientRect(hwnd, &client)) return FALSE;
+    MapWindowPoints(hwnd, 0, point, 1);
+    return TRUE;
+}
+
+USER32_API HWND ChildWindowFromPoint(HWND parent, POINT point)
+{
+    return (HWND)(UINT_PTR)SvNtUserChildWindowFromPoint(parent, point.x, point.y);
+}
+
 typedef struct { DWORD Size; RECT Monitor, Work; DWORD Flags; } SV_MONITORINFO;
 USER32_API HANDLE MonitorFromWindow(HWND hwnd, DWORD flags)
 { (void)flags;return sv_user_state(hwnd)?(HANDLE)1:0; }

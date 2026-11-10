@@ -1216,6 +1216,8 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F09] = NtRenameKey;
     KiServiceTable[0x1F0A] = NtAdjustPrivilegesToken;
     KiServiceTable[0x1F0B] = SvNtGdiCreateDisplayDC;
+    KiServiceTable[0x1F0C] = SvNtUserGetCursorPos;
+    KiServiceTable[0x1F0D] = SvNtUserChildWindowFromPoint;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

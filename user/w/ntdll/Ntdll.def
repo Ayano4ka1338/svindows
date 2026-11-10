@@ -130,6 +130,8 @@ EXPORTS
     NtUserSetCursor
     NtUserGetWindowRect
     NtUserGetClientRect
+    SvNtUserGetCursorPos
+    SvNtUserChildWindowFromPoint
     NtUserSetFocus
     NtUserGetFocus
     NtUserSetWindowText

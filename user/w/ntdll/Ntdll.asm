@@ -413,6 +413,8 @@ SYSCALL_STUB NtQueryKey,             0x10D
 SYSCALL_STUB NtRenameKey,            0x1F09
 SYSCALL_STUB NtAdjustPrivilegesToken,0x1F0A
 SYSCALL_STUB SvNtGdiCreateDisplayDC,0x1F0B
+SYSCALL_STUB SvNtUserGetCursorPos,   0x1F0C
+SYSCALL_STUB SvNtUserChildWindowFromPoint, 0x1F0D
 SYSCALL_STUB NtOpenThread,           0x10E
 SYSCALL_STUB NtOpenEvent,            0x10F
 SYSCALL_STUB NtCreateJobObject,      0x110

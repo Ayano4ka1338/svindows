@@ -1342,6 +1342,44 @@ static UINT64 NtUserMapWindowPoints(UINT64 *a)
     return (UINT32)((UINT16)dx|((UINT32)(UINT16)dy<<16));
 }
 
+static UINT64 SvNtUserGetCursorPos(UINT64 *a)
+{
+    INT32 *point = (INT32 *)a[0];
+    if (!MmProbeForWrite(a[0], 2 * sizeof(*point))) return 0;
+    UINT64 flags = KiIrqSave();
+    INT32 x = g_w32k_pointer_x, y = g_w32k_pointer_y;
+    KiIrqRestore(flags);
+    point[0] = x;
+    point[1] = y;
+    return 1;
+}
+
+static UINT64 SvNtUserChildWindowFromPoint(UINT64 *a)
+{
+    if (!KiUserWindowValid(a[0], TRUE)) return 0;
+    UINT16 parent = (UINT16)a[0];
+    INT32 x = (INT32)a[1], y = (INT32)a[2];
+    UINT64 flags = KiIrqSave();
+    INT32 sx, sy, width, height;
+    W32kClientOrigin(parent, &sx, &sy, &width, &height);
+    UINT64 result = 0;
+    if (x >= 0 && y >= 0 && x < width && y < height) {
+        result = a[0];
+        for (UINT16 slot = g_w32k_top; slot; slot = g_w32k[slot].ZPrev) {
+            const W32K_WINDOW_STATE *child = &g_w32k[slot];
+            if (child->Parent != parent || child->Kind != W32K_KIND_CHILD)
+                continue;
+            INT64 dx = (INT64)x - child->X, dy = (INT64)y - child->Y;
+            if (dx >= 0 && dy >= 0 && dx < child->W && dy < child->H) {
+                result = KiUserWindowHandle(slot);
+                break;
+            }
+        }
+    }
+    KiIrqRestore(flags);
+    return result;
+}
+
 static UINT64 NtUserGetClientRect(UINT64 *a)
 {
     if (!KiUserWindowValid(a[0], TRUE))
