@@ -616,6 +616,28 @@ static UINT64 NtDelayExecution(UINT64 *a)
 #include "SystemCpuInformation.inc"
 #include "SystemPerformance.inc"
 
+static NTSTATUS KiQueryTimeOfDay(void *buffer, ULONG length, ULONG *returned)
+{
+    struct {
+        UINT64 BootTime, CurrentTime;
+        INT64 TimeZoneBias;
+        ULONG TimeZoneId, Reserved;
+        UINT64 BootTimeBias, SleepTimeBias;
+    } data = {0};
+    _Static_assert(sizeof(data) == 48, "Win7 time-of-day information ABI");
+    if (returned) {
+        if (!MmProbeForWrite((UINT64)returned, sizeof(*returned)))
+            return STATUS_ACCESS_VIOLATION;
+        *returned = sizeof(data);
+    }
+    if (length < sizeof(data)) return STATUS_INFO_LENGTH_MISMATCH;
+    if (!MmProbeForWrite((UINT64)buffer, sizeof(data))) return STATUS_ACCESS_VIOLATION;
+    data.BootTime = KeQueryBootTimeFileTime();
+    data.CurrentTime = KeQuerySystemTimeFileTime();
+    memcpy(buffer, &data, sizeof(data));
+    return STATUS_SUCCESS;
+}
+
 static UINT64 NtQuerySystemInformation(UINT64 *a)
 {
     typedef struct _SYSTEM_BASIC_INFORMATION_LOCAL {
@@ -650,6 +672,8 @@ static UINT64 NtQuerySystemInformation(UINT64 *a)
         return (UINT64)KiQueryProcessorPerformance((void *)buffer,length,return_length);
     if(info_class==2) /* SystemPerformanceInformation */
         return (UINT64)KiQuerySystemPerformance((void *)buffer,length,return_length);
+    if (info_class == 3) /* SystemTimeOfDayInformation */
+        return (UINT64)KiQueryTimeOfDay((void *)buffer, length, return_length);
 
     if (info_class == SystemBasicInformation) {
         UINT32 required = sizeof(SYSTEM_BASIC_INFORMATION_LOCAL);

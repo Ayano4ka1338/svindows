@@ -134,3 +134,8 @@ UINT64 KeQuerySystemTimeFileTime(void)
 {
     return g_boot_filetime + KeGetTickCount() * HUNDRED_NS_PER_TICK;
 }
+
+UINT64 KeQueryBootTimeFileTime(void)
+{
+    return g_boot_filetime;
+}

@@ -560,6 +560,7 @@ void      KiUserQueueMouse(INT32 x, INT32 y, UINT8 buttons);
 void      KeInitializeSharedData(void);
 void      KeUpdateSharedData(UINT64 ticks);
 UINT64    KeQuerySystemTimeFileTime(void);
+UINT64    KeQueryBootTimeFileTime(void);
 
 /* Scheduler hooks used by the dispatcher (interrupts must be disabled). */
 void      KiReadyThread(PKTHREAD thread);   /* move a waiting thread to Ready */
