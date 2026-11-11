@@ -878,3 +878,9 @@ resource-range-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined tools/checks/ResourceRangeChecks.c -o $(BUILD)/ResourceRangeChecks
 	$(BUILD)/ResourceRangeChecks
+
+.PHONY: status-control-check
+status-control-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/StatusChecks.c -Wl,--gc-sections -o $(BUILD)/StatusChecks
+	$(BUILD)/StatusChecks
