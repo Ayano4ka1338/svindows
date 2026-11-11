@@ -41,6 +41,7 @@ struct _KTHREAD;
 void W32kCleanupProcessGdi(struct _KPROCESS *process);
 ULONG W32kCountProcessGdiObjects(struct _KPROCESS *process);
 void W32kCleanupProcessUser(struct _KPROCESS *process);
+void W32kPollUserTimers(UINT64 now);
 void W32kCleanupThreadUser(struct _KTHREAD *thread);
 void W32kCleanupWindowDc(struct _KPROCESS *process, UINT64 hwnd);
 BOOLEAN W32kClearSharedHandle(struct _KPROCESS *process, BOOLEAN gdi, UINT16 index);

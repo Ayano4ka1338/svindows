@@ -1006,6 +1006,9 @@ static void KiUserDropOneWindow(UINT16 slot)
             write = (write + 1) % USER_MESSAGE_QUEUE_CAPACITY;
         }
         queue->Head = write;
+        for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i)
+            if (queue->Timers[i].Window == handle)
+                queue->Timers[i] = (USER_WINDOW_TIMER){0};
         KiUserSyncInputEvent(queue);
     }
 }

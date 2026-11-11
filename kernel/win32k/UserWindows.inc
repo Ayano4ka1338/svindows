@@ -637,6 +637,21 @@ static UINT64 NtUserDispatchMessage(UINT64 *a)
     const USER_MSG_LOCAL *msg = (const USER_MSG_LOCAL *)a[0];
     if (!msg || !MmProbeForRead((UINT64)msg, sizeof(*msg)))
         return 0;
+    if (msg->Message == WM_TIMER_ && msg->LParam) {
+        PKTHREAD thread = KeGetCurrentThread();
+        USER_MSG_QUEUE *queue = KiUserQueueForThread(thread ? thread->ThreadId : 0);
+        if (!queue) return 0;
+        for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
+            const USER_WINDOW_TIMER *timer = &queue->Timers[i];
+            if (timer->Id && timer->Id == msg->WParam && timer->Window == msg->Hwnd &&
+                timer->Callback == (UINT64)msg->LParam) {
+                KiStartUserCallback(timer->Callback, msg->Hwnd, WM_TIMER_, msg->WParam,
+                    msg->Time, CB_CONT_SIMPLE, msg->Hwnd, WM_TIMER_, msg->Time);
+                break;
+            }
+        }
+        return 0;
+    }
     /* A thread message (hwnd == 0) has no window procedure to run. */
     if (!msg->Hwnd)
         return 0;
@@ -657,8 +672,72 @@ static UINT64 NtUserTranslateMessage(UINT64 *a)
         msg->Private & 0xffff, msg->LParam, msg->PtX, msg->PtY, 0, TRUE);
 }
 static UINT64 NtUserTranslateAccelerator(UINT64 *a) { return 0; }
-static UINT64 NtUserSetTimer(UINT64 *a) { (void)a; return 0; }
-static UINT64 NtUserKillTimer(UINT64 *a) { (void)a; return 0; }
+static USER_MSG_QUEUE *KiUserTimerQueue(UINT64 hwnd)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || (hwnd && (!KiUserWindowValid(hwnd, TRUE) ||
+                             KiUserWindowOwner(hwnd) != thread->ThreadId)))
+        return NULL;
+    return KiUserQueueForThread(thread->ThreadId);
+}
+
+static UINT64 NtUserSetTimer(UINT64 *a)
+{
+    UINT64 hwnd = a[0], id = a[1], callback = a[3];
+    if (callback && !MmProbeForRead(callback, 1)) return 0;
+    UINT64 ms = (UINT32)a[2];
+    if (ms < 10) ms = 10;
+    if (ms > 0x7fffffff) ms = 0x7fffffff;
+    UINT64 period = (ms + 9) / 10;
+    UINT64 flags = KiIrqSave();
+    USER_MSG_QUEUE *queue = KiUserTimerQueue(hwnd);
+    USER_WINDOW_TIMER *entry = NULL, *vacant = NULL;
+    if (queue) {
+        for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
+            USER_WINDOW_TIMER *timer = &queue->Timers[i];
+            if (!timer->Id && !vacant) vacant = timer;
+            if (timer->Id && timer->Id == id && timer->Window == hwnd) entry = timer;
+        }
+    }
+    if (!entry && vacant) {
+        entry = vacant;
+        if (!hwnd || !id) {
+            /* Generated ids are unique for this hwnd in the owning queue. */
+            for (id = 1; ; ++id) {
+                BOOLEAN used = FALSE;
+                for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i)
+                    if (queue->Timers[i].Id == id && queue->Timers[i].Window == hwnd) used = TRUE;
+                if (!used) break;
+            }
+        }
+    }
+    if (entry) {
+        *entry = (USER_WINDOW_TIMER){id, hwnd, callback, KeGetTickCount() + period, period};
+        KiUserSyncInputEvent(queue);
+    }
+    KiIrqRestore(flags);
+    return entry ? id : 0;
+}
+
+static UINT64 NtUserKillTimer(UINT64 *a)
+{
+    UINT64 flags = KiIrqSave();
+    USER_MSG_QUEUE *queue = KiUserTimerQueue(a[0]);
+    BOOLEAN found = FALSE;
+    if (queue && a[1]) {
+        for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
+            USER_WINDOW_TIMER *timer = &queue->Timers[i];
+            if (timer->Id == a[1] && timer->Window == a[0]) {
+                *timer = (USER_WINDOW_TIMER){0};
+                found = TRUE;
+                break;
+            }
+        }
+        if (found) KiUserSyncInputEvent(queue);
+    }
+    KiIrqRestore(flags);
+    return found;
+}
 static UINT64 NtUserSetActiveWindow(UINT64 *a)
 {
     if (a[0] && !KiUserWindowValid(a[0], TRUE))

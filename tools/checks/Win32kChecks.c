@@ -47,7 +47,8 @@ GFX_FRAMEBUFFER GfxFramebuffer;
 UINT64 NtUserGetSystemMetrics(UINT64 *args) { (void)args; return 0; }
 UINT64 NtUserGetSysColor(UINT64 *args) { (void)args; return 0; }
 PKTHREAD KeGetCurrentThread(void) { return current; }
-UINT64 KeGetTickCount(void) { return 0; }
+static UINT64 test_tick;
+UINT64 KeGetTickCount(void) { return test_tick; }
 void KeYield(void) { abort(); }
 int KeLog(const char *fmt, ...) { (void)fmt; return 0; }
 PVOID ExAllocatePoolWithTag(POOL_TYPE type, SIZE_T size, ULONG tag)
@@ -840,6 +841,32 @@ int main(void)
     HANDLE repaired = (HANDLE)KiUserGetInputEvent();
     assert(repaired && repaired != replacement_handle);
     assert(ObHeaderFromObject(retained)->PointerCount == 2);
+    assert(KiUserTakeMessage(&msg, TRUE) && msg.Message == 0x234);
+    UINT64 timer[] = {0, 0, 25, 0};
+    UINT64 timer_id = NtUserSetTimer(timer);
+    assert(timer_id && !KiUserTakeMessage(&msg, TRUE));
+    test_tick = 2;
+    W32kPollUserTimers(test_tick);
+    assert(!retained->Header.SignalState);
+    test_tick = 3;
+    W32kPollUserTimers(test_tick);
+    assert(retained->Header.SignalState);
+    assert(KiUserEnqueueThreadMessage(thread_a.ThreadId, 0x345, 0, 0));
+    assert(KiUserTakeMessage(&msg, TRUE) && msg.Message == 0x345);
+    current = &thread_b;
+    assert(!KiUserTakeMessage(&msg, TRUE));
+    current = &thread_a;
+    assert(KiUserTakeMessage(&msg, FALSE) && msg.Message == WM_TIMER_ && msg.WParam == timer_id);
+    assert(KiUserTakeMessage(&msg, TRUE) && msg.Message == WM_TIMER_ && msg.Time == 30);
+    assert(!retained->Header.SignalState && !KiUserTakeMessage(&msg, TRUE));
+    test_tick = 20;
+    assert(KiUserTakeMessage(&msg, TRUE) && msg.Message == WM_TIMER_);
+    assert(!KiUserTakeMessage(&msg, TRUE));
+    timer[1] = timer_id;
+    assert(NtUserKillTimer(timer) && !NtUserKillTimer(timer));
+    test_tick = 40;
+    assert(!KiUserTakeMessage(&msg, TRUE));
+    puts("PASS low-priority WM_TIMER, queue isolation, no backlog, input-event wake and cancellation");
     current = &thread_b;
     W32kCleanupThreadUser(&thread_a);
     current = &thread_a;

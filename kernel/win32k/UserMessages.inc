@@ -31,6 +31,11 @@ typedef struct _USER_MSG_LOCAL {
  * thread's GetMessage. Threads are few, so queues are keyed by thread id.
  */
 #define USER_MAX_THREAD_QUEUES 64
+#define USER_MAX_QUEUE_TIMERS 16
+#define WM_TIMER_ 0x0113
+typedef struct {
+    UINT64 Id, Window, Callback, DueTick, Period;
+} USER_WINDOW_TIMER;
 
 typedef struct _USER_MSG_QUEUE {
     UINT32 ThreadId;
@@ -46,6 +51,7 @@ typedef struct _USER_MSG_QUEUE {
      * thread asks for it, signaled while the queue is non-empty. */
     PKEVENT InputEvent;
     HANDLE  InputEventHandle;
+    USER_WINDOW_TIMER Timers[USER_MAX_QUEUE_TIMERS];
 } USER_MSG_QUEUE;
 
 static USER_MSG_QUEUE g_user_thread_queues[USER_MAX_THREAD_QUEUES];
@@ -71,6 +77,17 @@ static USER_MSG_QUEUE *KiUserQueueForThread(UINT32 thread_id)
     return NULL;
 }
 
+static USER_WINDOW_TIMER *KiUserDueTimer(USER_MSG_QUEUE *queue, UINT64 now)
+{
+    USER_WINDOW_TIMER *due = NULL;
+    for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
+        USER_WINDOW_TIMER *timer = &queue->Timers[i];
+        if (timer->Id && timer->DueTick <= now && (!due || timer->DueTick < due->DueTick))
+            due = timer;
+    }
+    return due;
+}
+
 /* Keep a thread's input event in step with its queue. Called with the queue
  * already updated, at DISPATCH_LEVEL or below (never in a hardware ISR).
  * KeSetEvent only readies threads. A pending update region counts as work: the
@@ -83,10 +100,24 @@ static void KiUserSyncInputEvent(USER_MSG_QUEUE *queue)
     if (!queue->InputEvent)
         return;
     UINT32 tid = queue->ThreadId;
-    if (queue->Head != queue->Tail || KiUserNextUpdateWindow(tid))
+    if (queue->Head != queue->Tail || KiUserNextUpdateWindow(tid) ||
+        KiUserDueTimer(queue, KeGetTickCount()))
         KeSetEvent(queue->InputEvent);
     else
         KeResetEvent(queue->InputEvent);
+}
+
+/* Low-priority timer work is synthesized at retrieval. The clock DPC only
+ * wakes message-aware waiters and never fills the posted-message ring. */
+void W32kPollUserTimers(UINT64 now)
+{
+    UINT64 flags = KiIrqSave();
+    for (UINT32 i = 0; i < USER_MAX_THREAD_QUEUES; ++i) {
+        USER_MSG_QUEUE *queue = &g_user_thread_queues[i];
+        if (queue->ThreadId && queue->InputEvent && KiUserDueTimer(queue, now))
+            KeSetEvent(queue->InputEvent);
+    }
+    KiIrqRestore(flags);
 }
 
 /* Owner thread of each created window slot: input goes to the queue of the
@@ -295,8 +326,19 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
          * and always after everything that was actually posted. */
         UINT16 slot = KiUserNextUpdateWindow(thread ? thread->ThreadId : 0);
         if (!slot) {
+            UINT64 now = KeGetTickCount();
+            USER_WINDOW_TIMER *timer = KiUserDueTimer(queue, now);
+            if (timer) {
+                *out = (USER_MSG_LOCAL){.Hwnd = timer->Window, .Message = WM_TIMER_,
+                    .WParam = timer->Id, .LParam = (INT64)timer->Callback,
+                    .Time = (UINT32)(now * 10)};
+                if (remove) {
+                    timer->DueTick = now + timer->Period;
+                    KiUserSyncInputEvent(queue);
+                }
+            }
             KiIrqRestore(flags);
-            return FALSE;
+            return timer != NULL;
         }
         memset(out, 0, sizeof(*out));
         out->Hwnd = KiUserWindowHandle(slot);

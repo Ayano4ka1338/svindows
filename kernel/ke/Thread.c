@@ -817,6 +817,7 @@ static void KepClockDpc(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)
     UINT64 now = KeGetTickCount();
     KeUpdateSharedData(now);
     KiExpireTimers(now);
+    W32kPollUserTimers(now);
 
     /* Dispatcher timeouts are absolute tick deadlines stored on blocked
      * threads. The process list is stable while interrupts are disabled. */
