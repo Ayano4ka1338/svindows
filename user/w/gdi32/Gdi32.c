@@ -256,6 +256,36 @@ typedef struct {
 } SV_BITMAPINFOHEADER;
 typedef struct { SV_BITMAPINFOHEADER Header; DWORD Colors[1]; } SV_BITMAPINFO;
 
+GDI32_API int SetDIBits(HDC dc, HBITMAP bitmap, UINT start_scan,
+                        UINT scan_lines, const void *bits,
+                        const void *bitmap_info, UINT usage)
+{
+    (void)dc;
+    (void)usage;
+    BITMAP_DIMENSIONS *entry = bitmap_dimensions(bitmap);
+    const SV_BITMAPINFO *info = (const SV_BITMAPINFO *)bitmap_info;
+    if (!entry || !entry->Bits || !bits || !info ||
+        info->Header.BitsPixel != 32 || info->Header.Compression != 0 ||
+        info->Header.Width != entry->Width ||
+        info->Header.Height != entry->Height || start_scan >= (UINT)entry->Height)
+        return 0;
+
+    UINT rows = scan_lines;
+    if (rows > (UINT)entry->Height - start_scan)
+        rows = (UINT)entry->Height - start_scan;
+    UINT stride = (UINT)entry->Width * sizeof(UINT32);
+    const UINT8 *source = (const UINT8 *)bits;
+    UINT8 *destination = (UINT8 *)entry->Bits;
+    for (UINT row = 0; row < rows; ++row) {
+        UINT target_row = info->Header.Height > 0
+            ? (UINT)entry->Height - 1 - (start_scan + row)
+            : start_scan + row;
+        memcpy(destination + (ULONG_PTR)target_row * stride,
+               source + (ULONG_PTR)row * stride, stride);
+    }
+    return (int)rows;
+}
+
 GDI32_API HBITMAP CreateDIBSection(HDC dc, const void *info, UINT usage,
                                     void **bits, HANDLE section, DWORD offset)
 {

@@ -191,6 +191,9 @@ GDI32_API HBITMAP CreateCompatibleBitmap(HDC reference, int width, int height);
 GDI32_API HBITMAP CreateBitmap(int width, int height, UINT planes, UINT bits_per_pixel,
                                const void *bits);
 GDI32_API int     GetObjectW(HGDIOBJ object, int bytes, LPVOID out);
+GDI32_API int     SetDIBits(HDC dc, HBITMAP bitmap, UINT start_scan,
+                            UINT scan_lines, const void *bits,
+                            const void *info, UINT usage);
 GDI32_API HBITMAP CreateDIBSection(HDC dc, const void *bitmap_info,
                                    UINT usage, void **bits, HANDLE section,
                                    DWORD offset);
