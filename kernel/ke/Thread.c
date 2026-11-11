@@ -81,19 +81,7 @@ static BOOLEAN KepThreadCurrentOnAnyProcessor(PKTHREAD thread)
     return FALSE;
 }
 
-static POBJECT KepPublishThreadTerminationWithSchedulerLock(PKTHREAD thread)
-{
-    thread->State = ThreadStateTerminated;
-    if (!thread->TerminationObject) return NULL;
-    PDISPATCHER_HEADER termination = thread->TerminationObject;
-    typedef struct { DISPATCHER_HEADER Header; PKTHREAD Thread; NTSTATUS Exit; }
-        THREAD_TERMINATION_RECORD;
-    ((THREAD_TERMINATION_RECORD *)termination)->Exit = thread->ExitStatus;
-    termination->SignalState = 1;
-    KiSignalObjectWithSchedulerLock(termination);
-    thread->TerminationObject = NULL;
-    return (POBJECT)termination;
-}
+#include "ThreadTermination.inc"
 
 /* Process handles are waitable too. Wake their waiters only after the exit
  * status and all sibling-thread termination state have been published. */
