@@ -66,6 +66,8 @@ def qmp_screendump(path, screenshot, timeout, keyboard_probe=False):
                 {"type": "btn", "data": {"down": down,
                                           "button": "left"}},
             ]}})
+        # QMP acknowledges injection before TWM has assigned keyboard focus.
+        time.sleep(0.25)
         for key in ("x", "e", "y", "e", "s", "ret"):
             for down in (True, False):
                 run({"execute": "input-send-event", "arguments": {
