@@ -127,6 +127,7 @@ OLEAUT32   := $(BUILD)/oleaut32.dll
 RPCRT4     := $(BUILD)/rpcrt4.dll
 WINMM      := $(BUILD)/winmm.dll
 WINDOWSCODECS := $(BUILD)/windowscodecs.dll
+IPHLPAPI := $(BUILD)/iphlpapi.dll
 NOTEPAD    := $(BUILD)/notepad.exe
 CALC       := $(BUILD)/calc.exe
 NOTEPAD_INC := -Iuser/w/gdi32 -Iuser/w/user32 -Iuser/w/uxtheme
@@ -259,7 +260,7 @@ $(DOS_COMPAT_STAMP): .FORCE
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 $(DOS_COMPAT_OBJECTS) $(DOS_TESTS) $(INITRD): $(DOS_COMPAT_STAMP)
 
-$(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(CONTROL_OBJ) $(NOTEPAD) $(CALC): $(BUILD_CONFIG)
+$(OBJ) $(NTDLL) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(CRT0) $(CMD) $(CMDUTIL) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(CONTROL_OBJ) $(NOTEPAD) $(CALC): $(BUILD_CONFIG)
 
 $(BUILD)/%.c.o: %.c
 	@mkdir -p $(dir $@)
@@ -510,6 +511,11 @@ $(WINMM): user/w/winmm/Winmm.c user/w/winmm/Winmm.def $(KERNEL32)
 	           $(BUILD)/winmm.obj $(KERNEL32LIB)
 	@echo "  DLL   $@"
 
+$(IPHLPAPI): user/w/iphlpapi/Iphlpapi.c user/w/iphlpapi/IpHelper.h kernel/include/abi/NetQuery.h $(NTDLL)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/w/iphlpapi/Iphlpapi.c -o $(BUILD)/iphlpapi.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x2F0000000 /out:$@ $(BUILD)/iphlpapi.obj $(NTDLLLIB)
+
 $(WINDOWSCODECS): user/w/windowscodecs/WindowsCodecs.c user/w/windowscodecs/WindowsCodecs.def user/w/windowscodecs/third_party/stb_image.h $(wildcard user/w/windowscodecs/include/*.h) $(KERNEL32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -mno-stack-arg-probe -Iuser/w/windowscodecs/include -c user/w/windowscodecs/WindowsCodecs.c -o $(BUILD)/windowscodecs.obj
@@ -572,7 +578,7 @@ $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFe
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(INITRD) bs=1M count=450 status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
@@ -599,6 +605,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(RPCRT4) ::WINDOWS/SYSTEM32/RPCRT4.DLL
 	mcopy -i $(INITRD) $(WINMM) ::WINDOWS/SYSTEM32/WINMM.DLL
 	mcopy -i $(INITRD) $(WINDOWSCODECS) ::WINDOWS/SYSTEM32/WINDOWSCODECS.DLL
+	mcopy -i $(INITRD) $(IPHLPAPI) ::WINDOWS/SYSTEM32/IPHLPAPI.DLL
 	mcopy -i $(INITRD) $(COMMAND_BINS) ::WINDOWS/SYSTEM32/
 	# Keep each Windows release together; root batch files are launchers.
 	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS3 ::WINDOWS7
@@ -757,7 +764,12 @@ clean:
 	rm -rf $(BUILD)
 
 # Host checks execute the actual USER menu model and native USER/GDI code.
-.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check
+.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check
+ip-helper-check:
+	@mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/IpHelperChecks.c -o $(BUILD)/IpHelperChecks
+	$(BUILD)/IpHelperChecks
+
 shell-path-check:
 	@mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/ShellPathChecks.c -o $(BUILD)/ShellPathChecks

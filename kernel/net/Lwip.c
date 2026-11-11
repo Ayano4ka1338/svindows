@@ -20,6 +20,40 @@ static KEVENT g_stack_ready_event;
 static BOOLEAN g_lwip_initialized;
 static BOOLEAN g_interface_added;
 
+void NetQueryInterface(SV_NET_INTERFACE_INFO *information)
+{
+    UINT64 flags = KiIrqSave();
+    memset(information, 0, sizeof(*information));
+    information->Size = sizeof(*information);
+    information->Present = g_interface_added && NetIsAvailable();
+    if (information->Present) {
+        information->Up = netif_is_up(&g_netif) && netif_is_link_up(&g_netif);
+        information->Address = netif_ip4_addr(&g_netif)->addr;
+        information->Netmask = netif_ip4_netmask(&g_netif)->addr;
+        information->Gateway = netif_ip4_gw(&g_netif)->addr;
+        information->Mtu = g_netif.mtu;
+        struct dhcp *dhcp = netif_dhcp_data(&g_netif);
+        if (dhcp) {
+            UINT64 elapsed = (UINT64)dhcp->lease_used * DHCP_COARSE_TIMER_SECS;
+            information->LeaseSeconds = dhcp->offered_t0_lease == 0xffffffffu ?
+                0xffffffffu : elapsed < dhcp->offered_t0_lease ?
+                dhcp->offered_t0_lease - elapsed : 0;
+        }
+        memcpy(information->Mac, g_netif.hwaddr, 6);
+        NET_INTERFACE_STATS statistics;
+        NetGetStatistics(&statistics);
+        information->RxBytes = statistics.RxBytes;
+        information->TxBytes = statistics.TxBytes;
+        information->RxPackets = statistics.RxPackets;
+        information->TxPackets = statistics.TxPackets;
+        information->RxDrops = statistics.RxDropped;
+        information->TxDrops = statistics.TxDropped;
+        information->RxTraffic = statistics.RxTraffic;
+        information->TxTraffic = statistics.TxTraffic;
+    }
+    KiIrqRestore(flags);
+}
+
 static void SvNetifStatusChanged(struct netif *netif)
 {
     const ip4_addr_t *address = netif_ip4_addr(netif);

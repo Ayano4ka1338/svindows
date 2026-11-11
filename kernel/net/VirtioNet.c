@@ -67,6 +67,21 @@ static VIRTQ g_rx_queue;
 static VIRTQ g_tx_queue;
 static UINT8 g_mac[NET_MAC_LENGTH];
 static NET_INTERFACE_STATS g_stats;
+
+static void count_frame(SV_NET_TRAFFIC_INFO *statistics, const UINT8 *frame,
+                         UINT32 length)
+{
+    if (length < 6) return;
+    BOOLEAN broadcast = TRUE;
+    for (UINT32 i = 0; i < 6; ++i) if (frame[i] != 255) broadcast = FALSE;
+    if (broadcast) {
+        statistics->BroadcastPackets++; statistics->BroadcastBytes += length;
+    } else if (frame[0] & 1) {
+        statistics->MulticastPackets++; statistics->MulticastBytes += length;
+    } else {
+        statistics->UnicastPackets++; statistics->UnicastBytes += length;
+    }
+}
 static NET_RECEIVE_HANDLER g_receive_handler;
 static PVOID g_receive_context;
 static BOOLEAN g_ready;
@@ -338,6 +353,7 @@ static void virtio_poll_rx(void)
                 irq = KiIrqSave();
                 g_stats.RxPackets++;
                 g_stats.RxBytes += frame_length;
+                count_frame(&g_stats.RxTraffic, frame, frame_length);
                 KiIrqRestore(irq);
             } else {
                 irq = KiIrqSave();
@@ -559,6 +575,7 @@ BOOLEAN NetTransmitFrame(const void *frame, UINT32 length)
     __sync_synchronize();
     g_stats.TxPackets++;
     g_stats.TxBytes += length;
+    count_frame(&g_stats.TxTraffic, frame, length);
     KiIrqRestore(irq);
     virtio_write16(0x10, VIRTIO_TX_QUEUE);
     return TRUE;

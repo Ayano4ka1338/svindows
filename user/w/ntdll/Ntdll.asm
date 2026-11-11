@@ -543,6 +543,7 @@ SYSCALL_STUB NtUserOpenDesktop, 0x10A9
 SYSCALL_STUB NtUserCloseDesktop, 0x10A8
 SYSCALL_STUB NtUserGetObjectInformation, 0x106E
 SYSCALL_STUB SvNtUserEnumDesktopWindows, 0x1F1C
+SYSCALL_STUB SvNtQueryNetworkInterface, 0x1F1D
 SYSCALL_STUB SvNtQueryThreadExitStatus, 0x1F19
 SYSCALL_STUB SvNtReadProcessMemory, 0x1F1A
 SYSCALL_STUB NtGdiGetDCObject, 0x1038

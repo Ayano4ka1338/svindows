@@ -364,6 +364,7 @@ EXPORTS
     NtUserCloseDesktop
     NtUserGetObjectInformation
     SvNtUserEnumDesktopWindows
+    SvNtQueryNetworkInterface
     SvNtQueryThreadExitStatus
     SvNtReadProcessMemory
     NtGdiGetDCObject

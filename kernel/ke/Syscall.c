@@ -19,6 +19,7 @@
 #include <svindows/Ob.h>
 #include <svindows/Ex.h>
 #include <svindows/Linux.h>
+#include <svindows/Net.h>
 #include <nt/Ntdef.h>
 #include <nt/Ntstatus.h>
 #include <nt/Ntobject.h>
@@ -859,6 +860,14 @@ static UINT64 SvNtQueryGuiResources(UINT64 *a)
     return count;
 }
 
+static UINT64 SvNtQueryNetworkInterface(UINT64 *a)
+{
+    if (a[1] != sizeof(SV_NET_INTERFACE_INFO) ||
+        !MmProbeForWrite(a[0], sizeof(SV_NET_INTERFACE_INFO))) return 0;
+    NetQueryInterface((SV_NET_INTERFACE_INFO *)a[0]);
+    return 1;
+}
+
 /*
  * The system service table, indexed by NT x64 syscall numbers
  * (from the public NT syscall-number tables). Sparse: most slots are unused.
@@ -1251,6 +1260,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F1A] = SvNtReadProcessMemory;
     KiServiceTable[0x1F1B] = SvNtQueryGuiResources;
     KiServiceTable[0x1F1C] = SvNtUserEnumDesktopWindows;
+    KiServiceTable[0x1F1D] = SvNtQueryNetworkInterface;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =
