@@ -46,3 +46,15 @@ and reopening Format leaves the menu anchored below Format without a TWM
 caption or an extra application frame. Final captures:
 `xorg-calc-four-final.png`, `xorg-notepad-typed-final.png`, and
 `xorg-moved-menu-final.png` in `build/diagnostics`.
+
+Rechecked on 2026-11-11 after rebuilding the release GUI ISO from current
+sources (`make BUILD=build/gui PROGRAM=cmd.exe CMDLINE=cmd.exe all`).
+`make win32k-check` passes. A fresh QEMU boot with Calculator followed by
+Notepad preserves Calculator's controls when it is raised above Notepad;
+Notepad's Format menu has no TWM caption and stays below its own menu bar.
+The application captions are `Calculator` and `Untitled - Notepad`.
+Current captures are `xorg-current-two.png`, `xorg-current-format.png`, and
+`xorg-current-raised.png`; the serial transcript is
+`build/diagnostics/xorg-current-runtime.log`.
+An existing VM keeps its loaded kernel and initrd: boot the rebuilt
+`build/gui/svindows.iso` to use these fixes.
