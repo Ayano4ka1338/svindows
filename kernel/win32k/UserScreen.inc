@@ -1590,12 +1590,12 @@ static UINT64 NtUserMenuBar(UINT64 *a)
 /* GW_* traversal follows sibling Z-order, not allocation-slot order. */
 static UINT64 NtUserWindowRelation(UINT64 *a)
 {
-    if(!KiUserWindowValid(a[0],TRUE))return 0;
+    if(!KiUserWindowValid(a[0],FALSE))return 0;
     UINT16 slot=(UINT16)a[0],parent=g_w32k[slot].Parent;
     UINT32 command=(UINT32)a[1];
     if(command==4){
         if(g_w32k[slot].Style&WS_CHILD)return 0;
-        UINT64 owner=*(UINT64*)(PROCESS_USER_OBJECT_ARENA_VA+(UINT64)slot*0x200+WND_PARENT_OFF);
+        UINT64 owner=g_w32k[slot].Owner;
         return owner&&KiUserWindowValid(owner,FALSE)?owner:0;
     }
     UINT16 candidate=0;

@@ -883,6 +883,8 @@ int main(void)
     assert(g_w32k[(UINT16)hwnd_a].Visible);
     WCHAR shared_title[]={'T','a','s','k',' ','f','i','x','t','u','r','e',0};
     W32kScreenSetTitle((UINT16)hwnd_a,shared_title);
+    UINT64 owned_args[16]={0};owned_args[4]=WS_POPUP;owned_args[9]=hwnd_a;
+    UINT64 owned_popup=create_fixture_window(owned_args);assert(owned_popup);
     current = &thread_b;
     assert(SvNtUserQueryWindowState(args)==3);
     assert(SvNtUserGetWindowStyle(args) & WS_VISIBLE_);
@@ -898,6 +900,12 @@ int main(void)
     owner_query[1]=4;assert(NtUserQueryWindow(owner_query)==process_a.ProcessId);
     WCHAR shared_text[4];UINT64 text_query[]={hwnd_a,(UINT64)shared_text,4};
     assert(NtUserGetWindowText(text_query)==3 && shared_text[0]=='T' && shared_text[3]==0);
+    UINT64 relation_query[]={owned_popup,4};
+    /* Owner metadata belongs to the kernel, not the observer's USER arena. */
+    assert(NtUserWindowRelation(relation_query)==hwnd_a);
+    relation_query[0]=hwnd_a;
+    relation_query[1]=2;
+    assert(NtUserGetAncestor(relation_query)==hwnd_a);
     current=&thread_a;W32kShowWindow(hwnd_a,0);current=&thread_b;
     assert(SvNtUserQueryWindowState(args)==1);
     assert(!NtUserDestroyWindow(args) && !NtUserGetDC(args));
@@ -905,6 +913,7 @@ int main(void)
     W32kCleanupThreadUser(&thread_a);
     assert(!KiUserWindowValid(hwnd_a, FALSE));
     assert(!SvNtUserQueryWindowState(args)&&!NtUserGetWindowText(text_query));
+    assert(!NtUserGetAncestor(relation_query)&&!NtUserWindowRelation(relation_query));
     puts("PASS cross-process window metadata, bounded titles and stale-handle rejection without write access");
     current = &thread_a;
     assert(!gdi_object(window_dc, 0));

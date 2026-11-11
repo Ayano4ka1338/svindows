@@ -684,7 +684,7 @@ static UINT64 NtUserQueryWindow(UINT64 *a)
 }
 static UINT64 NtUserGetAncestor(UINT64 *a)
 {
-    if (!KiUserWindowValid(a[0], TRUE)) return 0;
+    if (!KiUserWindowValid(a[0], FALSE)) return 0;
     UINT16 slot = (UINT16)a[0];
     if (a[1] == 1) {
         UINT16 parent = W32kWindowParent(slot);

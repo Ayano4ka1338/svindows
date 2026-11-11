@@ -36,6 +36,8 @@ __declspec(dllimport) UINT64 NtUserCreateWindowEx(ULONG ex_style, UINT64 class_n
 __declspec(dllimport) UINT64 NtUserDestroyWindow(HWND hwnd);
 __declspec(dllimport) UINT64 NtUserSetWindowText(HWND hwnd, const WCHAR *text);
 __declspec(dllimport) UINT64 NtUserGetWindowText(HWND hwnd, WCHAR *buffer, ULONG count);
+__declspec(dllimport) UINT64 NtUserQueryWindow(HWND hwnd, UINT type);
+__declspec(dllimport) DWORD GetCurrentProcessId(void);
 __declspec(dllimport) UINT64 NtUserWindowFromPoint(int x, int y);
 __declspec(dllimport) UINT64 NtUserRegisterClassExWOW(const void *wndclass,
                                                       const void *class_name,
@@ -258,7 +260,11 @@ USER32_API int GetWindowTextW(HWND hwnd, WCHAR *buffer, int capacity)
 {
     if (!hwnd || !buffer || capacity <= 0)
         return 0;
-    int copied = (int)SendMessageW(hwnd, WM_GETTEXT, (WPARAM)capacity, (LPARAM)buffer);
+    /* Foreign processes cannot dispatch our window procedures. Windows reads
+     * their cached caption without sending WM_GETTEXT into that process. */
+    int copied = (DWORD)NtUserQueryWindow(hwnd,4)==GetCurrentProcessId()
+        ? (int)SendMessageW(hwnd,WM_GETTEXT,(WPARAM)capacity,(LPARAM)buffer)
+        : (int)NtUserGetWindowText(hwnd,buffer,(ULONG)capacity);
     /* Win32 guarantees a terminated buffer even when the title was truncated. */
     if (copied >= capacity)
         copied = capacity - 1;
@@ -341,6 +347,10 @@ USER32_API DWORD GetSysColor(int index)
 
 USER32_API int GetWindowTextLengthW(HWND hwnd)
 {
+    if((DWORD)NtUserQueryWindow(hwnd,4)!=GetCurrentProcessId()){
+        WCHAR title[128];
+        return (int)NtUserGetWindowText(hwnd,title,128);
+    }
     return (int)SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0);
 }
 USER32_API HWND GetParent(HWND hwnd)
