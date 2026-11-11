@@ -537,6 +537,7 @@ SYSCALL_STUB NtGdiClearWindowBackground,     0x1F08
 SYSCALL_STUB NtUserGetClassInfoEx, 0x10BB
 SYSCALL_STUB NtUserGetThreadDesktop, 0x1085
 SYSCALL_STUB NtUserSetThreadDesktop, 0x1093
+SYSCALL_STUB NtUserCallOneParam, 0x1005
 SYSCALL_STUB SvNtQueryThreadExitStatus, 0x1F19
 SYSCALL_STUB SvNtReadProcessMemory, 0x1F1A
 SYSCALL_STUB NtGdiGetDCObject, 0x1038

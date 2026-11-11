@@ -358,6 +358,7 @@ EXPORTS
     NtUserGetClassInfoEx
     NtUserGetThreadDesktop
     NtUserSetThreadDesktop
+    NtUserCallOneParam
     SvNtQueryThreadExitStatus
     SvNtReadProcessMemory
     NtGdiGetDCObject

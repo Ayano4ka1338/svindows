@@ -337,6 +337,7 @@ USER32_API DWORD GetSysColor(int index)
 #include "User32Input.inc"
 #include "User32Paint.inc"
 #include "User32Compat.inc"
+#include "User32Tasks.inc"
 
 USER32_API int GetWindowTextLengthW(HWND hwnd)
 {
