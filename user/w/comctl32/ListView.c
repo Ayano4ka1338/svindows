@@ -47,7 +47,7 @@ static BOOL ensure_rows(LISTVIEW_STATE *s,int wanted)
 }
 static BOOL set_cell(LV_ROW *row,int subitem,const WCHAR *text)
 {
-    if(subitem<0||subitem>0x3fffffff)return FALSE;
+    if(subitem<0||subitem>0x3fffffff||text==(const WCHAR *)(LONG_PTR)-1)return FALSE;
     if(subitem>=row->cell_count){
         int cap=row->cell_count?row->cell_count:1;while(cap<=subitem){if(cap>0x3fffffff/2)return FALSE;cap*=2;}
         WCHAR **fresh=SvComctlAlloc((ULONG_PTR)cap*sizeof(*fresh));if(!fresh)return FALSE;
@@ -132,7 +132,8 @@ static int insert_row(LISTVIEW_STATE *s,int index,const LVITEMW *item)
 {
     if(!item||index<0||index>s->row_count||s->row_count==0x3fffffff||!ensure_rows(s,s->row_count+1))return -1;
     for(int i=s->row_count;i>index;--i)s->rows[i]=s->rows[i-1];
-    LV_ROW *row=&s->rows[index];row->cells=NULL;row->cell_count=0;row->state=0;
+    LV_ROW *row=&s->rows[index];row->cells=NULL;row->cell_count=0;
+    row->state=(item->mask&LVIF_STATE)?item->state&item->stateMask:0;
     row->param=(item->mask&LVIF_PARAM)?item->lParam:0;
     if((item->mask&LVIF_TEXT)&&!set_cell(row,0,item->pszText)){
         free_row(row);
@@ -225,20 +226,34 @@ LRESULT SvListViewProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp)
     case LVM_INSERTCOLUMNW:{int index=(int)wp;return insert_column(s,index,(const LVCOLUMNW *)lp)?index:-1;}
     case LVM_GETCOLUMNW:return get_column(s,(int)wp,(LVCOLUMNW *)lp);
     case LVM_SETCOLUMNW:return set_column(s,(int)wp,(const LVCOLUMNW *)lp);
-    case LVM_INSERTITEMW:{int index=(int)wp;if(index<0||index>s->row_count)index=s->row_count;int added=insert_row(s,index,(const LVITEMW *)lp);if(added>=0)InvalidateRect(hwnd,NULL,FALSE);return added;}
+    case LVM_INSERTITEMW: {
+        const LVITEMW *item = (const LVITEMW *)lp;
+        if (!item || item->iSubItem || item->iItem < 0) return -1;
+        int index = item->iItem < s->row_count ? item->iItem : s->row_count;
+        int added = insert_row(s, index, item);
+        if (added >= 0) InvalidateRect(hwnd, NULL, FALSE);
+        return added;
+    }
     case LVM_DELETEITEM:{int index=(int)wp;if(index<0||index>=s->row_count)return FALSE;free_row(&s->rows[index]);
         for(int i=index;i<s->row_count-1;++i)s->rows[i]=s->rows[i+1];--s->row_count;
         if(s->first_visible>=s->row_count)s->first_visible=s->row_count?s->row_count-1:0;InvalidateRect(hwnd,NULL,FALSE);return TRUE;}
     case LVM_DELETEALLITEMS:for(int i=0;i<s->row_count;++i)free_row(&s->rows[i]);s->row_count=0;s->first_visible=0;InvalidateRect(hwnd,NULL,FALSE);return TRUE;
     case LVM_SETITEMW:{const LVITEMW *item=(const LVITEMW *)lp;return set_item(s,item);}
-    case LVM_SETITEMTEXTW:{const LVITEMW *item=(const LVITEMW *)lp;if(!item)return FALSE;LVITEMW copy;
-        copy.mask=item->mask;copy.iItem=(int)wp;copy.iSubItem=item->iSubItem;copy.state=item->state;
-        copy.stateMask=item->stateMask;copy.pszText=item->pszText;copy.cchTextMax=item->cchTextMax;
-        copy.iImage=item->iImage;copy.lParam=item->lParam;copy.iIndent=item->iIndent;copy.iGroupId=item->iGroupId;
-        copy.cColumns=item->cColumns;copy.puColumns=item->puColumns;copy.piColFmt=item->piColFmt;copy.iGroup=item->iGroup;
-        return set_item(s,&copy);}
+    case LVM_SETITEMTEXTW: {
+        const LVITEMW *item = (const LVITEMW *)lp;
+        if (!item || wp >= (WPARAM)s->row_count) return FALSE;
+        if (!set_cell(&s->rows[wp], item->iSubItem, item->pszText)) return FALSE;
+        InvalidateRect(hwnd, NULL, FALSE);
+        return TRUE;
+    }
     case LVM_GETITEMW:return get_item(s,(LVITEMW *)lp);
-    case LVM_GETITEMTEXTW:{LVITEMW *item=(LVITEMW *)lp;if(!item)return 0;item->iItem=(int)wp;return get_item(s,item)?text_copy(item->pszText,item->cchTextMax,item->iSubItem<s->rows[item->iItem].cell_count?s->rows[item->iItem].cells[item->iSubItem]:NULL):0;}
+    case LVM_GETITEMTEXTW: {
+        const LVITEMW *item = (const LVITEMW *)lp;
+        if (!item || wp >= (WPARAM)s->row_count || item->iSubItem < 0) return 0;
+        const LV_ROW *row = &s->rows[wp];
+        const WCHAR *text = item->iSubItem < row->cell_count ? row->cells[item->iSubItem] : NULL;
+        return text_copy(item->pszText, item->cchTextMax, text);
+    }
     case LVM_GETITEMSTATE:{int i=(int)wp;return i>=0&&i<s->row_count?(s->rows[i].state&(UINT)lp):0;}
     case LVM_SETITEMSTATE:{const LVITEMW *item=(const LVITEMW *)lp;if(!item)return FALSE;int first=(int)wp,last=first;
         if(!s->row_count)return FALSE;
