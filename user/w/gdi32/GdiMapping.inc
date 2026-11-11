@@ -28,6 +28,11 @@ GDI32_API BOOL SetViewportOrgEx(HDC dc, int x, int y, POINT *previous)
     return SvNtGdiViewportOrigin(dc, &origin, previous) != 0;
 }
 
+GDI32_API BOOL SetWindowOrgEx(HDC dc, int x, int y, POINT *previous)
+{
+    return SetViewportOrgEx(dc, x, y, previous);
+}
+
 GDI32_API BOOL OffsetViewportOrgEx(HDC dc, int dx, int dy, POINT *previous)
 {
     POINT current;
