@@ -244,6 +244,7 @@ GDI32_API BOOL    GetTextExtentPoint32W(HDC hdc, const WCHAR *text, int count,
                                         LPSIZE size);
 GDI32_API BOOL    GetTextMetricsW(HDC hdc, LPTEXTMETRICW metrics);
 GDI32_API COLORREF SetTextColor(HDC hdc, COLORREF colour);
+GDI32_API COLORREF GetTextColor(HDC hdc);
 GDI32_API COLORREF SetBkColor(HDC hdc, COLORREF colour);
 GDI32_API int     SetBkMode(HDC hdc, int mode);
 GDI32_API int     GetDeviceCaps(HDC hdc, int index);

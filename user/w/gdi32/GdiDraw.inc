@@ -71,6 +71,13 @@ GDI32_API COLORREF SetBkColor(HDC hdc, COLORREF colour)
     return set_dc_colour(hdc, DCATTR_CRBACKGND, colour);
 }
 
+GDI32_API COLORREF GetTextColor(HDC hdc)
+{
+    ULONG *attr = dc_attr(hdc);
+    if (!attr) return 0xFFFFFFFFu;
+    return attr[DCATTR_CRFOREGND / sizeof(ULONG)] & 0x00FFFFFFu;
+}
+
 /* ------------------------------------------------------------------ */
 /* Shapes                                                              */
 /* ------------------------------------------------------------------ */
