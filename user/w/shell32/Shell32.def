@@ -1,5 +1,9 @@
 LIBRARY SHELL32
 EXPORTS
+    RunFileDlg @61
+    PathYetAnotherMakeUniqueName @75
+    SHRestricted @100
+    SHTestTokenMembership @245
     SHGetSpecialFolderPathW
     SHGetFolderPathW
     ShellAboutW

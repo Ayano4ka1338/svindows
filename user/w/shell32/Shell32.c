@@ -21,6 +21,8 @@ __declspec(dllexport) int SHCreateDirectory(HWND owner, const WCHAR *path);
 #define ERROR_CALL_NOT_IMPLEMENTED 120
 #define MAX_PATH 260
 
+#include "CommandLine.inc"
+
 static WCHAR *copy_path(WCHAR *out, const WCHAR *src)
 {
     unsigned i = 0;
@@ -385,3 +387,5 @@ __declspec(dllexport) HRESULT SHGetStockIconInfo(int id, unsigned flags,
         return (HRESULT)0x80070057u;
     return SHELL_E_NOTIMPL;
 }
+
+#include "TaskSupport.inc"

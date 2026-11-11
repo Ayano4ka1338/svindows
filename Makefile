@@ -455,7 +455,7 @@ $(COMCTL32): $(COMCTL32_SRC) $(COMCTL32_HEADERS) user/w/comctl32/Comctl32.def $(
 	           $(USER32LIB) $(GDI32LIB) $(KERNEL32LIB)
 	@echo "  DLL   $@"
 
-$(SHELL32): user/w/shell32/Shell32.c user/w/shell32/Shell32.def $(KERNEL32) $(USER32)
+$(SHELL32): user/w/shell32/Shell32.c user/w/shell32/Shell32.def $(wildcard user/w/shell32/*.inc) $(KERNEL32) $(USER32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/w/shell32/Shell32.c -o $(BUILD)/shell32.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x260000000 \
@@ -775,7 +775,12 @@ clean:
 	rm -rf $(BUILD)
 
 # Host checks execute the actual USER menu model and native USER/GDI code.
-.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check elapsed-time-check
+.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check elapsed-time-check shell-command-line-check
+shell-command-line-check:
+	@mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/ShellCommandLineChecks.c -o $(BUILD)/ShellCommandLineChecks
+	$(BUILD)/ShellCommandLineChecks
+
 elapsed-time-check:
 	@mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined tools/checks/ElapsedTimeChecks.c -o $(BUILD)/ElapsedTimeChecks
