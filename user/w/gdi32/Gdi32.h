@@ -202,6 +202,7 @@ GDI32_API BOOL    GetTextExtentPointW(HDC dc, const WCHAR *text, int count,
                                       LPSIZE size);
 GDI32_API HRGN    CreateRectRgn(int left, int top, int right, int bottom);
 GDI32_API HRGN    CreateRectRgnIndirect(const RECT *rect);
+GDI32_API HRGN    ExtCreateRegion(const void *transform, DWORD bytes, const void *data);
 GDI32_API BOOL    SetRectRgn(HRGN region, int left, int top, int right, int bottom);
 GDI32_API int     OffsetRgn(HRGN region, int dx, int dy);
 GDI32_API int     GetRgnBox(HRGN region, LPRECT rect);

@@ -368,6 +368,19 @@ GDI32_API HRGN CreateRectRgn(int left,int top,int right,int bottom)
 }
 GDI32_API HRGN CreateRectRgnIndirect(const RECT *rect)
 { return rect?CreateRectRgn(rect->left,rect->top,rect->right,rect->bottom):0; }
+
+GDI32_API HRGN ExtCreateRegion(const void *transform, DWORD bytes,
+                                const void *data)
+{
+    if (transform || !data || bytes < 48) return 0;
+    const DWORD *header = (const DWORD *)data;
+    if (header[0] != 32 || header[1] != 1 || header[2] != 1 ||
+        header[3] != 16)
+        return 0;
+    const RECT *rectangle = (const RECT *)((const UINT8 *)data + 32);
+    return CreateRectRgn(rectangle->left, rectangle->top,
+                         rectangle->right, rectangle->bottom);
+}
 GDI32_API int OffsetRgn(HRGN region, int dx, int dy)
 {
     SV_REGION *r = sv_region(region);
