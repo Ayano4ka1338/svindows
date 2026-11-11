@@ -8,6 +8,8 @@
 #define _SVINDOWS_IO_H_
 
 #include <nt/Ntdef.h>
+typedef struct { UINT64 ReadBytes, WriteBytes, ReadOperations, WriteOperations; } IO_STATISTICS;
+void IoQueryStatistics(IO_STATISTICS *statistics);
 #include <nt/Ntstatus.h>
 #include <svindows/Ob.h>
 

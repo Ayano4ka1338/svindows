@@ -25,5 +25,7 @@ void  ExFreePool(PVOID p);
 
 /* Diagnostics. */
 SIZE_T ExPoolBytesInUse(void);
+typedef struct { UINT64 Pages, Allocations, Frees; } EX_POOL_USAGE;
+void ExQueryPoolUsage(EX_POOL_USAGE *usage);
 
 #endif /* _SVINDOWS_EX_H_ */

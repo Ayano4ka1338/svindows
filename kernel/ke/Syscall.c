@@ -614,6 +614,7 @@ static UINT64 NtDelayExecution(UINT64 *a)
  * returning a fabricated blob that user mode would reject as corrupt.
  */
 #include "SystemCpuInformation.inc"
+#include "SystemPerformance.inc"
 
 static UINT64 NtQuerySystemInformation(UINT64 *a)
 {
@@ -647,6 +648,8 @@ static UINT64 NtQuerySystemInformation(UINT64 *a)
 
     if(info_class==8) /* SystemProcessorPerformanceInformation */
         return (UINT64)KiQueryProcessorPerformance((void *)buffer,length,return_length);
+    if(info_class==2) /* SystemPerformanceInformation */
+        return (UINT64)KiQuerySystemPerformance((void *)buffer,length,return_length);
 
     if (info_class == SystemBasicInformation) {
         UINT32 required = sizeof(SYSTEM_BASIC_INFORMATION_LOCAL);
@@ -1340,6 +1343,7 @@ void KiRejectUserReturn(UINT64 rip, UINT64 rsp)
 
 UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
 {
+    __atomic_add_fetch(&KeGetCurrentProcessorBlock()->SystemCalls,1,__ATOMIC_RELAXED);
     PKTHREAD current = KeGetCurrentThread();
     if (current && current->Process && current->Process->LinuxContext) {
         const UINT64 linux_args[6] = {
@@ -1394,6 +1398,13 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
     }
 
     UINT64 result = KiServiceTable[number](args);
+    if(NT_SUCCESS((NTSTATUS)result))switch(number){
+        case SN_NtCreateFile:case SN_NtOpenFile:case SN_NtQueryInformationFile:
+        case SN_NtSetInformationFile:case SN_NtQueryDirectoryFile:
+        case SN_NtFlushBuffersFile:case SN_NtQueryFileInfo:
+        case SN_NtFileSystemControlSimple:case SN_NtSetFileSizeSimple:
+            __atomic_add_fetch(&KeGetCurrentProcessorBlock()->OtherIoOperations,1,__ATOMIC_RELAXED);break;
+    }
     KiDeliverKernelApcs();
     return result;
 }

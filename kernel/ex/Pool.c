@@ -11,6 +11,7 @@
 #include <svindows/Mm.h>
 #include <svindows/Ke.h>
 #include <svindows/Rtl.h>
+static UINT64 g_pool_allocations,g_pool_frees;
 
 /* Per-block header. Kept 16-byte sized so the payload that follows is
  * 16-aligned. `requested` is what the caller asked for; the bytes between
@@ -254,6 +255,7 @@ static PVOID ExAllocatePoolWithTagLocked(POOL_TYPE type, SIZE_T size, ULONG tag)
                 n->requested = size;
                 pool_arm_guard(n);
                 g_bytes_in_use += n->size;
+                g_pool_allocations++;
                 return (UINT8 *)n + POOL_HDR;
             }
         }
@@ -314,6 +316,7 @@ static void ExFreePoolLocked(PVOID p)
     node->tag = 0;
     node->requested = 0;
     g_bytes_in_use -= node->size;
+    g_pool_frees++;
 
     /* Coalesce with the higher neighbour. */
     POOL_NODE *next = node->next;
@@ -371,4 +374,12 @@ SIZE_T ExPoolBytesInUse(void)
     SIZE_T value = g_bytes_in_use;
     KiReleaseRawSpinLock(&g_pool_lock, interrupt_state);
     return value;
+}
+void ExQueryPoolUsage(EX_POOL_USAGE *usage)
+{
+    UINT64 flags=KiAcquireRawSpinLock(&g_pool_lock);
+    usage->Pages=(g_heap_end-MM_KERNEL_HEAP_BASE)/PAGE_SIZE;
+    usage->Allocations=g_pool_allocations;
+    usage->Frees=g_pool_frees;
+    KiReleaseRawSpinLock(&g_pool_lock,flags);
 }

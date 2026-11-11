@@ -908,3 +908,9 @@ pmm-usage-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -ffunction-sections -fdata-sections -fsanitize=address,undefined -idirafter kernel/include tools/checks/PmmUsageChecks.c -Wl,--gc-sections -o $(BUILD)/PmmUsageChecks
 	$(BUILD)/PmmUsageChecks
+
+.PHONY: system-performance-check
+system-performance-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined -idirafter kernel/include tools/checks/SystemPerformanceChecks.c -o $(BUILD)/SystemPerformanceChecks
+	$(BUILD)/SystemPerformanceChecks

@@ -341,6 +341,8 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
     /* CR2 is volatile across page faults. Snapshot it before any diagnostic
        helper or exception dispatch can touch pageable/user memory. */
     UINT64 fault_address = frame && frame->vector == 14 ? read_cr2() : 0;
+    if(frame&&frame->vector==14)
+        __atomic_add_fetch(&KeGetCurrentProcessorBlock()->PageFaults,1,__ATOMIC_RELAXED);
     /* Private SMP wake/IPI vector. The parked AP will recheck its release
      * state after iret; no scheduler work is done on this early path. */
     if (frame->vector == HAL_SMP_WAKE_VECTOR) {

@@ -428,6 +428,7 @@ typedef struct _KPRCB {
     ULONG ContextSwitches;
     UINT64 DpcTime;
     ULONG InterruptCount;
+    UINT64 SystemCalls, PageFaults, OtherIoOperations;
 } KPRCB, *PKPRCB;
 
 #define KE_MAXIMUM_PROCESSORS 64u

@@ -22,6 +22,19 @@
 #include <svindows/Linux.h>
 #include <svindows/Rtl.h>
 #include <nt/Ntobject.h>
+static IO_STATISTICS g_io_statistics;
+static void io_record_transfer(BOOLEAN write,UINT64 bytes)
+{
+    __atomic_add_fetch(write?&g_io_statistics.WriteBytes:&g_io_statistics.ReadBytes,bytes,__ATOMIC_RELAXED);
+    __atomic_add_fetch(write?&g_io_statistics.WriteOperations:&g_io_statistics.ReadOperations,1,__ATOMIC_RELAXED);
+}
+void IoQueryStatistics(IO_STATISTICS *statistics)
+{
+    statistics->ReadBytes=__atomic_load_n(&g_io_statistics.ReadBytes,__ATOMIC_RELAXED);
+    statistics->WriteBytes=__atomic_load_n(&g_io_statistics.WriteBytes,__ATOMIC_RELAXED);
+    statistics->ReadOperations=__atomic_load_n(&g_io_statistics.ReadOperations,__ATOMIC_RELAXED);
+    statistics->WriteOperations=__atomic_load_n(&g_io_statistics.WriteOperations,__ATOMIC_RELAXED);
+}
 
 typedef enum _FILE_KIND {
     FileKindDisk = 0,
@@ -137,6 +150,7 @@ static NTSTATUS io_read_handle_kernel(HANDLE handle, void *buffer,
         file->Position += n;
     }
     *read_out = n;
+    io_record_transfer(FALSE,n);
     ObDereferenceObject(object);
     return STATUS_SUCCESS;
 }
@@ -265,6 +279,7 @@ NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
         }
     } else status = STATUS_NOT_SUPPORTED;
     *written_out = n;
+    if(n||NT_SUCCESS(status))io_record_transfer(TRUE,n);
     ObDereferenceObject(object);
     return status;
 }
@@ -1018,6 +1033,7 @@ UINT64 NtReadFile(UINT64 *a)
         iosb->Status = STATUS_SUCCESS;
         iosb->Information = n;
     }
+    io_record_transfer(FALSE,n);
     if (f->CompletionPort && explicit_offset)
         IoPostCompletion(f->CompletionPort, f->CompletionKey, iosb,
                          STATUS_SUCCESS, n);
@@ -1066,6 +1082,7 @@ UINT64 NtWriteFile(UINT64 *a)
                 ObDereferenceObject(obj);
                 iosb->Status = STATUS_PIPE_BROKEN;
                 iosb->Information = n;
+                if(n)io_record_transfer(TRUE,n);
                 return (UINT64)STATUS_PIPE_BROKEN;
             }
             while (n < length && pipe->Count < IO_PIPE_CAPACITY) {
@@ -1130,6 +1147,7 @@ UINT64 NtWriteFile(UINT64 *a)
         iosb->Status = STATUS_SUCCESS;
         iosb->Information = n;
     }
+    io_record_transfer(TRUE,n);
     if (f->CompletionPort && explicit_offset)
         IoPostCompletion(f->CompletionPort, f->CompletionKey, iosb,
                          STATUS_SUCCESS, n);
