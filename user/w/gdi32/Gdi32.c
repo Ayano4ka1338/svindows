@@ -397,6 +397,15 @@ GDI32_API int CombineRgn(HRGN dst,HRGN src1,HRGN src2,int mode)
 GDI32_API BOOL EqualRgn(HRGN first,HRGN second)
 { SV_REGION*a=sv_region(first),*b=sv_region(second);return a&&b&&a->Bounds.left==b->Bounds.left&&a->Bounds.top==b->Bounds.top&&a->Bounds.right==b->Bounds.right&&a->Bounds.bottom==b->Bounds.bottom; }
 
+GDI32_API DWORD SetLayout(HDC dc, DWORD layout)
+{
+    /* Left-to-right drawing matches the DC coordinate model currently
+     * implemented by Svindows. Reject RTL and invalid reserved bits. */
+    if (object_type(dc) != SV_GDI_TYPE_DC || layout != 0)
+        return 0xffffffffu;
+    return 0;
+}
+
 static void sv_track_dc_bitmap(HDC dc,HBITMAP bitmap)
 {
     UINT slot=0;
