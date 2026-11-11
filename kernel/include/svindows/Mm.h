@@ -120,6 +120,10 @@ void   MmFreePages(UINT64 phys, SIZE_T count);
 UINT64 MmTotalPages(void);
 UINT64 MmFreePageCount(void);
 UINT64 MmUsablePageCount(void);
+typedef struct {
+    UINT64 AvailablePages, CommittedPages, CommitLimit, PeakCommitment;
+} MM_MEMORY_USAGE;
+void MmQueryMemoryUsage(MM_MEMORY_USAGE *usage);
 
 /* ------------------------------------------------------------------ */
 /* Virtual memory (VMM)                                               */

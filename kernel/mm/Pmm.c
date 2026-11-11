@@ -21,10 +21,19 @@ typedef struct _PMM_STATE {
     UINT64 used_pages;
     UINT64 usable_pages; /* available RAM after permanent reservations */
     UINT64 next_hint;     /* frame index to start the next search from  */
+    UINT64 peak_allocated;
 } PMM_STATE;
 
 static PMM_STATE g_pmm;
 static KSPIN_LOCK g_pmm_lock;
+
+/* Svindows commits eagerly and has no swap: each allocated frame is backed
+ * immediately. Permanent boot reservations are excluded from usable_pages. */
+static void pmm_record_commit(void)
+{
+    UINT64 committed=g_pmm.usable_pages-g_pmm.free_pages;
+    if(committed>g_pmm.peak_allocated)g_pmm.peak_allocated=committed;
+}
 
 static ALWAYS_INLINE UINT8 *pmm_bitmap(void)
 {
@@ -95,6 +104,7 @@ void MmInitializePhysicalMemory(const MM_MEMORY_MAP *map)
     g_pmm.free_pages = 0;
     g_pmm.used_pages = g_pmm.total_pages;
     g_pmm.usable_pages = 0;
+    g_pmm.peak_allocated = 0;
 
     for (UINT32 i = 0; i < map->count; i++) {
         const MM_MEMORY_REGION *r = &map->regions[i];
@@ -137,6 +147,7 @@ UINT64 MmAllocatePage(void)
             bit_set(f);
             g_pmm.free_pages--;
             g_pmm.used_pages++;
+            pmm_record_commit();
             g_pmm.next_hint = f + 1;
             UINT64 result = f << PAGE_SHIFT;
             KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
@@ -166,6 +177,7 @@ UINT64 MmAllocatePages(SIZE_T count)
                     bit_set(k);
                 g_pmm.free_pages -= count;
                 g_pmm.used_pages += count;
+                pmm_record_commit();
                 g_pmm.next_hint = start + count;
                 UINT64 result = start << PAGE_SHIFT;
                 KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
@@ -198,6 +210,7 @@ UINT64 MmAllocatePageBelow4G(void)
             bit_set(frame);
             g_pmm.free_pages--;
             g_pmm.used_pages++;
+            pmm_record_commit();
             g_pmm.next_hint = frame + 1;
             UINT64 result = frame << PAGE_SHIFT;
             KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
@@ -228,6 +241,7 @@ UINT64 MmAllocatePagesBelow4G(SIZE_T count)
                     bit_set(page);
                 g_pmm.free_pages -= count;
                 g_pmm.used_pages += count;
+                pmm_record_commit();
                 g_pmm.next_hint = start + count;
                 UINT64 result = start << PAGE_SHIFT;
                 KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
@@ -258,6 +272,7 @@ UINT64 MmAllocatePagesBelow16M(SIZE_T count)
             for (i = 0; i < count; ++i) bit_set(start + i);
             g_pmm.free_pages -= count;
             g_pmm.used_pages += count;
+            pmm_record_commit();
             g_pmm.next_hint = start + count;
             KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
             return start << PAGE_SHIFT;
@@ -298,4 +313,14 @@ UINT64 MmUsablePageCount(void)
     UINT64 value = g_pmm.usable_pages;
     KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
     return value;
+}
+
+void MmQueryMemoryUsage(MM_MEMORY_USAGE *usage)
+{
+    UINT64 flags=KiAcquireRawSpinLock(&g_pmm_lock);
+    usage->AvailablePages=g_pmm.free_pages;
+    usage->CommitLimit=g_pmm.usable_pages;
+    usage->CommittedPages=g_pmm.usable_pages-g_pmm.free_pages;
+    usage->PeakCommitment=g_pmm.peak_allocated;
+    KiReleaseRawSpinLock(&g_pmm_lock,flags);
 }

@@ -902,3 +902,9 @@ system-cpu-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined -idirafter kernel/include tools/checks/SystemCpuChecks.c -o $(BUILD)/SystemCpuChecks
 	$(BUILD)/SystemCpuChecks
+
+.PHONY: pmm-usage-check
+pmm-usage-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -ffunction-sections -fdata-sections -fsanitize=address,undefined -idirafter kernel/include tools/checks/PmmUsageChecks.c -Wl,--gc-sections -o $(BUILD)/PmmUsageChecks
+	$(BUILD)/PmmUsageChecks
