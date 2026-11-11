@@ -162,5 +162,6 @@ BOOLEAN HalSendStartupIpi(UINT32 apic_id, UINT8 startup_page);
 /* ------------------------------------------------------------------ */
 
 void HalInitializeTimer(UINT32 hz);
+UINT32 HalTimerResolution(void); /* programmed interrupt period, 100 ns units */
 
 #endif /* _SVINDOWS_HAL_H_ */

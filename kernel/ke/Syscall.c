@@ -868,6 +868,17 @@ static UINT64 SvNtQueryNetworkInterface(UINT64 *a)
     return 1;
 }
 
+static UINT64 NtQueryTimerResolution(UINT64 *a)
+{
+    for (UINT32 i = 0; i < 3; ++i)
+        if (!MmProbeForWrite(a[i], sizeof(UINT32))) return STATUS_ACCESS_VIOLATION;
+    UINT32 resolution = HalTimerResolution();
+    if (!resolution) return STATUS_DEVICE_NOT_READY;
+    /* The PIT currently has one fixed interrupt rate; clients cannot change it. */
+    for (UINT32 i = 0; i < 3; ++i) *(UINT32 *)a[i] = resolution;
+    return STATUS_SUCCESS;
+}
+
 /*
  * The system service table, indexed by NT x64 syscall numbers
  * (from the public NT syscall-number tables). Sparse: most slots are unused.
@@ -1261,6 +1272,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F1B] = SvNtQueryGuiResources;
     KiServiceTable[0x1F1C] = SvNtUserEnumDesktopWindows;
     KiServiceTable[0x1F1D] = SvNtQueryNetworkInterface;
+    KiServiceTable[0x1F1E] = NtQueryTimerResolution;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

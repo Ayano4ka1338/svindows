@@ -94,3 +94,4 @@ void *memcpy(void *dst, const void *src, SIZE_T n);
 #include "Rtl/ResourceRanges.inc"
 #include "Rtl/Compat.inc"
 #include "Rtl/Exception.inc"
+#include "Rtl/ElapsedTime.inc"

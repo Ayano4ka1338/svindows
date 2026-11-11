@@ -775,7 +775,12 @@ clean:
 	rm -rf $(BUILD)
 
 # Host checks execute the actual USER menu model and native USER/GDI code.
-.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check
+.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check elapsed-time-check
+elapsed-time-check:
+	@mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined tools/checks/ElapsedTimeChecks.c -o $(BUILD)/ElapsedTimeChecks
+	$(BUILD)/ElapsedTimeChecks
+
 ip-helper-check:
 	@mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/IpHelperChecks.c -o $(BUILD)/IpHelperChecks

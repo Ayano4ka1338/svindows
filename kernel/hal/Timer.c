@@ -10,6 +10,12 @@
 #define PIT_CHANNEL0 0x40
 #define PIT_COMMAND  0x43
 #define PIT_FREQUENCY 1193182u /* input clock, Hz */
+static UINT32 g_timer_divisor;
+
+UINT32 HalTimerResolution(void)
+{
+    return (UINT32)((UINT64)g_timer_divisor * 10000000u / PIT_FREQUENCY);
+}
 
 void HalInitializeTimer(UINT32 hz)
 {
@@ -21,6 +27,7 @@ void HalInitializeTimer(UINT32 hz)
         divisor = 1;
     if (divisor > 0xFFFF)
         divisor = 0xFFFF;
+    g_timer_divisor = divisor;
 
     /* Command: channel 0, access lo+hi byte, mode 2 (rate generator), binary. */
     __outbyte(PIT_COMMAND, 0x34);

@@ -365,6 +365,8 @@ EXPORTS
     NtUserGetObjectInformation
     SvNtUserEnumDesktopWindows
     SvNtQueryNetworkInterface
+    NtQueryTimerResolution
+    RtlTimeToElapsedTimeFields
     SvNtQueryThreadExitStatus
     SvNtReadProcessMemory
     NtGdiGetDCObject
