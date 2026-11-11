@@ -281,10 +281,20 @@ __declspec(dllexport) COLORREF ImageList_SetBkColor(HANDLE handle, COLORREF colo
     return previous;
 }
 
-__declspec(dllexport) int ImageList_ReplaceIcon(HANDLE list, int index, HICON icon)
+__declspec(dllimport) HBITMAP SvUserIconToBitmap(HICON, int, int, COLORREF);
+__declspec(dllexport) int ImageList_ReplaceIcon(HANDLE handle, int index, HICON icon)
 {
-    (void)list; (void)index; (void)icon;
-    /* Icon handles currently carry resource identity only. No icon pixels can
-     * be cloned into a bitmap list until the icon decoder is implemented. */
-    return -1;
+    SV_IMAGELIST *list = 0;
+    for (UINT i = 0; i < 256; ++i)
+        if (handle == &g_image_lists[i] && g_image_lists[i].Magic == SV_IMAGE_LIST_MAGIC)
+            list = &g_image_lists[i];
+    if (!list || !icon || index < -1 || index >= list->Count ||
+        (index == -1 && list->Count == SV_IMAGE_LIST_MAX)) return -1;
+    COLORREF background = list->Background == 0xffffffffu ? GetSysColor(5) : list->Background;
+    HBITMAP bitmap = SvUserIconToBitmap(icon, list->Width, list->Height, background);
+    if (!bitmap) return -1;
+    if (index == -1) index = list->Count++;
+    else DeleteObject(list->Images[index]);
+    list->Images[index] = bitmap;
+    return index;
 }

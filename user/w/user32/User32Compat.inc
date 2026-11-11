@@ -439,33 +439,7 @@ __declspec(dllimport) UINT64 SvNtUserCreateIconHandle(HINSTANCE instance,
     UINT_PTR resource, BOOL shared);
 __declspec(dllimport) UINT64 SvNtUserDestroyIcon(HICON icon);
 
-static HICON load_icon_resource(HINSTANCE instance, const WCHAR *name, BOOL shared)
-{
-    if (!name) return NULL;
-    UINT_PTR key = (UINT_PTR)name;
-    if (!instance) {
-        if (key < 32512 || key > 32518) return NULL;
-    } else {
-        HANDLE group = FindResourceW(instance, name, MAKEINTRESOURCEW(14));
-        if (!group || SizeofResource(instance, group) < 6) return NULL;
-        key = (UINT_PTR)group;
-    }
-    /* Window classes can reference the resource. The window manager does
-     * not yet paint icon pixels in its title bar. */
-    return (HICON)(UINT_PTR)SvNtUserCreateIconHandle(instance, key, shared);
-}
-
-USER32_API HICON LoadIconW(HINSTANCE instance, const WCHAR *name)
-{
-    return load_icon_resource(instance, name, TRUE);
-}
-
-USER32_API BOOL DestroyIcon(HICON icon)
-{
-    if (icon && SvNtUserDestroyIcon(icon)) return TRUE;
-    SetLastError(1402); /* ERROR_INVALID_CURSOR_HANDLE */
-    return FALSE;
-}
+#include "User32Icons.inc"
 
 USER32_API HBITMAP LoadImageW(HINSTANCE instance,const WCHAR *name,UINT type,
                               int width,int height,UINT flags)
