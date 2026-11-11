@@ -1,5 +1,9 @@
 LIBRARY SHLWAPI
 EXPORTS
+    SHCreateThread @16
+    StrCmpICW @158
+    SHGetFileDescriptionW @348
+    SHWindowsPolicy @618
     SHStripMneumonicW @225
     QISearch @219
     ShellMessageBoxW @388

@@ -472,7 +472,7 @@ $(AUTHZ): user/w/authz/Authz.c $(KERNEL32)
 	$(CLANGWIN) -c user/w/authz/Authz.c -o $(BUILD)/authz.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x2F0000000 /out:$@ $(BUILD)/authz.obj $(KERNEL32LIB)
 
-$(SHLWAPI): user/w/shlwapi/Shlwapi.c user/w/shlwapi/Shlwapi.def $(KERNEL32) $(USER32)
+$(SHLWAPI): user/w/shlwapi/Shlwapi.c user/w/shlwapi/Shlwapi.def $(wildcard user/w/shlwapi/*.inc) $(KERNEL32) $(USER32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/w/shlwapi/Shlwapi.c -o $(BUILD)/shlwapi.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x270000000 \
@@ -757,7 +757,12 @@ clean:
 	rm -rf $(BUILD)
 
 # Host checks execute the actual USER menu model and native USER/GDI code.
-.PHONY: user-menu-check win32k-check crt-wide-conversion-check
+.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check
+shell-path-check:
+	@mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/ShellPathChecks.c -o $(BUILD)/ShellPathChecks
+	$(BUILD)/ShellPathChecks
+
 crt-wide-conversion-check:
 	@mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/CrtWideConversionChecks.c -o $(BUILD)/CrtWideConversionChecks

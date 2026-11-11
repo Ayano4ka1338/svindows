@@ -1,5 +1,7 @@
 typedef unsigned short WCHAR;
 
+#include "PathText.inc"
+
 /* The Windows 7 calculator imports SHLWAPI ordinal 225, which is
  * SHStripMneumonicW. Remove mnemonic markers in place; doubled ampersands
  * represent one literal ampersand. */
@@ -202,3 +204,5 @@ __declspec(dllexport) int IsOS(unsigned long feature)
         return 0;
     }
 }
+
+#include "TaskSupport.inc"
