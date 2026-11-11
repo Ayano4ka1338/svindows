@@ -82,7 +82,7 @@ static USER_WINDOW_TIMER *KiUserDueTimer(USER_MSG_QUEUE *queue, UINT64 now)
     USER_WINDOW_TIMER *due = NULL;
     for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
         USER_WINDOW_TIMER *timer = &queue->Timers[i];
-        if (timer->Id && timer->DueTick <= now && (!due || timer->DueTick < due->DueTick))
+        if (timer->Period && timer->DueTick <= now && (!due || timer->DueTick < due->DueTick))
             due = timer;
     }
     return due;

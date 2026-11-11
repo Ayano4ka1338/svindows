@@ -897,6 +897,13 @@ int main(void)
     args[1]=0xffff;assert(!NtUserCreateWindowEx(args));args[1]=0;thread_a.UserGsBase=saved_teb;
     UINT64 hwnd_a = create_fixture_window(args);
     assert(hwnd_a && KiUserWindowValid(hwnd_a, TRUE));
+    UINT64 zero_timer[] = {hwnd_a, 0, 10, 0};
+    assert(NtUserSetTimer(zero_timer));
+    test_tick++;
+    assert(KiUserTakeMessage(&msg, TRUE) && msg.Message == WM_TIMER_ &&
+           msg.Hwnd == hwnd_a && msg.WParam == 0);
+    assert(NtUserKillTimer(zero_timer) && !NtUserKillTimer(zero_timer));
+
     args[0] = hwnd_a;
     graphics = TRUE;
     UINT64 window_dc = NtUserGetDC(args);

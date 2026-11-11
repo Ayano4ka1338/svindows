@@ -643,7 +643,7 @@ static UINT64 NtUserDispatchMessage(UINT64 *a)
         if (!queue) return 0;
         for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
             const USER_WINDOW_TIMER *timer = &queue->Timers[i];
-            if (timer->Id && timer->Id == msg->WParam && timer->Window == msg->Hwnd &&
+            if (timer->Period && timer->Id == msg->WParam && timer->Window == msg->Hwnd &&
                 timer->Callback == (UINT64)msg->LParam) {
                 KiStartUserCallback(timer->Callback, msg->Hwnd, WM_TIMER_, msg->WParam,
                     msg->Time, CB_CONT_SIMPLE, msg->Hwnd, WM_TIMER_, msg->Time);
@@ -695,18 +695,19 @@ static UINT64 NtUserSetTimer(UINT64 *a)
     if (queue) {
         for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
             USER_WINDOW_TIMER *timer = &queue->Timers[i];
-            if (!timer->Id && !vacant) vacant = timer;
-            if (timer->Id && timer->Id == id && timer->Window == hwnd) entry = timer;
+            if (!timer->Period && !vacant) vacant = timer;
+            if (timer->Period && timer->Id == id && timer->Window == hwnd) entry = timer;
         }
     }
     if (!entry && vacant) {
         entry = vacant;
-        if (!hwnd || !id) {
+        if (!hwnd) {
             /* Generated ids are unique for this hwnd in the owning queue. */
             for (id = 1; ; ++id) {
                 BOOLEAN used = FALSE;
                 for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i)
-                    if (queue->Timers[i].Id == id && queue->Timers[i].Window == hwnd) used = TRUE;
+                    if (queue->Timers[i].Period && queue->Timers[i].Id == id &&
+                        queue->Timers[i].Window == hwnd) used = TRUE;
                 if (!used) break;
             }
         }
@@ -716,7 +717,7 @@ static UINT64 NtUserSetTimer(UINT64 *a)
         KiUserSyncInputEvent(queue);
     }
     KiIrqRestore(flags);
-    return entry ? id : 0;
+    return entry ? (id ? id : 1) : 0;
 }
 
 static UINT64 NtUserKillTimer(UINT64 *a)
@@ -724,10 +725,10 @@ static UINT64 NtUserKillTimer(UINT64 *a)
     UINT64 flags = KiIrqSave();
     USER_MSG_QUEUE *queue = KiUserTimerQueue(a[0]);
     BOOLEAN found = FALSE;
-    if (queue && a[1]) {
+    if (queue) {
         for (UINT32 i = 0; i < USER_MAX_QUEUE_TIMERS; ++i) {
             USER_WINDOW_TIMER *timer = &queue->Timers[i];
-            if (timer->Id == a[1] && timer->Window == a[0]) {
+            if (timer->Period && timer->Id == a[1] && timer->Window == a[0]) {
                 *timer = (USER_WINDOW_TIMER){0};
                 found = TRUE;
                 break;
