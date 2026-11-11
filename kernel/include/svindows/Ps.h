@@ -162,6 +162,7 @@ NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
                             ULONG *pid_out);
 BOOLEAN PsIsProcessObjectType(struct _OBJECT_TYPE *type);
 UINT64 NtOpenProcess(UINT64 *args);
+UINT64 NtTerminateProcess(UINT64 *args);
 PKPROCESS PsGetProcessFromObject(PVOID object);
 void *PsReferenceNextProcess(ULONG after_process_id, ULONG *process_id);
 

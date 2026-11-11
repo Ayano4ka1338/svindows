@@ -418,6 +418,8 @@ PKPROCESS PsGetProcessFromObject(PVOID raw)
     return &((PROCESS_OBJECT *)raw)->Process;
 }
 
+#include "ProcessTerminate.inc"
+
 NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
                                          ULONG *return_length)
 {

@@ -183,8 +183,12 @@ __declspec(dllexport) BOOL TlsSetValue(DWORD index, void *value)
 
 __declspec(dllexport) BOOL TerminateProcess(HANDLE process, DWORD code)
 {
-    (void)process;
-    ExitProcess(code);
+    extern NTSTATUS NtTerminateProcess(HANDLE, NTSTATUS);
+    NTSTATUS status = NtTerminateProcess(process, (NTSTATUS)code);
+    if (!NT_SUCCESS(status)) {
+        SetLastError(ntstatus_to_win32(status));
+        return 0;
+    }
     return 1;
 }
 

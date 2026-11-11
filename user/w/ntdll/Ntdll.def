@@ -366,6 +366,7 @@ EXPORTS
     SvNtUserEnumDesktopWindows
     SvNtQueryNetworkInterface
     NtQueryTimerResolution
+    NtTerminateProcess
     RtlTimeToElapsedTimeFields
     SvNtQueryThreadExitStatus
     SvNtReadProcessMemory
