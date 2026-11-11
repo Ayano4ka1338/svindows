@@ -43,6 +43,11 @@ GDI32_API BOOL GetWindowOrgEx(HDC dc, POINT *origin)
     return GetViewportOrgEx(dc, origin);
 }
 
+GDI32_API BOOL OffsetWindowOrgEx(HDC dc, int dx, int dy, POINT *previous)
+{
+    return OffsetViewportOrgEx(dc, dx, dy, previous);
+}
+
 GDI32_API BOOL OffsetViewportOrgEx(HDC dc, int dx, int dy, POINT *previous)
 {
     POINT current;
