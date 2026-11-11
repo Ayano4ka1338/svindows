@@ -507,6 +507,7 @@ typedef struct _KE_PROCESS_THREAD_INFO {
 } KE_PROCESS_THREAD_INFO;
 ULONG KeSnapshotProcessThreads(PKPROCESS process,
                                KE_PROCESS_THREAD_INFO *buffer, ULONG capacity);
+PKPROCESS KeGetSystemProcess(void);
 
 void      KeInitializeScheduler(void);
 PKTHREAD  KeCreateThread(const char *name, PKSTART_ROUTINE routine,

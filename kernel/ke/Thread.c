@@ -151,6 +151,11 @@ PKTHREAD KeLookupThreadById(ULONG thread_id)
     return result;
 }
 
+PKPROCESS KeGetSystemProcess(void)
+{
+    return &g_system_process;
+}
+
 ULONG KeSnapshotProcessThreads(PKPROCESS process,
                                KE_PROCESS_THREAD_INFO *buffer, ULONG capacity)
 {
@@ -160,7 +165,7 @@ ULONG KeSnapshotProcessThreads(PKPROCESS process,
     for (PLIST_ENTRY entry = process->ThreadListHead.Flink;
          entry != &process->ThreadListHead; entry = entry->Flink) {
         PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
-        if (!thread->UserMode || thread->State == ThreadStateTerminated)
+        if (!thread->ThreadId || thread->State == ThreadStateTerminated)
             continue;
         if (buffer && count < capacity) {
             KE_PROCESS_THREAD_INFO *info = &buffer[count];
@@ -257,7 +262,7 @@ void KeInitializeScheduler(void)
     if (!g_system_process.LoaderContext)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
                    "cannot allocate System loader context");
-    g_system_process.ProcessId = 0;
+    g_system_process.ProcessId = 4;
     g_system_process.PriorityClass = 2;
     g_system_process.BasePriority = 8;
     g_system_process.Object = NULL;

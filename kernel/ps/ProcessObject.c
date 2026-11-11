@@ -43,6 +43,21 @@ static KE_PROCESS_THREAD_INFO
 static ULONG g_system_snapshot_thread_counts[PS_SYSTEM_SNAPSHOT_LIMIT];
 static volatile ULONG g_system_snapshot_lock;
 
+/* The two scheduler-owned records have no user-mode process object to pin.
+ * PID 0 is described separately by the active processor's idle context. */
+static PKPROCESS system_snapshot_process(ULONG index)
+{
+    if (!index) return NULL;
+    if (index == 1) return KeGetSystemProcess();
+    return PsGetProcessFromObject(g_system_snapshot_processes[index]);
+}
+
+static const char *system_snapshot_name(PKPROCESS process)
+{
+    if (!process) return ""; /* NT idle record has an empty image name */
+    return process->ImagePath[0] ? process->ImagePath : process->Name;
+}
+
 static void delete_process(POBJECT raw)
 {
     PROCESS_OBJECT *object = (PROCESS_OBJECT *)raw;
@@ -428,7 +443,16 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
     while (__atomic_exchange_n(&g_system_snapshot_lock, 1, __ATOMIC_ACQUIRE))
         __asm__ volatile("pause");
 
-    ULONG process_count = 0, cursor = 0;
+    PKPRCB cpu = KeGetProcessorBlock(0);
+    ULONG process_count = 2, cursor = 0;
+    g_system_snapshot_thread_counts[0] = 1;
+    g_system_snapshot_threads[0][0] = (KE_PROCESS_THREAD_INFO){
+        .KernelTime = __atomic_load_n(&cpu->IdleTime, __ATOMIC_RELAXED),
+        .State = cpu->CurrentThread == cpu->IdleThread ? 2 : 1
+    };
+    ULONG system_threads = KeSnapshotProcessThreads(KeGetSystemProcess(),
+                                                    g_system_snapshot_threads[1], 128);
+    g_system_snapshot_thread_counts[1] = system_threads < 128 ? system_threads : 128;
     while (process_count < PS_SYSTEM_SNAPSHOT_LIMIT) {
         ULONG pid = 0;
         POBJECT object = PsReferenceNextProcess(cursor, &pid);
@@ -449,8 +473,8 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
 
     ULONG required = 0;
     for (ULONG i = 0; i < process_count; ++i) {
-        PKPROCESS process = PsGetProcessFromObject(g_system_snapshot_processes[i]);
-        const char *name = process->ImagePath;
+        PKPROCESS process = system_snapshot_process(i);
+        const char *name = system_snapshot_name(process);
         ULONG chars = 0, base = 0;
         while (name[chars] && chars < 259) {
             if (name[chars] == '\\' || name[chars] == '/') base = chars + 1;
@@ -480,10 +504,10 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
     UINT8 *bytes = buffer;
     ULONG offset = 0;
     for (ULONG i = 0; i < process_count; ++i) {
-        PKPROCESS process = PsGetProcessFromObject(g_system_snapshot_processes[i]);
+        PKPROCESS process = system_snapshot_process(i);
         UINT8 *row = bytes + offset;
         ULONG thread_count = g_system_snapshot_thread_counts[i];
-        const char *image = process->ImagePath;
+        const char *image = system_snapshot_name(process);
         ULONG chars = 0, base = 0;
         while (image[chars] && chars < 259) {
             if (image[chars] == '\\' || image[chars] == '/') base = chars + 1;
@@ -497,18 +521,19 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         *(ULONG *)(row + 4) = thread_count;
         *(ULONG *)(row + 16) = 0; /* hard faults are not counted per process */
         *(UINT64 *)(row + 32) = 0; /* process create time not yet accounted */
-        *(UINT64 *)(row + 40) = __atomic_load_n(&process->UserTime,__ATOMIC_RELAXED);
-        *(UINT64 *)(row + 48) = __atomic_load_n(&process->KernelTime,__ATOMIC_RELAXED);
+        *(UINT64 *)(row + 40) = process ? __atomic_load_n(&process->UserTime,__ATOMIC_RELAXED) : 0;
+        *(UINT64 *)(row + 48) = process ? __atomic_load_n(&process->KernelTime,__ATOMIC_RELAXED)
+                                      : g_system_snapshot_threads[0][0].KernelTime;
         *(UINT16 *)(row + 56) = (UINT16)(visible_chars * sizeof(UINT16));
         *(UINT16 *)(row + 58) = (UINT16)((visible_chars + 1) * sizeof(UINT16));
-        *(UINT64 *)(row + 64) = (UINT64)(row + 256 + thread_count * 80);
-        *(LONG *)(row + 72) = process->BasePriority;
-        *(UINT64 *)(row + 80) = process->ProcessId;
-        *(UINT64 *)(row + 88) = process->ParentProcessId;
-        *(ULONG *)(row + 96) = ObCountOpenHandles(process->HandleTable);
+        if (visible_chars) *(UINT64 *)(row + 64) = (UINT64)(row + 256 + thread_count * 80);
+        *(LONG *)(row + 72) = process ? process->BasePriority : 0;
+        *(UINT64 *)(row + 80) = process ? process->ProcessId : 0;
+        *(UINT64 *)(row + 88) = process ? process->ParentProcessId : 0;
+        *(ULONG *)(row + 96) = process ? ObCountOpenHandles(process->HandleTable) : 0;
         *(ULONG *)(row + 100) = 0; /* this build has one interactive session */
         UINT64 virtual_bytes = 0, committed_bytes = 0;
-        for (ULONG r = 0; r < MM_MAX_PROCESS_REGIONS; ++r) {
+        for (ULONG r = 0; process && r < MM_MAX_PROCESS_REGIONS; ++r) {
             MM_PROCESS_REGION *region = &process->VmRegions[r];
             if (!region->InUse) continue;
             virtual_bytes += region->ReserveSize;
@@ -518,11 +543,11 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         *(UINT64 *)(row + 120) = virtual_bytes;
         UINT64 flags = KiIrqSave();
         UINT64 private_pages;
-        UINT64 working_set = MmCountResidentUserPages(process->DirectoryTableBase,
+        UINT64 working_set = MmCountResidentUserPages(i >= 2 ? process->DirectoryTableBase : 0,
                                                       &private_pages) * PAGE_SIZE;
-        if (working_set > process->PeakWorkingSetBytes)
+        if (process && working_set > process->PeakWorkingSetBytes)
             process->PeakWorkingSetBytes = working_set;
-        UINT64 sampled_peak = process->PeakWorkingSetBytes;
+        UINT64 sampled_peak = process ? process->PeakWorkingSetBytes : 0;
         KiIrqRestore(flags);
         *(UINT64 *)(row + 8) = private_pages * PAGE_SIZE;
         *(UINT64 *)(row + 136) = sampled_peak;
@@ -539,7 +564,7 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
             UINT8 *entry = thread_out + t * 80;
             *(UINT64 *)(entry + 0) = thread->KernelTime;
             *(UINT64 *)(entry + 8) = thread->UserTime;
-            *(UINT64 *)(entry + 40) = process->ProcessId;
+            *(UINT64 *)(entry + 40) = process ? process->ProcessId : 0;
             *(UINT64 *)(entry + 48) = thread->ThreadId;
             *(LONG *)(entry + 56) = thread->Priority;
             *(LONG *)(entry + 60) = thread->BasePriority;
@@ -551,7 +576,7 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
     }
 
 cleanup:
-    for (ULONG i = 0; i < process_count; ++i)
+    for (ULONG i = 2; i < process_count; ++i)
         ObDereferenceObject(g_system_snapshot_processes[i]);
     __atomic_store_n(&g_system_snapshot_lock, 0, __ATOMIC_RELEASE);
     return result;
