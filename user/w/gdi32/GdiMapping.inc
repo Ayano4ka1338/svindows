@@ -1,5 +1,3 @@
-__declspec(dllimport) UINT64 NtGdiFlush(void);
-
 /* The current raster operates in device pixels, with an optional offset. */
 __declspec(dllimport) UINT64 SvNtGdiViewportOrigin(HDC dc, const POINT *origin,
                                                   POINT *previous);
@@ -7,7 +5,7 @@ __declspec(dllimport) UINT64 SvNtGdiViewportOrigin(HDC dc, const POINT *origin,
 
 GDI32_API BOOL GdiFlush(void)
 {
-    return NtGdiFlush() != 0;
+    return TRUE;
 }
 
 GDI32_API int SetMapMode(HDC dc, int mode)
