@@ -549,24 +549,23 @@ void W32kXorgWorker(PVOID context)
     W32K_XORG *x = &g_w32k_xorg;
     UINT32 last_sequence = (UINT32)-1;
     UINT64 retry_at = 0;
+    KTIMER poll_timer;
+    KeInitializeTimerEx(&poll_timer, FALSE);
     for (;;) {
         if (!LinuxLocalConnectable(display, sizeof(display) - 1)) {
             if (x->Socket)
                 W32kXClose(x);
             last_sequence = (UINT32)-1;
-            KeYield();
-            continue;
+            goto wait_for_poll;
         }
         if (!x->Socket) {
             UINT64 now = KeGetTickCount();
             if (now < retry_at) {
-                KeYield();
-                continue;
+                goto wait_for_poll;
             }
             retry_at = now + 50; /* retry twice per second while Xorg starts */
             if (!W32kXOpen(x)) {
-                KeYield();
-                continue;
+                goto wait_for_poll;
             }
             last_sequence = (UINT32)-1;
         }
@@ -581,6 +580,8 @@ void W32kXorgWorker(PVOID context)
                 last_sequence = sequence;
             }
         }
-        KeYield();
+wait_for_poll:
+        KeSetTimerEx(&poll_timer, -(INT64)KE_TIME_UNITS_PER_TICK, 0, NULL);
+        KeWaitForSingleObject(&poll_timer.Header);
     }
 }

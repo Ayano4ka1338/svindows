@@ -47,6 +47,8 @@ static void InputWorker(PVOID context)
     (void)context;
 
     UINT32 last_seq = (UINT32)-1;
+    KTIMER poll_timer;
+    KeInitializeTimerEx(&poll_timer, FALSE);
 
     for (;;) {
         /* One ordered hardware stream: make, translated character, break.
@@ -105,7 +107,8 @@ static void InputWorker(PVOID context)
 
         ConUpdateCursor(KeGetTickCount());
 
-        KeYield();
+        KeSetTimerEx(&poll_timer, -(INT64)KE_TIME_UNITS_PER_TICK, 0, NULL);
+        KeWaitForSingleObject(&poll_timer.Header);
     }
 }
 
