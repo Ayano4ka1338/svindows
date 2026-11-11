@@ -101,3 +101,4 @@ __declspec(dllexport) int *_errno(void)
 #include "FileStream.inc"
 #include "FileCompat.inc"
 #include "Locale.inc"
+#include "WideConversion.inc"

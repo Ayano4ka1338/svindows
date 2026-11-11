@@ -757,7 +757,12 @@ clean:
 	rm -rf $(BUILD)
 
 # Host checks execute the actual USER menu model and native USER/GDI code.
-.PHONY: user-menu-check win32k-check
+.PHONY: user-menu-check win32k-check crt-wide-conversion-check
+crt-wide-conversion-check:
+	@mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/CrtWideConversionChecks.c -o $(BUILD)/CrtWideConversionChecks
+	$(BUILD)/CrtWideConversionChecks
+
 user-menu-check:
 	mkdir -p $(BUILD)
 	clang -fdeclspec -fshort-wchar -Wno-ignored-attributes -ffunction-sections -fdata-sections $(NOTEPAD_INC) tools/checks/UserMenuChecks.c -Wl,--gc-sections -o $(BUILD)/UserMenuChecks
