@@ -138,6 +138,9 @@ typedef struct _INITCOMMONCONTROLSEX { DWORD dwSize, dwICC; } INITCOMMONCONTROLS
 #define LVN_ITEMACTIVATE (LVN_FIRST-14)
 #define LVN_COLUMNCLICK (LVN_FIRST-8)
 #define LVCFMT_LEFT 0
+#define LVCFMT_RIGHT 1
+#define LVCFMT_CENTER 2
+#define LVCFMT_JUSTIFYMASK 3
 typedef struct _TCITEMW {
     UINT mask; DWORD dwState, dwStateMask; WCHAR *pszText;
     int cchTextMax, iImage; LPARAM lParam;

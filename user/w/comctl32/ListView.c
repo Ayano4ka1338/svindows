@@ -71,6 +71,21 @@ static RECT cell_rect(LISTVIEW_STATE *s,int row,int col)
     return (RECT){x,LV_HEADER_HEIGHT+(row-s->first_visible)*LV_ROW_HEIGHT,
                   x+s->columns[col].width,LV_HEADER_HEIGHT+(row-s->first_visible+1)*LV_ROW_HEIGHT};
 }
+static UINT column_text_flags(const LV_COLUMN *column)
+{
+    UINT flags = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
+    switch (column->format & LVCFMT_JUSTIFYMASK) {
+    case LVCFMT_RIGHT: return flags | DT_RIGHT;
+    case LVCFMT_CENTER: return flags | DT_CENTER;
+    default: return flags | DT_LEFT;
+    }
+}
+
+static int column_text_padding(const LV_COLUMN *column)
+{
+    return column->width < 48 ? 3 : 6;
+}
+
 static void draw_listview(HWND hwnd,LISTVIEW_STATE *s)
 {
     PAINTSTRUCT ps;HDC dc=BeginPaint(hwnd,&ps);if(!dc)return;
@@ -79,9 +94,10 @@ static void draw_listview(HWND hwnd,LISTVIEW_STATE *s)
     for(int c=0;c<s->column_count;++c){
         RECT head={x,0,x+s->columns[c].width,LV_HEADER_HEIGHT};
         SvComctlFill(dc,&head,RGB(243,243,243));
-        RECT label={x+8,2,x+s->columns[c].width-8,LV_HEADER_HEIGHT-2};
+        int pad = column_text_padding(&s->columns[c]);
+        RECT label={x+pad,2,x+s->columns[c].width-pad,LV_HEADER_HEIGHT-2};
         SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(0,0,0));
-        DrawTextW(dc,s->columns[c].text?s->columns[c].text:L"",-1,&label,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
+        DrawTextW(dc,s->columns[c].text?s->columns[c].text:L"",-1,&label,column_text_flags(&s->columns[c]));
         HPEN edge=CreatePen(0,1,RGB(210,210,210));HGDIOBJ old=edge?SelectObject(dc,edge):NULL;
         MoveToEx(dc,x+s->columns[c].width-1,0,NULL);LineTo(dc,x+s->columns[c].width-1,client.bottom);
         if(edge){SelectObject(dc,old);DeleteObject(edge);}x+=s->columns[c].width;
@@ -95,10 +111,11 @@ static void draw_listview(HWND hwnd,LISTVIEW_STATE *s)
         else if(s->rows[row].state&LVIS_FOCUSED)SvComctlFill(dc,&rr,RGB(240,240,240));
         MoveToEx(dc,0,y+LV_ROW_HEIGHT-1,NULL);LineTo(dc,client.right,y+LV_ROW_HEIGHT-1);
         for(int col=0;col<s->column_count;++col){
-            RECT r=cell_rect(s,row,col);r.left+=8;r.right-=6;r.top+=1;r.bottom-=1;
+            int pad = column_text_padding(&s->columns[col]);
+            RECT r=cell_rect(s,row,col);r.left+=pad;r.right-=pad;r.top+=1;r.bottom-=1;
             WCHAR *text=col<s->rows[row].cell_count?s->rows[row].cells[col]:NULL;
             SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(0,0,0));
-            DrawTextW(dc,text?text:L"",-1,&r,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
+            DrawTextW(dc,text?text:L"",-1,&r,column_text_flags(&s->columns[col]));
         }
     }
     if(line){SelectObject(dc,old_line);DeleteObject(line);}EndPaint(hwnd,&ps);
