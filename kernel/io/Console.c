@@ -45,6 +45,7 @@ typedef struct _CONSOLE_STATE {
 } CONSOLE_STATE;
 
 static CONSOLE_STATE g_console;
+static KEVENT g_console_input_ready;
 static void con_fill(UINT32 first, UINT32 count, UINT8 character,
                      UINT8 attribute, BOOLEAN fill_character,
                      BOOLEAN fill_attribute);
@@ -237,6 +238,7 @@ static void con_put_character(char character, BOOLEAN write_stream)
 
 void ConInitialize(void)
 {
+    KeInitializeEvent(&g_console_input_ready, TRUE, FALSE);
     g_console.Width = GfxAvailable() ? GfxFramebuffer.Width / GFX_FONT_W : 80;
     g_console.Height = GfxAvailable() ? GfxFramebuffer.Height / GFX_FONT_H : 25;
     if (!g_console.Width) g_console.Width = 80;
@@ -290,6 +292,7 @@ void ConQueueInputCharacter(char character)
         }
     }
 
+    UINT64 irq = KiIrqSave();
     UINT32 next = (g_console.InputHead + 1) % CONSOLE_INPUT_CAPACITY;
     if (next != g_console.InputTail) {
         CONSOLE_INPUT_EVENT *event = &g_console.Input[g_console.InputHead];
@@ -298,16 +301,22 @@ void ConQueueInputCharacter(char character)
         event->VirtualKey = (UINT8)character;
         event->ControlState = 0;
         g_console.InputHead = next;
+        KeSetEvent(&g_console_input_ready);
     }
+    KiIrqRestore(irq);
 }
 
 static char con_pop_input(void)
 {
+    UINT64 irq = KiIrqSave();
     char character = 0;
     if (g_console.InputHead != g_console.InputTail) {
         character = (char)g_console.Input[g_console.InputTail].Character;
         g_console.InputTail = (g_console.InputTail + 1) % CONSOLE_INPUT_CAPACITY;
     }
+    if (g_console.InputHead == g_console.InputTail)
+        KeResetEvent(&g_console_input_ready);
+    KiIrqRestore(irq);
     return character;
 }
 
@@ -318,6 +327,7 @@ void ConFlushInput(void)
      * no partially published event can survive the flush. */
     UINT64 irq = KiIrqSave();
     g_console.InputTail = g_console.InputHead;
+    KeResetEvent(&g_console_input_ready);
     KiIrqRestore(irq);
 }
 
@@ -327,7 +337,9 @@ SIZE_T ConRead(void *buffer, SIZE_T length)
     SIZE_T count = 0;
     while (count < length) {
         char character;
-        while (!(character = con_pop_input())) KeYield();
+        while (!(character = con_pop_input()))
+            if (!NT_SUCCESS(KeWaitForSingleObject(&g_console_input_ready.Header)))
+                return count;
         if ((g_console.InputMode & CON_INPUT_PROCESSED) && character == '\r')
             character = '\n';
         output[count++] = character;
