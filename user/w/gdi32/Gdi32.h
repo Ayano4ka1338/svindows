@@ -210,6 +210,7 @@ GDI32_API DWORD   GetRegionData(HRGN region, DWORD bytes, void *data);
 GDI32_API int     CombineRgn(HRGN dst, HRGN src1, HRGN src2, int mode);
 GDI32_API BOOL    EqualRgn(HRGN first, HRGN second);
 GDI32_API DWORD   SetLayout(HDC dc, DWORD layout);
+GDI32_API DWORD   GetLayout(HDC dc);
 GDI32_API BOOL    DeleteDC(HDC hdc);
 
 /* Objects. */

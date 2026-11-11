@@ -8,6 +8,13 @@ GDI32_API BOOL GdiFlush(void)
     return TRUE;
 }
 
+GDI32_API DWORD GetLayout(HDC dc)
+{
+    if (object_type(dc) != SV_GDI_TYPE_DC)
+        return 0xffffffffu;
+    return 0;
+}
+
 GDI32_API int SetMapMode(HDC dc, int mode)
 {
     if (object_type(dc) != SV_GDI_TYPE_DC || mode != SV_MM_TEXT)
