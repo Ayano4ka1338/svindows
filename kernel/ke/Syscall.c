@@ -613,6 +613,8 @@ static UINT64 NtDelayExecution(UINT64 *a)
  * descriptor, but report that the licensing provider is absent rather than
  * returning a fabricated blob that user mode would reject as corrupt.
  */
+#include "SystemCpuInformation.inc"
+
 static UINT64 NtQuerySystemInformation(UINT64 *a)
 {
     typedef struct _SYSTEM_BASIC_INFORMATION_LOCAL {
@@ -642,6 +644,9 @@ static UINT64 NtQuerySystemInformation(UINT64 *a)
     if (info_class == 5) /* SystemProcessInformation */
         return (UINT64)PsQuerySystemProcessInformation(
             (void *)buffer, length, return_length);
+
+    if(info_class==8) /* SystemProcessorPerformanceInformation */
+        return (UINT64)KiQueryProcessorPerformance((void *)buffer,length,return_length);
 
     if (info_class == SystemBasicInformation) {
         UINT32 required = sizeof(SYSTEM_BASIC_INFORMATION_LOCAL);

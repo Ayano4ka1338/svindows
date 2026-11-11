@@ -17,6 +17,7 @@ void KeAccountClockTick(BOOLEAN user_mode)
         if(thread->Process)__atomic_add_fetch(&thread->Process->UserTime,elapsed,__ATOMIC_RELAXED);
     }else{
         __atomic_add_fetch(&cpu->KernelTime,elapsed,__ATOMIC_RELAXED);
+        if(cpu->DpcRunning)__atomic_add_fetch(&cpu->DpcTime,elapsed,__ATOMIC_RELAXED);
         __atomic_add_fetch(&thread->KernelTime,elapsed,__ATOMIC_RELAXED);
         if(thread->Process)__atomic_add_fetch(&thread->Process->KernelTime,elapsed,__ATOMIC_RELAXED);
     }

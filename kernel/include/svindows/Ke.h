@@ -426,6 +426,8 @@ typedef struct _KPRCB {
     PKTHREAD IdleThread;
     UINT64 IdleTime, KernelTime, UserTime;
     ULONG ContextSwitches;
+    UINT64 DpcTime;
+    ULONG InterruptCount;
 } KPRCB, *PKPRCB;
 
 #define KE_MAXIMUM_PROCESSORS 64u

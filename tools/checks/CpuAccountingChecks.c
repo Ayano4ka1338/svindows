@@ -20,5 +20,7 @@ int main(void)
     /* A terminated thread's historical process time must remain counted. */
     first=(KTHREAD){0};assert(process.UserTime==200000&&process.KernelTime==200000);
     cpu.CurrentThread=0;KeAccountClockTick(TRUE);assert(cpu.UserTime==200000);
+    cpu.CurrentThread=&second;cpu.DpcRunning=TRUE;KeAccountClockTick(FALSE);
+    assert(cpu.DpcTime==100000&&cpu.KernelTime==500000&&process.KernelTime==300000);
     puts("PASS user/kernel/idle tick accounting and process totals across thread teardown");
 }

@@ -896,3 +896,9 @@ cpu-accounting-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined -idirafter kernel/include tools/checks/CpuAccountingChecks.c -o $(BUILD)/CpuAccountingChecks
 	$(BUILD)/CpuAccountingChecks
+
+.PHONY: system-cpu-check
+system-cpu-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined -idirafter kernel/include tools/checks/SystemCpuChecks.c -o $(BUILD)/SystemCpuChecks
+	$(BUILD)/SystemCpuChecks
