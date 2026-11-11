@@ -381,6 +381,21 @@ GDI32_API BOOL SetRectRgn(HRGN region,int left,int top,int right,int bottom)
 { SV_REGION*r=sv_region(region);if(!r)return FALSE;r->Bounds=(RECT){left,top,right,bottom};return TRUE; }
 GDI32_API int GetRgnBox(HRGN region,LPRECT rect)
 { SV_REGION*r=sv_region(region);if(!r||!rect)return 0;*rect=r->Bounds;return rect->right<=rect->left||rect->bottom<=rect->top?1:2; }
+
+GDI32_API DWORD GetRegionData(HRGN region, DWORD bytes, void *data)
+{
+    SV_REGION *r = sv_region(region);
+    if (!r) return 0;
+    const DWORD required = 48;
+    if (!data || bytes < required) return required;
+    struct {
+        DWORD size, type, count, region_bytes;
+        RECT bounds;
+        RECT rectangle;
+    } result = {32, 1, 1, 16, r->Bounds, r->Bounds};
+    memcpy(data, &result, sizeof(result));
+    return required;
+}
 GDI32_API int CombineRgn(HRGN dst,HRGN src1,HRGN src2,int mode)
 {
     SV_REGION*d=sv_region(dst),*a=sv_region(src1),*b=sv_region(src2);if(!d||!a)return 0;

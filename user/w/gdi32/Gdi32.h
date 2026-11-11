@@ -205,6 +205,7 @@ GDI32_API HRGN    CreateRectRgnIndirect(const RECT *rect);
 GDI32_API BOOL    SetRectRgn(HRGN region, int left, int top, int right, int bottom);
 GDI32_API int     OffsetRgn(HRGN region, int dx, int dy);
 GDI32_API int     GetRgnBox(HRGN region, LPRECT rect);
+GDI32_API DWORD   GetRegionData(HRGN region, DWORD bytes, void *data);
 GDI32_API int     CombineRgn(HRGN dst, HRGN src1, HRGN src2, int mode);
 GDI32_API BOOL    EqualRgn(HRGN first, HRGN second);
 GDI32_API DWORD   SetLayout(HDC dc, DWORD layout);
