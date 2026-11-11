@@ -226,7 +226,7 @@ static UINT64 NtMapViewOfSection(UINT64 *a)
     for (; mapped < size; mapped += PAGE_SIZE)
         if (!MmMapPage(base + mapped,
                        section->Pages[(offset + mapped) / PAGE_SIZE],
-                       MiProtectionFlags(protect))) {
+                       MiProtectionFlags(protect) | PTE_SHARED)) {
             for (UINT64 undo = 0; undo < mapped; undo += PAGE_SIZE)
                 MmUnmapPage(base + undo);
             ObDereferenceObject(object);

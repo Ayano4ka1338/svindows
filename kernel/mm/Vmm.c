@@ -334,6 +334,6 @@ void MmProtectRangeFlags(UINT64 va, UINT64 size, UINT64 flags)
     for (UINT64 p = first; p < last; p += PAGE_SIZE) {
         UINT64 pa = MmGetPhysicalAddress(p);
         if (pa != MM_INVALID_PHYS)
-            MmMapPage(p, pa & ~PAGE_MASK, flags); /* same frame, new flags */
+            MmMapPage(p, pa & ~PAGE_MASK, flags | (MmGetPageFlags(p) & PTE_SHARED));
     }
 }

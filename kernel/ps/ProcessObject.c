@@ -517,11 +517,14 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         *(UINT64 *)(row + 112) = virtual_bytes;
         *(UINT64 *)(row + 120) = virtual_bytes;
         UINT64 flags = KiIrqSave();
-        UINT64 working_set = MmCountResidentUserPages(process->DirectoryTableBase) * PAGE_SIZE;
+        UINT64 private_pages;
+        UINT64 working_set = MmCountResidentUserPages(process->DirectoryTableBase,
+                                                      &private_pages) * PAGE_SIZE;
         if (working_set > process->PeakWorkingSetBytes)
             process->PeakWorkingSetBytes = working_set;
         UINT64 sampled_peak = process->PeakWorkingSetBytes;
         KiIrqRestore(flags);
+        *(UINT64 *)(row + 8) = private_pages * PAGE_SIZE;
         *(UINT64 *)(row + 136) = sampled_peak;
         *(UINT64 *)(row + 144) = working_set;
         *(UINT64 *)(row + 184) = committed_bytes;

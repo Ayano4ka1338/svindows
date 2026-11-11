@@ -172,7 +172,7 @@ static UINT64 linux_map_framebuffer(LINUX_MEMORY_CONTEXT *context,
     UINT64 page = base;
     for (; page < base + size; page += PAGE_SIZE)
         if (!MmMapPage(page, physical + offset + page - base,
-                       linux_page_flags(protection) | PTE_PCD | PTE_PWT))
+                       linux_page_flags(protection) | PTE_PCD | PTE_PWT | PTE_SHARED))
             break;
     if (page < base + size) {
         linux_unmap_pages(base, page, FALSE);

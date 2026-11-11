@@ -31,8 +31,9 @@ static UINT64 resident_large_pages(UINT64 entry, UINT64 span, UINT64 ram_pages)
 /* Caller holds the process object and excludes local preemption while
  * walking its current address space. Count mappings, including shared RAM,
  * because those pages also belong to the process's resident working set. */
-UINT64 MmCountResidentUserPages(UINT64 root)
+UINT64 MmCountResidentUserPages(UINT64 root, UINT64 *private_pages)
 {
+    *private_pages = 0;
     if (!root || root == MM_INVALID_PHYS) return 0;
     const UINT64 user_present = PTE_USER | PTE_PRESENT;
     const UINT64 ram_pages = MmTotalPages();
@@ -44,22 +45,28 @@ UINT64 MmCountResidentUserPages(UINT64 root)
         for (UINT32 j = 0; j < PT_ENTRIES; ++j) {
             if ((pdpt[j] & user_present) != user_present) continue;
             if (pdpt[j] & PTE_LARGE) {
-                pages += resident_large_pages(pdpt[j], 1ULL << 18, ram_pages);
+                UINT64 count = resident_large_pages(pdpt[j], 1ULL << 18, ram_pages);
+                pages += count;
+                if (!(pdpt[j] & PTE_SHARED)) *private_pages += count;
                 continue;
             }
             const UINT64 *pd = table(pdpt[j]);
             for (UINT32 k = 0; k < PT_ENTRIES; ++k) {
                 if ((pd[k] & user_present) != user_present) continue;
                 if (pd[k] & PTE_LARGE) {
-                    pages += resident_large_pages(pd[k], PT_ENTRIES, ram_pages);
+                    UINT64 count = resident_large_pages(pd[k], PT_ENTRIES, ram_pages);
+                    pages += count;
+                    if (!(pd[k] & PTE_SHARED)) *private_pages += count;
                     continue;
                 }
                 const UINT64 *pt = table(pd[k]);
                 for (UINT32 n = 0; n < PT_ENTRIES; ++n) {
                     UINT64 leaf = pt[n];
                     if ((leaf & user_present) == user_present &&
-                        ((leaf & PTE_ADDR_MASK) >> PAGE_SHIFT) < ram_pages)
+                        ((leaf & PTE_ADDR_MASK) >> PAGE_SHIFT) < ram_pages) {
                         ++pages;
+                        if (!(leaf & PTE_SHARED)) ++*private_pages;
+                    }
                 }
             }
         }
@@ -134,7 +141,7 @@ UINT64 MmCreateAddressSpace(void)
     UINT64 shared = MmGetPhysicalAddress(0x000000007ffe0000ULL);
     if (shared != MM_INVALID_PHYS &&
         !MmMapPageInAddressSpace(root, 0x000000007ffe0000ULL,
-                                 shared & ~PAGE_MASK, PTE_USER)) {
+                                 shared & ~PAGE_MASK, PTE_USER | PTE_SHARED)) {
         MmDestroyAddressSpace(root);
         return MM_INVALID_PHYS;
     }
@@ -174,8 +181,9 @@ UINT64 MmCloneUserAddressSpace(UINT64 source, PMM_SHARED_PAGE shared,
                     if (!alias)
                         memcpy(MmPhysToVirt(destination), MmPhysToVirt(pa),
                                PAGE_SIZE);
-                    if (!MmMapPageInAddressSpace(clone, va, destination,
-                                                 pte & ~PTE_ADDR_MASK)) {
+                    UINT64 flags = pte & ~(PTE_ADDR_MASK | PTE_SHARED);
+                    if (alias) flags |= PTE_SHARED;
+                    if (!MmMapPageInAddressSpace(clone, va, destination, flags)) {
                         if (!alias) MmFreePages(destination, 1);
                         goto failed;
                     }

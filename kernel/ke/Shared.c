@@ -91,7 +91,7 @@ void KeInitializeSharedData(void)
 
     /* Read-only in user space (no PTE_WRITE); the kernel writes via the
      * direct map, which is writable. */
-    if (!MmMapPage(KUSER_SHARED_DATA_USER_VA, pa, PTE_USER)) {
+    if (!MmMapPage(KUSER_SHARED_DATA_USER_VA, pa, PTE_USER | PTE_SHARED)) {
         MmFreePages(pa, 1);
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "cannot map shared user data");
     }

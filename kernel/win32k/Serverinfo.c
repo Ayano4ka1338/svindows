@@ -265,7 +265,7 @@ BOOLEAN W32kMapServerInfo(void)
     UINT32 page_index = 0;
     for (UINT64 off = 0; off < PROCESS_SERVER_INFO_SIZE; off += PAGE_SIZE) {
         if (!MmMapPage(PROCESS_SERVER_INFO_VA + off,
-                       g_server_info_phys[page_index++], PTE_USER))
+                       g_server_info_phys[page_index++], PTE_USER | PTE_SHARED))
             return FALSE;
     }
     return TRUE;

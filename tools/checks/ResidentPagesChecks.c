@@ -17,16 +17,18 @@ int main(void)
     tables[2][0] = 3 * PAGE_SIZE | user;
     tables[3][0] = 4 * PAGE_SIZE | user;
     tables[3][1] = 4 * PAGE_SIZE | PTE_PRESENT;
-    tables[4][0] = 6 * PAGE_SIZE | user;
-    tables[4][1] = 6 * PAGE_SIZE | user; /* shared physical page, second mapping */
+    tables[4][0] = 6 * PAGE_SIZE | user | PTE_SHARED;
+    tables[4][1] = 6 * PAGE_SIZE | user | PTE_SHARED; /* shared physical page, second mapping */
     tables[4][2] = 7 * PAGE_SIZE | PTE_PRESENT;
     tables[4][3] = 8 * PAGE_SIZE | PTE_USER;
     tables[4][4] = 1024 * PAGE_SIZE | user;
-    assert(MmCountResidentUserPages(PAGE_SIZE) == 2);
+    UINT64 private_pages;
+    assert(MmCountResidentUserPages(PAGE_SIZE, &private_pages) == 2 && !private_pages);
     tables[3][2] = 512 * PAGE_SIZE | user | PTE_LARGE;
-    assert(MmCountResidentUserPages(PAGE_SIZE) == 514);
+    assert(MmCountResidentUserPages(PAGE_SIZE, &private_pages) == 514 && private_pages == 512);
     tables[4][0] = 0;
-    assert(MmCountResidentUserPages(PAGE_SIZE) == 513);
-    assert(!MmCountResidentUserPages(0) && !MmCountResidentUserPages(MM_INVALID_PHYS));
+    assert(MmCountResidentUserPages(PAGE_SIZE, &private_pages) == 513 && private_pages == 512);
+    assert(!MmCountResidentUserPages(0, &private_pages) && !private_pages);
+    assert(!MmCountResidentUserPages(MM_INVALID_PHYS, &private_pages));
     puts("PASS resident user mappings exclude supervisor, absent and out-of-RAM pages");
 }

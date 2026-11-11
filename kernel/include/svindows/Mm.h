@@ -64,6 +64,7 @@ static ALWAYS_INLINE UINT64 MmVirtToPhysDirect(void *virt)
 #define PTE_DIRTY     0x040ULL
 #define PTE_LARGE     0x080ULL   /* PS: 2 MiB page at PD level */
 #define PTE_GLOBAL    0x100ULL
+#define PTE_SHARED    0x200ULL   /* software: backing is shared or externally owned */
 #define PTE_NX        (1ULL << 63)
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 
