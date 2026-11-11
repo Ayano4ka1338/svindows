@@ -368,6 +368,7 @@ EXPORTS
     NtQueryTimerResolution
     NtTerminateProcess
     SvNtUserGetWindowStyle
+    SvNtProcessorCounterQuery
     RtlTimeToElapsedTimeFields
     SvNtQueryThreadExitStatus
     SvNtReadProcessMemory

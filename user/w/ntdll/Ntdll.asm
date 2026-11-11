@@ -547,6 +547,7 @@ SYSCALL_STUB SvNtQueryNetworkInterface, 0x1F1D
 SYSCALL_STUB NtQueryTimerResolution, 0x1F1E
 SYSCALL_STUB NtTerminateProcess, 0x1F1F
 SYSCALL_STUB SvNtUserGetWindowStyle, 0x1F20
+SYSCALL_STUB SvNtProcessorCounterQuery, 0x1F21
 SYSCALL_STUB SvNtQueryThreadExitStatus, 0x1F19
 SYSCALL_STUB SvNtReadProcessMemory, 0x1F1A
 SYSCALL_STUB NtGdiGetDCObject, 0x1038

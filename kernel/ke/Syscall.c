@@ -614,6 +614,7 @@ static UINT64 NtDelayExecution(UINT64 *a)
  * returning a fabricated blob that user mode would reject as corrupt.
  */
 #include "SystemCpuInformation.inc"
+#include "ProcessorCounterQuery.inc"
 #include "SystemPerformance.inc"
 
 static NTSTATUS KiQueryTimeOfDay(void *buffer, ULONG length, ULONG *returned)
@@ -1307,6 +1308,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F1E] = NtQueryTimerResolution;
     KiServiceTable[0x1F1F] = NtTerminateProcess;
     KiServiceTable[0x1F20] = SvNtUserGetWindowStyle;
+    KiServiceTable[0x1F21] = SvNtProcessorCounterQuery;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =

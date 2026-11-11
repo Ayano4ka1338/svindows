@@ -622,6 +622,7 @@ DWORD RtlNtStatusToDosError(NTSTATUS status)
     case 0xC0000023: return 122; /* INSUFFICIENT_BUFFER */
     case 0xC000007C: return 1008; /* NO_TOKEN */
     case 0xC0000121: return 5; /* CANNOT_DELETE */
+    case 0x80000005: return 234; /* BUFFER_OVERFLOW / MORE_DATA */
     case 0x8000001A: return 259; /* NO_MORE_ITEMS */
     case 0xC0000017: return 8;   /* NO_MEMORY */
     case 0xC000007F: return 112; /* DISK_FULL */

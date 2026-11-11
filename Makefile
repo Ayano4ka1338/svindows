@@ -524,7 +524,7 @@ $(IPHLPAPI): Makefile user/w/iphlpapi/Iphlpapi.c user/w/iphlpapi/IpHelper.h kern
 $(TASK_SERVICES): $(BUILD)/%.dll: Makefile user/w/taskservices/%.c $(KERNEL32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/w/taskservices/$*.c -o $(BUILD)/$*.obj
-	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:$(TASK_SERVICE_BASE_$*) /out:$@ $(BUILD)/$*.obj $(KERNEL32LIB)
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:$(TASK_SERVICE_BASE_$*) /out:$@ $(BUILD)/$*.obj $(KERNEL32LIB) $(NTDLLLIB)
 
 $(WINDOWSCODECS): user/w/windowscodecs/WindowsCodecs.c user/w/windowscodecs/WindowsCodecs.def user/w/windowscodecs/third_party/stb_image.h $(wildcard user/w/windowscodecs/include/*.h) $(KERNEL32)
 	@mkdir -p $(BUILD)
@@ -920,3 +920,9 @@ resident-pages-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -ffunction-sections -fdata-sections -fsanitize=address,undefined -idirafter kernel/include tools/checks/ResidentPagesChecks.c -Wl,--gc-sections -o $(BUILD)/ResidentPagesChecks
 	$(BUILD)/ResidentPagesChecks
+
+.PHONY: pcw-processor-check
+pcw-processor-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/PcwProcessorChecks.c -o $(BUILD)/PcwProcessorChecks
+	$(BUILD)/PcwProcessorChecks
