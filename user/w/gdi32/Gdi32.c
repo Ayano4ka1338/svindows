@@ -419,6 +419,21 @@ GDI32_API int GetClipRgn(HDC dc, HRGN region)
     return 1;
 }
 
+GDI32_API int GetClipBox(HDC dc, RECT *bounds)
+{
+    if (!bounds) return 0;
+    SV_DC_CLIP *state = sv_dc_clip(dc, FALSE);
+    if (state) {
+        *bounds = state->Bounds;
+        return 2;
+    }
+    int width = GetDeviceCaps(dc, HORZRES);
+    int height = GetDeviceCaps(dc, VERTRES);
+    if (width <= 0 || height <= 0) return 0;
+    *bounds = (RECT){0, 0, width, height};
+    return 2;
+}
+
 GDI32_API int ExcludeClipRect(HDC dc, int left, int top, int right, int bottom)
 {
     const RECT rect = {left, top, right, bottom};
