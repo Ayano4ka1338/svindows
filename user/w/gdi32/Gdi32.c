@@ -389,6 +389,12 @@ GDI32_API int ExcludeClipRect(HDC dc, int left, int top, int right, int bottom)
     return (int)SvNtGdiClipRect(dc, 1, &rect);
 }
 
+GDI32_API int IntersectClipRect(HDC dc, int left, int top, int right, int bottom)
+{
+    const RECT rect = {left, top, right, bottom};
+    return (int)SvNtGdiClipRect(dc, 0, &rect);
+}
+
 GDI32_API HRGN CreateRectRgn(int left,int top,int right,int bottom)
 {
     for(UINT i=0;i<128;i++)if(!g_regions[i].Used){

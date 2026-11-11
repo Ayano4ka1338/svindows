@@ -217,6 +217,7 @@ GDI32_API DWORD   GetLayout(HDC dc);
 GDI32_API BOOL    SetWindowOrgEx(HDC dc, int x, int y, POINT *previous);
 GDI32_API BOOL    GetViewportOrgEx(HDC dc, POINT *origin);
 GDI32_API BOOL    GetWindowOrgEx(HDC dc, POINT *origin);
+GDI32_API int     IntersectClipRect(HDC dc, int left, int top, int right, int bottom);
 GDI32_API BOOL    DeleteDC(HDC hdc);
 
 /* Objects. */
