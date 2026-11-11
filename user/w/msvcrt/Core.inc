@@ -393,6 +393,12 @@ __declspec(dllexport) int _vsnwprintf(WCHAR *out, SIZE_T count,
             continue;
         }
         p++;
+        if (!*p) {
+            /* Legacy callers may use an unescaped terminal percent sign. */
+            if (n + 1 < count) out[n] = '%';
+            n++;
+            break;
+        }
         if (*p == '%') {
             if (n + 1 < count) out[n] = '%';
             n++;
@@ -443,6 +449,7 @@ __declspec(dllexport) int _vsnwprintf(WCHAR *out, SIZE_T count,
             p += 3;
             length = LEN_LLONG;
         }
+        if (!*p) break;
 
         if (*p == 's') {
             const WCHAR *s = __builtin_va_arg(ap, const WCHAR *);
