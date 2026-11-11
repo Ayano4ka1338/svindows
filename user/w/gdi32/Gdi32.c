@@ -368,6 +368,15 @@ GDI32_API HRGN CreateRectRgn(int left,int top,int right,int bottom)
 }
 GDI32_API HRGN CreateRectRgnIndirect(const RECT *rect)
 { return rect?CreateRectRgn(rect->left,rect->top,rect->right,rect->bottom):0; }
+GDI32_API int OffsetRgn(HRGN region, int dx, int dy)
+{
+    SV_REGION *r = sv_region(region);
+    if (!r) return 0;
+    r->Bounds.left += dx; r->Bounds.right += dx;
+    r->Bounds.top += dy; r->Bounds.bottom += dy;
+    return r->Bounds.right <= r->Bounds.left ||
+           r->Bounds.bottom <= r->Bounds.top ? 1 : 2;
+}
 GDI32_API BOOL SetRectRgn(HRGN region,int left,int top,int right,int bottom)
 { SV_REGION*r=sv_region(region);if(!r)return FALSE;r->Bounds=(RECT){left,top,right,bottom};return TRUE; }
 GDI32_API int GetRgnBox(HRGN region,LPRECT rect)
