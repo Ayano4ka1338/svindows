@@ -329,97 +329,64 @@ static NTSTATUS LdrResolveImports(UINT64 base)
     return STATUS_INVALID_IMAGE_FORMAT; /* directory lacks a terminator */
 }
 
-/* Resolve MSVC delay imports eagerly.  Windows normally patches each delay-IAT
- * slot on its first call through __delayLoadHelper2; eager binding is simpler
- * for the kernel loader and produces the same observable function pointers
- * before user code begins. */
-static NTSTATUS LdrResolveDelayImports(UINT64 base)
+/* MSVC delay imports are owned by the image's __delayLoadHelper2. Validate
+ * descriptors and thunks, preserving the relocated helper addresses in the
+ * delay IAT. Loading optional libraries here makes unused features mandatory
+ * and bypasses the image's delay-load failure/notification hooks. */
+static NTSTATUS LdrValidateDelayImports(UINT64 base)
 {
     PIMAGE_NT_HEADERS64 nt = nt_headers(base);
     IMAGE_DATA_DIRECTORY dir =
         nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-    if (dir.Size == 0)
-        return STATUS_SUCCESS;
+    if (!dir.Size) return STATUS_SUCCESS;
     if (!LdrpImageContains(base, dir.VirtualAddress, dir.Size) ||
         (dir.VirtualAddress & 3)) return STATUS_INVALID_IMAGE_FORMAT;
-
-    IMAGE_DELAYLOAD_DESCRIPTOR *desc =
+    IMAGE_DELAYLOAD_DESCRIPTOR *descriptors =
         (IMAGE_DELAYLOAD_DESCRIPTOR *)(base + dir.VirtualAddress);
-    UINT32 count = dir.Size / sizeof(*desc);
-
-    for (UINT32 d = 0; d < count; d++) {
-        if (!desc[d].DllNameRva) return STATUS_SUCCESS;
-        /* PE32+ images produced by modern MSVC use RVA-based descriptors. */
-        if (!(desc[d].Attributes & 1)) {
-            KeLog("[ldr]  unsupported VA-based delay import descriptor\n");
-            return STATUS_INVALID_IMAGE_FORMAT;
-        }
-
-        const char *dll = LdrpImageString(base, desc[d].DllNameRva);
+    UINT32 count = dir.Size / sizeof(*descriptors);
+    for (UINT32 d = 0; d < count; ++d) {
+        IMAGE_DELAYLOAD_DESCRIPTOR *descriptor = &descriptors[d];
+        if (!descriptor->DllNameRva) return STATUS_SUCCESS;
+        if (descriptor->Attributes != 1) return STATUS_INVALID_IMAGE_FORMAT;
+        const char *dll = LdrpImageString(base, descriptor->DllNameRva);
         if (!dll || !*dll) return STATUS_INVALID_IMAGE_FORMAT;
-        UINT64 dll_base = LdrpLateApiSetHost(dll);
-        BOOLEAN late_alias = dll_base != 0;
-        if (!dll_base)
-            dll_base = LdrpLoadModule(dll);
-        if (dll_base && !late_alias)
-            remember_dependency(base, dll_base);
-        if (!dll_base) {
-            KeLog("[ldr]  delay import dependency '%s' could not be loaded\n", dll);
-            return LdrpCurrentContext()->LoadStatus;
-        }
-        if (!desc[d].ImportNameTableRva || !desc[d].ImportAddressTableRva ||
-            (desc[d].ImportNameTableRva & 7) || (desc[d].ImportAddressTableRva & 7))
+        UINT32 names_rva = descriptor->ImportNameTableRva;
+        UINT32 iat_rva = descriptor->ImportAddressTableRva;
+        if (!names_rva || !iat_rva || (names_rva & 7) || (iat_rva & 7))
             return STATUS_INVALID_IMAGE_FORMAT;
-        UINT64 *names = (UINT64 *)(base + desc[d].ImportNameTableRva);
-        UINT64 *iat = (UINT64 *)(base + desc[d].ImportAddressTableRva);
-        UINT32 linked = 0;
-
-        if (desc[d].ModuleHandleRva) {
-            if ((desc[d].ModuleHandleRva & 7) ||
-                !LdrpImageContains(base, desc[d].ModuleHandleRva, 8))
+        if (descriptor->ModuleHandleRva &&
+            ((descriptor->ModuleHandleRva & 7) ||
+             !LdrpImageContains(base, descriptor->ModuleHandleRva, 8)))
+            return STATUS_INVALID_IMAGE_FORMAT;
+        UINT32 imported = 0;
+        for (;; ++imported) {
+            UINT64 offset = (UINT64)imported * 8;
+            if (!LdrpImageContains(base, (UINT64)names_rva + offset, 8) ||
+                !LdrpImageContains(base, (UINT64)iat_rva + offset, 8))
                 return STATUS_INVALID_IMAGE_FORMAT;
-            *(UINT64 *)(base + desc[d].ModuleHandleRva) = dll_base;
-        }
-
-        for (UINT32 i = 0; ; i++) {
-            if (!LdrpImageContains(base, (UINT64)desc[d].ImportNameTableRva + (UINT64)i * 8, 8) ||
-                !LdrpImageContains(base, (UINT64)desc[d].ImportAddressTableRva + (UINT64)i * 8, 8))
-                return STATUS_INVALID_IMAGE_FORMAT;
-            if (!names[i]) break;
-            UINT64 thunk = names[i];
-            UINT64 addr = 0;
-            if (thunk & IMAGE_ORDINAL_FLAG64) {
-                UINT16 ordinal = (UINT16)(thunk & 0xFFFF);
-                if (dll_base)
-                    addr = LdrpProcByOrdinal(dll_base, ordinal);
-                if (!addr) {
-                    KeLog("[ldr]  missing delay import %s!#%u\n", dll, ordinal);
-                    return STATUS_ORDINAL_NOT_FOUND;
-                }
-            } else {
-                if (!LdrpImageContains(base, thunk, 2)) return STATUS_INVALID_IMAGE_FORMAT;
-                const char *symbol = LdrpImageString(base, thunk + 2);
-                if (!symbol || !*symbol) return STATUS_INVALID_IMAGE_FORMAT;
-                if (dll_base)
-                    addr = LdrGetProcAddress(dll_base, symbol);
-                if (ci_starts_with(dll, "api-ms-win-core-com-") &&
-                    strcmp(symbol, "CoCreateInstance") == 0) {
-                    UINT64 combase = lookup_module("combase.dll");
-                    if (combase)
-                        addr = LdrGetProcAddress(combase, symbol);
-                }
-                if (!addr) {
-                    KeLog("[ldr]  missing delay import %s!%s\n", dll, symbol);
-                    return STATUS_ENTRYPOINT_NOT_FOUND;
-                }
+            UINT64 name = *(UINT64 *)(base + names_rva + offset);
+            UINT64 thunk = *(UINT64 *)(base + iat_rva + offset);
+            if (!name) {
+                if (thunk) return STATUS_INVALID_IMAGE_FORMAT;
+                break;
             }
-            linked++;
-            iat[i] = addr;
+            if (!(name & IMAGE_ORDINAL_FLAG64)) {
+                if (!LdrpImageContains(base, name, 2)) return STATUS_INVALID_IMAGE_FORMAT;
+                const char *symbol = LdrpImageString(base, name + 2);
+                if (!symbol || !*symbol) return STATUS_INVALID_IMAGE_FORMAT;
+            }
+            if (thunk < base || !LdrpImageContains(base, thunk - base, 1))
+                return STATUS_INVALID_IMAGE_FORMAT;
         }
-
-        KeLog("[ldr]  delay imports from %s: %u linked\n", dll, linked);
+        UINT32 tables[] = {descriptor->BoundImportAddressTableRva,
+                           descriptor->UnloadInformationTableRva};
+        for (UINT32 t = 0; t < 2; ++t)
+            if (tables[t] && ((tables[t] & 7) ||
+                !LdrpImageContains(base, tables[t], ((UINT64)imported + 1) * 8)))
+                return STATUS_INVALID_IMAGE_FORMAT;
+        KeLog("[ldr]  deferred imports from %s: %u preserved\n", dll, imported);
     }
-    return STATUS_INVALID_IMAGE_FORMAT; /* directory lacks a terminator */
+    return STATUS_INVALID_IMAGE_FORMAT;
 }
 
 static UINT64 lookup_module(const char *name)
@@ -619,7 +586,7 @@ static UINT64 LdrpLoadModuleWorker(const char *name)
 
 
     status = LdrResolveImports(base);
-    if (NT_SUCCESS(status)) status = LdrResolveDelayImports(base);
+    if (NT_SUCCESS(status)) status = LdrValidateDelayImports(base);
     if (!NT_SUCCESS(status)) {
         LdrpCurrentContext()->LoadStatus = status;
         return 0;

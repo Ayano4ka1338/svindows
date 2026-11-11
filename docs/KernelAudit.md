@@ -108,8 +108,10 @@ Windows-программами. Для Clang отключён только `core
   cross-process GUI contracts, nested callbacks, window hierarchy
   и compositor остаются отдельной работой. Fixed table limits сохранены;
   slots с исчерпанным generation retire вместо оживления старых handles.
-- Убраны return-0 заглушки отсутствующих обычных и delay imports. Загрузка
-  возвращает DLL/entrypoint/ordinal-not-found с диагностикой DLL и символа.
+- Убраны return-0 заглушки отсутствующих imports. Обычные imports возвращают
+  DLL/entrypoint/ordinal-not-found с диагностикой DLL и символа. Delay imports
+  сохраняют MSVC-трамплины загрузки по первому вызову; проверяются границы
+  таблиц, исходных трамплинов и module-handle slots без загрузки optional DLL.
   Проверяются границы import/export tables, strings и thunk arrays; ограничены
   циклические forwarders. Невыровненные export arrays читаются через `memcpy`.
   Неудачная runtime-загрузка откатывает новые модули, TLS registrations и

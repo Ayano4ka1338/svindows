@@ -775,7 +775,12 @@ clean:
 	rm -rf $(BUILD)
 
 # Host checks execute the actual USER menu model and native USER/GDI code.
-.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check elapsed-time-check shell-command-line-check
+.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check elapsed-time-check shell-command-line-check pe-loader-check
+pe-loader-check:
+	@mkdir -p $(BUILD)
+	cc -O2 -g -fno-tree-slp-vectorize -ffunction-sections -fdata-sections -Wno-multichar -idirafter kernel/include tools/checks/LoaderChecks.c -Wl,--gc-sections -o $(BUILD)/LoaderChecks
+	$(BUILD)/LoaderChecks
+
 shell-command-line-check:
 	@mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -fsanitize=address,undefined tools/checks/ShellCommandLineChecks.c -o $(BUILD)/ShellCommandLineChecks

@@ -33,9 +33,9 @@ Its imports include the existing Win32 surface (`KERNEL32`, `USER32`,
 libraries (`SHELL32`, `SHLWAPI`, `GDIPLUS`, `OLEAUT32`, `OLE32`, `RPCRT4`,
 `WINMM`, `VERSION`, and `WINDOWSCODECS`). It also imports Windows 7 NTDLL
 extensions and functions not yet known to be exported by Svindows' runtime.
-The loader currently requires every static and delay import to resolve before
-it starts the image, so the first launch milestone is resolving these module
-and export dependencies. After that, runtime behavior will expose any missing
+The loader requires every static import to resolve before it starts the image.
+MSVC delay imports retain their original first-call loading helpers; optional
+DLLs are requested only when the application calls them. Runtime behavior exposes missing
 windowing, menu, resource, graphics, registry, or COM behavior.
 
 The source image is user-provided. The staged calculator files were extracted

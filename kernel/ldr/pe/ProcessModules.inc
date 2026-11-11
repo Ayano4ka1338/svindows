@@ -473,7 +473,7 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
     status = LdrResolveImports(base);
     if (!NT_SUCCESS(status))
         return status;
-    status = LdrResolveDelayImports(base);
+    status = LdrValidateDelayImports(base);
     if (!NT_SUCCESS(status))
         return status;
 

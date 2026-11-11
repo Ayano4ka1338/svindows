@@ -7,7 +7,7 @@
 
 UINT64 kernel_stack_guard[2];
 static UINT64 mapped[64];
-static unsigned frees, allocations;
+static unsigned frees, allocations, file_reads;
 static int fail_allocate = -1, fail_map;
 static UINT8 file_image[4096];
 static UINT8 child_image[4096];
@@ -56,6 +56,7 @@ NTSTATUS FatLoadFile(const char *name, void **buffer, SIZE_T *size,
                      FAT_FIND_DATA *info)
 {
     (void)info;
+    file_reads++;
     if (!provide_file || (strcmp(name, "broken.dll") && strcmp(name, "child.dll")))
         return STATUS_OBJECT_NAME_NOT_FOUND;
     *buffer = malloc(sizeof(file_image));
@@ -105,12 +106,12 @@ static void import_image(UINT8 *image, BOOLEAN delay, const char *dll)
     strcpy((char *)image + 640, dll);
     *(UINT64 *)(image + 768) = 900;
     strcpy((char *)image + 902, "Present");
-    *(UINT64 *)(image + 800) = 0x12345678;
+    *(UINT64 *)(image + 800) = delay ? (UINT64)image + 1000 : 0x12345678;
 }
 
 static NTSTATUS resolve(UINT8 *image, BOOLEAN delay)
 {
-    return delay ? LdrResolveDelayImports((UINT64)image)
+    return delay ? LdrValidateDelayImports((UINT64)image)
                  : LdrResolveImports((UINT64)image);
 }
 
@@ -136,24 +137,37 @@ int main(void)
     strcpy((char *)dep + 720, "Present");
     assert(remember_module("fixture.dll", (UINT64)dep));
 
-    for (unsigned delay = 0; delay < 2; delay++) {
-        import_image(image, delay, "fixture.dll");
-        assert(resolve(image, delay) == STATUS_SUCCESS);
-        assert(*(UINT64 *)(image + 800) == (UINT64)dep + 1024);
-        import_image(image, delay, "fixture.dll");
-        strcpy((char *)image + 902, "Missing");
-        assert(resolve(image, delay) == STATUS_ENTRYPOINT_NOT_FOUND);
-        assert(*(UINT64 *)(image + 800) == 0x12345678);
-        *(UINT64 *)(image + 768) = IMAGE_ORDINAL_FLAG64 | 8;
-        assert(resolve(image, delay) == STATUS_ORDINAL_NOT_FOUND);
-        assert(*(UINT64 *)(image + 800) == 0x12345678);
-        *(UINT64 *)(image + 768) = IMAGE_ORDINAL_FLAG64 | 7;
-        assert(resolve(image, delay) == STATUS_SUCCESS);
-        import_image(image, delay, "absent.dll");
-        assert(resolve(image, delay) == STATUS_DLL_NOT_FOUND);
-        assert(*(UINT64 *)(image + 800) == 0x12345678);
-    }
-    puts("PASS strict named/ordinal/DLL imports and eager delay imports");
+    import_image(image, FALSE, "fixture.dll");
+    assert(resolve(image, FALSE) == STATUS_SUCCESS);
+    assert(*(UINT64 *)(image + 800) == (UINT64)dep + 1024);
+    import_image(image, FALSE, "fixture.dll");
+    strcpy((char *)image + 902, "Missing");
+    assert(resolve(image, FALSE) == STATUS_ENTRYPOINT_NOT_FOUND);
+    assert(*(UINT64 *)(image + 800) == 0x12345678);
+    *(UINT64 *)(image + 768) = IMAGE_ORDINAL_FLAG64 | 8;
+    assert(resolve(image, FALSE) == STATUS_ORDINAL_NOT_FOUND);
+    *(UINT64 *)(image + 768) = IMAGE_ORDINAL_FLAG64 | 7;
+    assert(resolve(image, FALSE) == STATUS_SUCCESS);
+    import_image(image, FALSE, "absent.dll");
+    assert(resolve(image, FALSE) == STATUS_DLL_NOT_FOUND);
+    assert(*(UINT64 *)(image + 800) == 0x12345678);
+    puts("PASS strict static named, ordinal and DLL imports");
+
+    unsigned reads = file_reads;
+    import_image(image, TRUE, "absent.dll");
+    IMAGE_DELAYLOAD_DESCRIPTOR *delay_descriptor = (void *)(image + 512);
+    delay_descriptor->ModuleHandleRva = 816;
+    assert(resolve(image, TRUE) == STATUS_SUCCESS);
+    assert(*(UINT64 *)(image + 800) == (UINT64)image + 1000);
+    assert(!*(UINT64 *)(image + 816) && file_reads == reads);
+    *(UINT64 *)(image + 768) = IMAGE_ORDINAL_FLAG64 | 999;
+    assert(resolve(image, TRUE) == STATUS_SUCCESS && file_reads == reads);
+    delay_descriptor->BoundImportAddressTableRva = 4095;
+    assert(resolve(image, TRUE) == STATUS_INVALID_IMAGE_FORMAT);
+    delay_descriptor->BoundImportAddressTableRva = 0;
+    *(UINT64 *)(image + 800) = 0x12345678;
+    assert(resolve(image, TRUE) == STATUS_INVALID_IMAGE_FORMAT);
+    puts("PASS lazy delay imports preserve helpers and module slots without loading optional DLLs");
 
     for (unsigned delay = 0; delay < 2; delay++) {
         import_image(image, delay, "fixture.dll");
