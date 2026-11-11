@@ -83,7 +83,7 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             type != BS_CHECKBOX && type != BS_AUTOCHECKBOX && type != BS_RADIOBUTTON &&
             type != BS_GROUPBOX && type != BS_AUTORADIOBUTTON && type != BS_OWNERDRAW) return FALSE;
         if(kind==SV_COMBO&&((cs->style&3)!=3||(cs->style&0x30)))return FALSE;
-        if (kind == SV_EDIT && (cs->style & (ES_PASSWORD|ES_CENTER|ES_RIGHT))) return FALSE;
+        if (kind == SV_EDIT && (cs->style & ES_PASSWORD)) return FALSE;
         if (kind == SV_STATIC && type != SS_LEFT && type != SS_CENTER &&
             type != SS_RIGHT && type != SS_SIMPLE && type != SS_LEFTNOWORDWRAP &&
             type != SS_BITMAP && type != SS_ENHMETAFILE) return FALSE;

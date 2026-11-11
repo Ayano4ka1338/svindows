@@ -103,6 +103,22 @@ static HDC measure(SV_CONTROL *c)
     if (dc) SelectObject(dc, c->font);
     return dc;
 }
+
+static int line_origin(SV_CONTROL *c, HDC dc, int start, int end, int width)
+{
+    DWORD alignment = c->style & (ES_CENTER | ES_RIGHT);
+    if (!alignment) return MARGIN;
+    int spare = width - 2 * MARGIN - advance(dc, c->model.text, start, end, 0);
+    if (spare <= 0) return MARGIN;
+    return MARGIN + (alignment & ES_RIGHT ? spare : spare / 2);
+}
+
+static int top_margin(SV_CONTROL *c, int height, int line_height)
+{
+    if (c->style & ES_MULTILINE) return MARGIN;
+    return height > line_height ? (height - line_height) / 2 : 0;
+}
+
 void SvEditEnsureVisible(SV_CONTROL *c)
 {
     RECT r; GetClientRect(c->hwnd, &r);
@@ -120,11 +136,12 @@ void SvEditEnsureVisible(SV_CONTROL *c)
     if (x >= c->scroll_x + width) c->scroll_x = x - width + 1;
     ReleaseDC(c->hwnd, dc);
 }
-static int offset_at(SV_CONTROL *c, HDC dc, int line, int x)
+static int offset_at(SV_CONTROL *c, HDC dc, int line, int x, int width)
 {
     int start = SvEditLineStart(&c->model, line);
     if (start < 0) return c->model.length;
     int end = SvEditLineEnd(&c->model, start), at = start, px = 0;
+    x -= line_origin(c, dc, start, end, width) - c->scroll_x;
     while (at < end) {
         int next = at + 1;
         if (c->model.text[at] >= 0xD800 && c->model.text[at] <= 0xDBFF && next < end &&
@@ -145,13 +162,15 @@ static void paint(SV_CONTROL *c)
     else SvControlFill(dc, 0, 0, r.right, r.bottom, c->style & WS_DISABLED ? RGB(240,240,240) : RGB(255,255,255));
     SelectObject(dc, c->font); SetBkMode(dc, TRANSPARENT);
     int lh = line_height(dc);
-    RECT clip = {MARGIN, MARGIN, r.right-MARGIN, r.bottom-MARGIN};
+    int top = top_margin(c, r.bottom, lh);
+    RECT clip = {MARGIN, top, r.right-MARGIN, r.bottom-top};
     int lo = c->model.anchor < c->model.caret ? c->model.anchor : c->model.caret;
     int hi = c->model.anchor > c->model.caret ? c->model.anchor : c->model.caret;
-    for (int line = c->first_line, y = MARGIN; y < clip.bottom; ++line, y += lh) {
+    for (int line = c->first_line, y = top; y < clip.bottom; ++line, y += lh) {
         int start = SvEditLineStart(&c->model, line);
         if (start < 0) break;
         int end = SvEditLineEnd(&c->model, start), px = 0;
+        int origin = line_origin(c, dc, start, end, r.right) - c->scroll_x;
         for (int at = start; at < end;) {
             int next = at + 1, selected = at >= lo && at < hi;
             if (c->model.text[at] != '\t') {
@@ -159,9 +178,9 @@ static void paint(SV_CONTROL *c)
                        (next >= lo && next < hi) == selected) ++next;
             }
             int nx = advance(dc, c->model.text, at, next, px);
-            int sx = MARGIN + px - c->scroll_x;
+            int sx = origin + px;
             int left = sx > clip.left ? sx : clip.left;
-            int right = MARGIN + nx - c->scroll_x < clip.right ? MARGIN + nx - c->scroll_x : clip.right;
+            int right = origin + nx < clip.right ? origin + nx : clip.right;
             if (selected) SvControlFill(dc, left, y, right-left,
                          y+lh < clip.bottom ? lh : clip.bottom-y,
                          c->focused ? RGB(0,120,215) : RGB(229,229,229));
@@ -172,7 +191,7 @@ static void paint(SV_CONTROL *c)
             px = nx; at = next;
         }
         if (c->focused && c->model.caret >= start && c->model.caret <= end) {
-            int x = MARGIN + advance(dc, c->model.text, start, c->model.caret, 0) - c->scroll_x;
+            int x = origin + advance(dc, c->model.text, start, c->model.caret, 0);
             if (x >= clip.left && x < clip.right)
                 SvControlFill(dc, x, y, 1, y+lh < clip.bottom ? lh : clip.bottom-y, RGB(0,0,0));
         }
@@ -261,9 +280,11 @@ LRESULT SvEditMessage(SV_CONTROL *c, UINT msg, WPARAM wp, LPARAM lp)
         else if (wp == VK_END) move_caret(c, ctrl ? m->length : SvEditLineEnd(m, start), shift);
         else if (wp == VK_UP || wp == VK_DOWN) {
             HDC dc = measure(c); if (!dc) return 0;
-            int x = advance(dc, m->text, start, m->caret, 0);
+            RECT client = {0}; GetClientRect(c->hwnd, &client);
+            int origin = line_origin(c, dc, start, SvEditLineEnd(m, start), client.right);
+            int x = origin + advance(dc, m->text, start, m->caret, 0) - c->scroll_x;
             int next = line + (wp == VK_UP ? -1 : 1);
-            if (next >= 0) move_caret(c, offset_at(c, dc, next, x), shift);
+            if (next >= 0) move_caret(c, offset_at(c, dc, next, x, client.right), shift);
             ReleaseDC(c->hwnd, dc);
         }
         return 0;
@@ -274,9 +295,12 @@ LRESULT SvEditMessage(SV_CONTROL *c, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOUSEMOVE:
         if (msg == WM_LBUTTONDOWN || c->dragging) {
             HDC dc = measure(c); if (!dc) return 0;
-            int line = ((short)HIWORD(lp) - MARGIN) / line_height(dc) + c->first_line;
+            RECT client = {0}; GetClientRect(c->hwnd, &client);
+            int height = line_height(dc);
+            int top = top_margin(c, client.bottom, height);
+            int line = ((short)HIWORD(lp) - top) / height + c->first_line;
             if (line < 0) line = 0;
-            int offset = offset_at(c, dc, line, (short)LOWORD(lp) - MARGIN + c->scroll_x);
+            int offset = offset_at(c, dc, line, (short)LOWORD(lp), client.right);
             move_caret(c, offset, msg == WM_MOUSEMOVE || GetKeyState(VK_SHIFT) < 0);
             ReleaseDC(c->hwnd, dc);
         }
