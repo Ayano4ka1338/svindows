@@ -115,3 +115,45 @@ static NTSTATUS KiQuerySystemPerformance(void *buffer,ULONG length,ULONG *return
     *(KI_SYSTEM_PERFORMANCE *)buffer=value;
     return STATUS_SUCCESS;
 }
+
+/* The Win7 Superfetch envelope also carries a read-only physical memory list
+ * query. Svindows has one node and does not maintain standby/modified lists. */
+typedef struct {
+    ULONG Version, Magic, Class, Reserved;
+    UINT64 Data;
+    ULONG DataLength, Reserved2;
+} KI_SUPERFETCH_REQUEST;
+
+typedef struct {
+    ULONG Version, Size, NodeCount, Reserved;
+    UINT64 Node, StandbyLow, StandbyMedium, StandbyHigh, FreePages, ModifiedPages;
+} KI_MEMORY_LIST;
+_Static_assert(sizeof(KI_SUPERFETCH_REQUEST) == 32, "Win7 Superfetch request ABI");
+_Static_assert(sizeof(KI_MEMORY_LIST) == 64, "Win7 memory list ABI");
+
+static NTSTATUS KiQuerySuperfetchMemoryList(UINT64 buffer, ULONG length, ULONG *returned)
+{
+    if (length != sizeof(KI_SUPERFETCH_REQUEST)) return STATUS_INFO_LENGTH_MISMATCH;
+    if (!MmProbeForRead(buffer, sizeof(KI_SUPERFETCH_REQUEST))) return STATUS_ACCESS_VIOLATION;
+    KI_SUPERFETCH_REQUEST request;
+    memcpy(&request, (const void *)buffer, sizeof(request));
+    if (request.Version != 45 || request.Magic != 0x6b756843)
+        return STATUS_INVALID_PARAMETER;
+    if (request.Class != 16) return STATUS_NOT_SUPPORTED;
+
+    const ULONG required = sizeof(KI_MEMORY_LIST);
+    if (returned) {
+        if (!MmProbeForWrite((UINT64)returned, sizeof(*returned))) return STATUS_ACCESS_VIOLATION;
+        *returned = required;
+    }
+    if (request.DataLength < required) return STATUS_BUFFER_OVERFLOW;
+    if (!MmProbeForWrite(request.Data, required)) return STATUS_ACCESS_VIOLATION;
+    MM_MEMORY_USAGE memory;
+    MmQueryMemoryUsage(&memory);
+    KI_MEMORY_LIST result = {
+        .Version = 1, .Size = required, .NodeCount = 1,
+        .FreePages = memory.AvailablePages
+    };
+    memcpy((void *)request.Data, &result, sizeof(result));
+    return STATUS_SUCCESS;
+}

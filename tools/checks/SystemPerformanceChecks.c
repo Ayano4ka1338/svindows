@@ -4,11 +4,13 @@
 #include <svindows/Mm.h>
 #include <svindows/Ex.h>
 #include <svindows/Io.h>
+#include <svindows/Rtl.h>
 #include <nt/Ntstatus.h>
 static KPRCB cpu;
 static MM_MEMORY_USAGE memory;
 PKPRCB KeGetProcessorBlock(ULONG i){assert(!i);return &cpu;}
 BOOLEAN MmProbeForWrite(UINT64 p,UINT64 n){return p>=4096&&n;}
+BOOLEAN MmProbeForRead(UINT64 p,UINT64 n){return p>=4096&&n;}
 void MmQueryMemoryUsage(MM_MEMORY_USAGE *u){*u=memory;}
 void ExQueryPoolUsage(EX_POOL_USAGE *u){*u=(EX_POOL_USAGE){40,800,300};}
 void IoQueryStatistics(IO_STATISTICS *u){*u=(IO_STATISTICS){12345,67890,23,42};}
@@ -30,4 +32,15 @@ int main(void)
     memory.AvailablePages-=10;memory.CommittedPages+=10;
     assert(KiQuerySystemPerformance(&out,328,0)==STATUS_SUCCESS&&out.p.AvailablePages==990&&out.p.CommittedPages==210);
     puts("PASS Win7 system performance layout, native snapshots, updated memory and output bounds");
+    KI_MEMORY_LIST list = {0};
+    KI_SUPERFETCH_REQUEST request = {45, 0x6b756843, 16, 0, (UINT64)&list, 63, 0};
+    assert(KiQuerySuperfetchMemoryList((UINT64)&request, 32, &size) == STATUS_BUFFER_OVERFLOW);
+    assert(size == 64 && !list.Version);
+    request.DataLength = size;
+    assert(KiQuerySuperfetchMemoryList((UINT64)&request, 32, &size) == STATUS_SUCCESS);
+    assert(list.Version == 1 && list.Size == 64 && list.NodeCount == 1 && list.FreePages == 990);
+    assert(!list.StandbyLow && !list.ModifiedPages);
+    request.Class = 6;
+    assert(KiQuerySuperfetchMemoryList((UINT64)&request, 32, &size) == STATUS_NOT_SUPPORTED);
+    puts("PASS aggregate memory list uses current free pages and validates the Win7 request");
 }

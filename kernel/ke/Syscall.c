@@ -675,6 +675,8 @@ static UINT64 NtQuerySystemInformation(UINT64 *a)
         return (UINT64)KiQuerySystemPerformance((void *)buffer,length,return_length);
     if (info_class == 3) /* SystemTimeOfDayInformation */
         return (UINT64)KiQueryTimeOfDay((void *)buffer, length, return_length);
+    if (info_class == 79) /* SystemSuperfetchInformation */
+        return (UINT64)KiQuerySuperfetchMemoryList(buffer, length, return_length);
 
     if (info_class == SystemBasicInformation) {
         UINT32 required = sizeof(SYSTEM_BASIC_INFORMATION_LOCAL);
