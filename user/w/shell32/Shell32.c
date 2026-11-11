@@ -23,6 +23,9 @@ __declspec(dllexport) int SHCreateDirectory(HWND owner, const WCHAR *path);
 
 #include "CommandLine.inc"
 
+__declspec(dllimport) int MessageBoxW(HWND owner, const WCHAR *text,
+                                      const WCHAR *caption, unsigned type);
+
 static WCHAR *copy_path(WCHAR *out, const WCHAR *src)
 {
     unsigned i = 0;
@@ -79,8 +82,8 @@ __declspec(dllexport) HRESULT SHGetFolderPathW(HWND owner, int folder,
 __declspec(dllexport) BOOL ShellAboutW(HWND owner, const WCHAR *title,
                                        const WCHAR *message, HICON icon)
 {
-    (void)owner; (void)title; (void)message; (void)icon;
-    return 1;
+    (void)icon;
+    return MessageBoxW(owner, message, title, 0x40);
 }
 
 __declspec(dllexport) int SHCreateDirectory(HWND owner, const WCHAR *path)
