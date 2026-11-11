@@ -668,6 +668,15 @@ static UINT64 KiUserGetInputEvent(void)
     return (UINT64)queue->InputEventHandle;
 }
 
+static BOOLEAN KiUserWaitForInput(void)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    USER_MSG_QUEUE *queue = KiUserQueueForThread(thread ? thread->ThreadId : 0);
+    if (!queue || (!queue->InputEvent && !KiUserGetInputEvent())) return FALSE;
+    KiUserSyncInputEvent(queue);
+    return NT_SUCCESS(KeWaitForSingleObject(&queue->InputEvent->Header));
+}
+
 /* NtUserCallNoParam(routine): the routine index is the only argument, so it
  * cannot share NtUserCallOneParam's handler (which reads it from a[1]). */
 static UINT64 NtUserCallNoParam(UINT64 *a)

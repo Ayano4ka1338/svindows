@@ -776,8 +776,8 @@ static UINT64 NtUserWaitMessage(UINT64 *a)
 {
     USER_MSG_LOCAL msg;
     while (!KiUserTakeMessage(&msg, FALSE))
-        KeYield();
-    return 0;
+        if (!KiUserWaitForInput()) return 0;
+    return 1;
 }
 /* Desktop/window-station objects are not implemented. Do not return fake
  * handles that clients could later pass to unrelated object services. */

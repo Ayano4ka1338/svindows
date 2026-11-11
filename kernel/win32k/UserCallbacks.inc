@@ -1093,20 +1093,10 @@ static UINT64 NtUserGetMessage(UINT64 *a)
     USER_MSG_LOCAL msg;
     PKTHREAD caller = KeGetCurrentThread();
     UINT32 tid = caller ? caller->ThreadId : 0;
-    if (!KiUserTakeMessage(&msg, TRUE)) {
-        /* Report the first time each thread parks in GetMessage: an empty
-         * queue with nothing to wake it is the signature of a shell that is
-         * waiting on USER machinery we have not built yet. */
-        static UINT8 parked[USER_MAX_THREAD_QUEUES + 1];
-        if (tid <= USER_MAX_THREAD_QUEUES && !parked[tid]) {
-            parked[tid] = 1;
-            KeLog("[user] GetMessage: thread %lu queue empty, waiting\n",
-                  (unsigned long)tid);
-        }
-        do
-            KeYield();
-        while (!KiUserTakeMessage(&msg, TRUE));
-    }
+    while (!KiUserTakeMessage(&msg, TRUE))
+        if (!KiUserWaitForInput()) return (UINT64)-1;
+    if (!MmProbeForWrite((UINT64)user_msg, sizeof(*user_msg)))
+        return (UINT64)-1;
     *user_msg = msg;
     KeTrace("[user] GetMessage -> msg 0x%x hwnd %p (tid %lu)\n",
           (unsigned)msg.Message, (void *)msg.Hwnd, (unsigned long)tid);
