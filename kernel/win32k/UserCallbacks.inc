@@ -21,6 +21,8 @@ typedef struct _USER_OBJECT_OWNER {
     UINT16 Generation;
     UINT8 Type;
     BOOLEAN Icon, SharedIcon;
+    BOOLEAN Closeable;
+    UINT16 DesktopReferences;
 } USER_OBJECT_OWNER;
 static USER_OBJECT_OWNER g_user_objects[USER_OBJECT_SLOTS];
 
@@ -46,6 +48,8 @@ static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
     object->Generation++;
     object->Type = type;
     object->Icon = object->SharedIcon = FALSE;
+    object->Closeable = FALSE;
+    object->DesktopReferences = 0;
     object->Process = caller->Process;
     UINT64 head = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)index * 0x200;
     memset((void *)head, 0, 0x200);
@@ -77,7 +81,8 @@ static UINT64 KiUserDesktopHandle(PKPROCESS process)
 {
     for (UINT16 i = 200; i < USER_OBJECT_SLOTS; ++i) {
         USER_OBJECT_OWNER *object = &g_user_objects[i];
-        if (object->Process == process && object->Type == USER_TYPE_DESKTOP)
+        if (object->Process == process && object->Type == USER_TYPE_DESKTOP &&
+            !object->Closeable)
             return ((UINT64)object->Generation << 16) | i;
     }
     PKTHREAD caller = KeGetCurrentThread();
@@ -96,21 +101,96 @@ static UINT64 NtUserGetThreadDesktop(UINT64 *a)
     PKTHREAD target = a[0] ? KeLookupThreadById((ULONG)a[0]) : caller;
     if (!target || target->Process != caller->Process)
         return 0;
-    return KiUserDesktopHandle(caller->Process);
+    return target->UserDesktop ? target->UserDesktop :
+                                KiUserDesktopHandle(caller->Process);
+}
+
+static void KiUserDesktopError(UINT32 error)
+{
+    PKTHREAD caller = KeGetCurrentThread();
+    if (caller && caller->UserGsBase &&
+        MmProbeForWrite(caller->UserGsBase + 0x68, sizeof(error)))
+        *(UINT32 *)(caller->UserGsBase + 0x68) = error;
+}
+
+static USER_OBJECT_OWNER *KiUserDesktopObject(UINT64 handle, UINT8 type)
+{
+    PKTHREAD caller = KeGetCurrentThread();
+    UINT16 slot = (UINT16)handle;
+    if (!caller || slot < 200 || slot >= USER_OBJECT_SLOTS) return NULL;
+    USER_OBJECT_OWNER *object = &g_user_objects[slot];
+    if (object->Process != caller->Process || object->Type != type ||
+        handle != (((UINT64)object->Generation << 16) | slot)) return NULL;
+    return object;
 }
 
 static UINT64 NtUserSetThreadDesktop(UINT64 *a)
 {
     PKTHREAD caller = KeGetCurrentThread();
-    UINT16 slot = (UINT16)a[0];
-    if (!caller || !caller->Process || slot < 200 || slot >= USER_OBJECT_SLOTS)
-        return 0;
-    USER_OBJECT_OWNER *object = &g_user_objects[slot];
+    USER_OBJECT_OWNER *object = KiUserDesktopObject(a[0], USER_TYPE_DESKTOP);
+    if (!object) { KiUserDesktopError(6); return 0; }
     /* All threads already belong to the sole interactive desktop. Accept
      * reassociation with that desktop, never a stale or foreign USER handle. */
-    return object->Process == caller->Process &&
-           object->Type == USER_TYPE_DESKTOP &&
-           a[0] == (((UINT64)object->Generation << 16) | slot);
+    if (caller->UserDesktop != a[0]) {
+        USER_OBJECT_OWNER *old = KiUserDesktopObject(caller->UserDesktop,
+                                                    USER_TYPE_DESKTOP);
+        if (old && old->DesktopReferences) old->DesktopReferences--;
+        caller->UserDesktop = a[0];
+        object->DesktopReferences++;
+    }
+    return 1;
+}
+
+static UINT64 NtUserGetProcessWindowStation(UINT64 *a)
+{
+    (void)a;
+    PKTHREAD caller = KeGetCurrentThread();
+    if (!caller || !caller->Process) return 0;
+    for (UINT16 i = 200; i < USER_OBJECT_SLOTS; ++i) {
+        USER_OBJECT_OWNER *object = &g_user_objects[i];
+        if (object->Process == caller->Process &&
+            object->Type == USER_TYPE_WINDOWSTATION)
+            return ((UINT64)object->Generation << 16) | i;
+    }
+    return KiUserAllocateObject(USER_TYPE_WINDOWSTATION, NULL);
+}
+
+/* Our client ABI captures the name directly; only WinSta0\\Default exists. */
+static UINT64 NtUserOpenDesktop(UINT64 *a)
+{
+    WCHAR name[16] = {0};
+    static const WCHAR default_name[] = {'D','e','f','a','u','l','t',0};
+    KiCopyWideFromUser((const WCHAR *)a[0], name, 16);
+    if (!KiWideEqual(name, default_name)) { KiUserDesktopError(2); return 0; }
+    if (a[1] || a[2]) { KiUserDesktopError(50); return 0; }
+    UINT64 handle = KiUserAllocateObject(USER_TYPE_DESKTOP, NULL);
+    if (handle) g_user_objects[(UINT16)handle].Closeable = TRUE;
+    else KiUserDesktopError(8);
+    return handle;
+}
+
+static UINT64 NtUserCloseDesktop(UINT64 *a)
+{
+    USER_OBJECT_OWNER *object = KiUserDesktopObject(a[0], USER_TYPE_DESKTOP);
+    if (!object || !object->Closeable) { KiUserDesktopError(6); return 0; }
+    if (object->DesktopReferences) { KiUserDesktopError(170); return 0; }
+    (void)W32kClearSharedHandle(object->Process, FALSE, (UINT16)a[0]);
+    object->Process = NULL;
+    object->Type = 0;
+    return 1;
+}
+
+static UINT64 SvNtUserEnumDesktopWindows(UINT64 *a)
+{
+    if (a[0] && !KiUserDesktopObject(a[0], USER_TYPE_DESKTOP)) return (UINT64)-1;
+    if (a[2] < 128 || !MmProbeForWrite(a[1], 128 * sizeof(UINT64)))
+        return (UINT64)-1;
+    UINT64 *windows = (UINT64 *)a[1];
+    UINT32 count = 0;
+    for (UINT16 slot = 1; slot < 128; ++slot)
+        if (g_window_owner[slot] && !W32kWindowParent(slot))
+            windows[count++] = KiUserWindowHandle(slot);
+    return count;
 }
 
 /*
@@ -948,6 +1028,12 @@ static void KiUserDropWindow(UINT16 root)
 void W32kCleanupThreadUser(PKTHREAD thread)
 {
     KiReleaseCallbackResources(thread);
+    if (thread->UserDesktop) {
+        USER_OBJECT_OWNER *object = &g_user_objects[(UINT16)thread->UserDesktop];
+        if (object->Process == thread->Process && object->DesktopReferences)
+            object->DesktopReferences--;
+        thread->UserDesktop = 0;
+    }
     for (UINT16 slot = 1; slot < 128; slot++)
         if (g_window_owner[slot] == thread->ThreadId && g_window_process[slot] == thread->Process)
             KiUserDropWindow(slot);

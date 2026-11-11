@@ -400,6 +400,7 @@ typedef struct _KTHREAD {
     /* One-shot dispatch boost for runnable Linux I/O clients (Xorg, window
      * managers, and terminals). Appended so assembly-visible offsets stay put. */
     LONG            SchedulerBoost;
+    UINT64          UserDesktop; /* explicit desktop association, or inherited */
 } KTHREAD, *PKTHREAD;
 
 /* Per-processor state reached through GS after swapgs. Keep the first three

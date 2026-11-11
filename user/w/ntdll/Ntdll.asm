@@ -538,6 +538,11 @@ SYSCALL_STUB NtUserGetClassInfoEx, 0x10BB
 SYSCALL_STUB NtUserGetThreadDesktop, 0x1085
 SYSCALL_STUB NtUserSetThreadDesktop, 0x1093
 SYSCALL_STUB NtUserCallOneParam, 0x1005
+SYSCALL_STUB NtUserGetProcessWindowStation, 0x1025
+SYSCALL_STUB NtUserOpenDesktop, 0x10A9
+SYSCALL_STUB NtUserCloseDesktop, 0x10A8
+SYSCALL_STUB NtUserGetObjectInformation, 0x106E
+SYSCALL_STUB SvNtUserEnumDesktopWindows, 0x1F1C
 SYSCALL_STUB SvNtQueryThreadExitStatus, 0x1F19
 SYSCALL_STUB SvNtReadProcessMemory, 0x1F1A
 SYSCALL_STUB NtGdiGetDCObject, 0x1038

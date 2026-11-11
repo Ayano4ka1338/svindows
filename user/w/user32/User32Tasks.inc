@@ -7,6 +7,33 @@ __declspec(dllimport) DWORD WaitForMultipleObjects(DWORD count,
     const HANDLE *handles, BOOL all, DWORD timeout);
 __declspec(dllimport) void Sleep(DWORD milliseconds);
 __declspec(dllimport) UINT64 NtUserCallOneParam(UINT64 value, UINT64 routine);
+__declspec(dllimport) UINT64 NtUserGetProcessWindowStation(void);
+__declspec(dllimport) UINT64 NtUserOpenDesktop(const WCHAR *, DWORD, BOOL, DWORD);
+__declspec(dllimport) UINT64 NtUserCloseDesktop(HANDLE);
+__declspec(dllimport) UINT64 NtUserGetObjectInformation(HANDLE, int, void *, DWORD, DWORD *);
+
+USER32_API HANDLE GetProcessWindowStation(void)
+{ return (HANDLE)(UINT_PTR)NtUserGetProcessWindowStation(); }
+USER32_API HANDLE OpenDesktopW(const WCHAR *name, DWORD flags, BOOL inherit, DWORD access)
+{ return (HANDLE)(UINT_PTR)NtUserOpenDesktop(name, flags, inherit, access); }
+USER32_API BOOL CloseDesktop(HANDLE desktop)
+{ return NtUserCloseDesktop(desktop) != 0; }
+USER32_API BOOL GetUserObjectInformationW(HANDLE object, int index, void *info,
+    DWORD bytes, DWORD *needed)
+{ return NtUserGetObjectInformation(object, index, info, bytes, needed) != 0; }
+USER32_API BOOL EnumDesktopsW(HANDLE station,
+    BOOL (*callback)(WCHAR *, LONG_PTR), LONG_PTR data)
+{
+    WCHAR type[16];
+    if (!callback) { SetLastError(87); return FALSE; }
+    if (!station) station = GetProcessWindowStation();
+    if (!GetUserObjectInformationW(station, 3, type, sizeof(type), NULL) ||
+        !sv_user_wide_equal(type, L"WindowStation")) {
+        SetLastError(6); return FALSE;
+    }
+    WCHAR name[] = L"Default";
+    return callback(name, data);
+}
 
 USER32_API BOOL EndTask(HWND window, BOOL shutdown, BOOL force)
 {

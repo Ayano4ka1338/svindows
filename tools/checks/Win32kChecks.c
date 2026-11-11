@@ -724,6 +724,13 @@ static void check_menu_geometry(void)
     puts("PASS menu snapshots, nonclient hit testing and child/client geometry");
 }
 
+PKTHREAD KeLookupThreadById(ULONG id)
+{
+    if (id == thread_a.ThreadId) return &thread_a;
+    if (id == thread_b.ThreadId) return &thread_b;
+    return NULL;
+}
+
 int main(void)
 {
     check_screen_z_order();
@@ -875,6 +882,13 @@ int main(void)
     assert(SvNtUserQueryWindowState(args)==3);
     UINT64 owner_query[]={hwnd_a,0};
     assert(NtUserQueryWindow(owner_query)==thread_a.ThreadId);
+    UINT64 desktop_windows[128];
+    UINT64 enum_args[] = {0, (UINT64)desktop_windows, 128};
+    UINT64 window_count = SvNtUserEnumDesktopWindows(enum_args);
+    BOOLEAN found_foreign = FALSE;
+    for (UINT32 i = 0; i < window_count; ++i)
+        if (desktop_windows[i] == hwnd_a) found_foreign = TRUE;
+    assert(found_foreign);
     owner_query[1]=4;assert(NtUserQueryWindow(owner_query)==process_a.ProcessId);
     WCHAR shared_text[4];UINT64 text_query[]={hwnd_a,(UINT64)shared_text,4};
     assert(NtUserGetWindowText(text_query)==3 && shared_text[0]=='T' && shared_text[3]==0);
@@ -897,6 +911,32 @@ int main(void)
     assert(NtUserDestroyWindow(args));
     puts("PASS class isolation, window ownership/generation and thread window/DC cleanup");
     check_retained_window_painting();
+
+    current = &thread_a;
+    UINT64 desktop_args[4] = {0};
+    UINT64 desktop = NtUserGetThreadDesktop(desktop_args);
+    UINT64 station = NtUserGetProcessWindowStation(desktop_args);
+    assert(desktop && station && desktop != station);
+    WCHAR desktop_name[] = {'D','e','f','a','u','l','t',0};
+    desktop_args[0] = (UINT64)desktop_name;
+    UINT64 opened = NtUserOpenDesktop(desktop_args);
+    assert(opened && opened != desktop);
+    desktop_args[0] = opened;
+    assert(NtUserSetThreadDesktop(desktop_args));
+    assert(!NtUserCloseDesktop(desktop_args)); /* associated with a thread */
+    desktop_args[0] = 0;
+    assert(NtUserGetThreadDesktop(desktop_args) == opened);
+    desktop_args[0] = desktop;
+    assert(NtUserSetThreadDesktop(desktop_args));
+    assert(!NtUserCloseDesktop(desktop_args)); /* inherited handle is borrowed */
+    current = &thread_b;
+    desktop_args[0] = opened;
+    assert(!NtUserSetThreadDesktop(desktop_args));
+    assert(!NtUserCloseDesktop(desktop_args));
+    current = &thread_a;
+    assert(NtUserCloseDesktop(desktop_args));
+    assert(!NtUserSetThreadDesktop(desktop_args)); /* stale generation */
+    puts("PASS desktop handle ownership, thread association, busy close and foreign window enumeration");
 
     args[0] = args[1] = 0;
     UINT64 cursor_a = NtUserFindExistingCursorIcon(args);

@@ -359,6 +359,11 @@ EXPORTS
     NtUserGetThreadDesktop
     NtUserSetThreadDesktop
     NtUserCallOneParam
+    NtUserGetProcessWindowStation
+    NtUserOpenDesktop
+    NtUserCloseDesktop
+    NtUserGetObjectInformation
+    SvNtUserEnumDesktopWindows
     SvNtQueryThreadExitStatus
     SvNtReadProcessMemory
     NtGdiGetDCObject

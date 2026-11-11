@@ -344,8 +344,14 @@ USER32_API BOOL EnumDisplayMonitors(HDC dc, const RECT *clip,
 USER32_API BOOL EnumDesktopWindows(HANDLE desktop,
         BOOL (*callback)(HWND,LONG_PTR), LONG_PTR data)
 {
-    (void)desktop;for(UINT i=0;i<SV_USER_WINDOWS;i++)if(g_sv_windows[i].Used&&!g_sv_windows[i].Parent)
-        if(callback&&!callback(g_sv_windows[i].Window,data))return FALSE;return TRUE;
+    __declspec(dllimport) UINT64 SvNtUserEnumDesktopWindows(HANDLE, HWND *, UINT);
+    HWND windows[128];
+    if (!callback) { SetLastError(87); return FALSE; }
+    UINT64 count = SvNtUserEnumDesktopWindows(desktop, windows, 128);
+    if (count == (UINT64)-1) { SetLastError(6); return FALSE; }
+    for (UINT i = 0; i < count; ++i)
+        if (!callback(windows[i], data)) return FALSE;
+    return TRUE;
 }
 USER32_API BOOL EnumChildWindows(HWND parent,
         BOOL (*callback)(HWND,LONG_PTR), LONG_PTR data)
