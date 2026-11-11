@@ -24,11 +24,42 @@ static LRESULT custom_draw(SV_CONTROL*c,HDC dc,RECT r,DWORD stage)
     n.Stage=stage;n.Dc=dc;n.Rect=r;n.State=(c->pressed?1:0)|(c->focused?16:0)|(c->hot?64:0)|((c->style&WS_DISABLED)?4:0);
     return c->parent?SendMessageW(c->parent,0x4e,c->id,(LPARAM)&n):0;
 }
+typedef struct {
+    UINT Type, ControlId, ItemId, Action, State;
+    HWND Window;
+    HDC Dc;
+    RECT Bounds;
+    ULONG_PTR ItemData;
+} SV_DRAWITEM;
+_Static_assert(sizeof(SV_DRAWITEM) == 64, "Win64 DRAWITEMSTRUCT");
+
+static void paint_owner_button(SV_CONTROL *control, HDC dc, RECT bounds)
+{
+    if (!control->parent) return;
+    SV_DRAWITEM item = {
+        .Type = 4, /* ODT_BUTTON */
+        .ControlId = control->id,
+        .Action = 1, /* ODA_DRAWENTIRE */
+        .State = (control->pressed ? 1 : 0) |
+                 (control->style & WS_DISABLED ? 4 : 0) |
+                 (control->focused ? 16 : 0),
+        .Window = control->hwnd,
+        .Dc = dc,
+        .Bounds = bounds
+    };
+    SendMessageW(control->parent, 0x002b /* WM_DRAWITEM */, control->id, (LPARAM)&item);
+}
+
 static void paint(SV_CONTROL *c)
 {
     PAINTSTRUCT ps; HDC dc = BeginPaint(c->hwnd, &ps);
     if (!dc) return;
     RECT r; GetClientRect(c->hwnd, &r);
+    if ((c->style & BS_TYPEMASK) == BS_OWNERDRAW) {
+        paint_owner_button(c, dc, r);
+        if (!c->dead) EndPaint(c->hwnd, &ps);
+        return;
+    }
     LRESULT custom=custom_draw(c,dc,r,1);
     if(custom&4){EndPaint(c->hwnd,&ps);return;}
     int state = c->style & WS_DISABLED ? PBS_DISABLED : c->pressed ? PBS_PRESSED :

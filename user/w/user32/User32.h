@@ -256,6 +256,7 @@ __declspec(dllimport) int SvGdiDrawTextW(HDC dc, const WCHAR *text,
 #define BS_RADIOBUTTON   0x0004u
 #define BS_GROUPBOX      0x0007u
 #define BS_AUTORADIOBUTTON 0x0009u
+#define BS_OWNERDRAW     0x000Bu
 #define BS_NOTIFY        0x4000u
 #define BS_TYPEMASK      0x000Fu
 #define BM_GETCHECK      0x00F0u

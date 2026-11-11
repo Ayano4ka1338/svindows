@@ -81,7 +81,7 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         UINT type = (UINT)cs->style & 15;
         if (kind == SV_BUTTON && type != BS_PUSHBUTTON && type != BS_DEFPUSHBUTTON &&
             type != BS_CHECKBOX && type != BS_AUTOCHECKBOX && type != BS_RADIOBUTTON &&
-            type != BS_GROUPBOX && type != BS_AUTORADIOBUTTON) return FALSE;
+            type != BS_GROUPBOX && type != BS_AUTORADIOBUTTON && type != BS_OWNERDRAW) return FALSE;
         if(kind==SV_COMBO&&((cs->style&3)!=3||(cs->style&0x30)))return FALSE;
         if (kind == SV_EDIT && (cs->style & (ES_PASSWORD|ES_CENTER|ES_RIGHT))) return FALSE;
         if (kind == SV_STATIC && type != SS_LEFT && type != SS_CENTER &&
@@ -95,10 +95,12 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         c->font = GetStockObject(DEFAULT_GUI_FONT);
         c->model.limit = kind == SV_EDIT && !(c->style & ES_MULTILINE) ? 32767 : 0x7FFFFFFE;
         if (kind == SV_SCROLLBAR) c->scroll.Max = 100;
-        else c->theme = OpenThemeData(hwnd, kind == SV_BUTTON ? L"BUTTON" : kind == SV_EDIT ? L"EDIT" : L"STATIC");
+        else if (kind != SV_BUTTON || type != BS_OWNERDRAW)
+            c->theme = OpenThemeData(hwnd, kind == SV_BUTTON ? L"BUTTON" : kind == SV_EDIT ? L"EDIT" : L"STATIC");
         BOOL image_static = kind == SV_STATIC &&
                             (type == SS_BITMAP || type == SS_ENHMETAFILE);
-        if ((!c->theme && kind != SV_SCROLLBAR && type != BS_GROUPBOX && !image_static) ||
+        BOOL owner_draw = kind == SV_BUTTON && type == BS_OWNERDRAW;
+        if ((!c->theme && kind != SV_SCROLLBAR && type != BS_GROUPBOX && !owner_draw && !image_static) ||
             !SvEditSetText(&c->model, image_static ? L"" : cs->lpszName)) {
             if (c->theme) CloseThemeData(c->theme);
             SvEditDispose(&c->model); SvControlFree(c); return FALSE;
