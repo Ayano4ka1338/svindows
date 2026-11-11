@@ -121,6 +121,7 @@ BOOLEAN W32kWindowRect(UINT16 slot, INT32 *x, INT32 *y, UINT32 *width,
 void W32kClientOrigin(UINT16 slot, INT32 *x, INT32 *y, INT32 *width,
                       INT32 *height);
 UINT16 W32kActiveSlot(void);
+UINT32 W32kWindowStyle(UINT16 slot);
 BOOLEAN W32kGetRect(UINT64 hwnd, INT32 *rect, BOOLEAN client);
 
 /* Input arrives from the HAL through the kernel input worker. */

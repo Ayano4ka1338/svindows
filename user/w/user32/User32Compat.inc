@@ -116,8 +116,12 @@ static int sv_user_long_slot(int index)
     }
 }
 
+__declspec(dllimport) UINT64 SvNtUserGetWindowStyle(HWND window);
 USER32_API LONG_PTR GetWindowLongPtrW(HWND hwnd, int index)
 {
+    /* ShowWindow and window-manager actions can change these flags without
+     * updating this process's creation-time metadata. Query the owning state. */
+    if (index == GWL_STYLE) return (LONG_PTR)SvNtUserGetWindowStyle(hwnd);
     SV_USER_WINDOW_STATE *s = sv_user_state(hwnd);
     if(s && index>=0 && index<64 && !(index&7)) return s->ExtraLongs[index/8];
     int slot = sv_user_long_slot(index);

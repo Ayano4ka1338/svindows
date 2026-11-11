@@ -362,7 +362,7 @@ static BOOLEAN KiSetWindowLong(UINT64 hwnd, INT32 index, INT64 value,
     if (!KiUserWindowValid(hwnd, TRUE)) return FALSE;
     if (index == -16) {
         UINT32 *style=(UINT32*)(PROCESS_USER_OBJECT_ARENA_VA+(UINT64)slot*0x200+WND_STYLE_OFF);
-        *old=*style;*style=(UINT32)value;W32kSetStyle(slot,(UINT32)value);return TRUE;
+        *old=W32kWindowStyle(slot);*style=(UINT32)value;W32kSetStyle(slot,(UINT32)value);return TRUE;
     }
     if (index == -4) { /* GWLP_WNDPROC: message dispatch must see subclassing. */
         UINT64 *proc = (UINT64 *)(PROCESS_USER_OBJECT_ARENA_VA +

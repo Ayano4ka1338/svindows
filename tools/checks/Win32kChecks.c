@@ -876,10 +876,16 @@ int main(void)
     graphics = FALSE;
     assert(window_dc);
     W32kShowWindow(hwnd_a,1);
+    assert(SvNtUserGetWindowStyle(args) & WS_VISIBLE_);
+    UINT64 style_args[] = {hwnd_a, (UINT64)(INT64)-16,
+                           W32kWindowStyle((UINT16)hwnd_a) | 0x10000};
+    assert(NtUserSetWindowLong(style_args) & WS_VISIBLE_);
+    assert(g_w32k[(UINT16)hwnd_a].Visible);
     WCHAR shared_title[]={'T','a','s','k',' ','f','i','x','t','u','r','e',0};
     W32kScreenSetTitle((UINT16)hwnd_a,shared_title);
     current = &thread_b;
     assert(SvNtUserQueryWindowState(args)==3);
+    assert(SvNtUserGetWindowStyle(args) & WS_VISIBLE_);
     UINT64 owner_query[]={hwnd_a,0};
     assert(NtUserQueryWindow(owner_query)==thread_a.ThreadId);
     UINT64 desktop_windows[128];

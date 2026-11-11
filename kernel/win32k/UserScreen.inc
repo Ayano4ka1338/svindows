@@ -116,6 +116,22 @@ UINT16 W32kActiveSlot(void)
     return g_w32k_active;
 }
 
+UINT32 W32kWindowStyle(UINT16 slot)
+{
+    if (!W32kWindowExists(slot)) return 0;
+    UINT32 style = g_w32k[slot].Style & ~(0x10000000u | 0x20000000u | 0x01000000u);
+    if (g_w32k[slot].Visible) style |= 0x10000000u;
+    if (g_w32k[slot].Minimized) style |= 0x20000000u;
+    if (g_w32k[slot].Maximized) style |= 0x01000000u;
+    return style;
+}
+
+static UINT64 SvNtUserGetWindowStyle(UINT64 *arguments)
+{
+    return KiUserWindowValid(arguments[0], FALSE) ?
+        W32kWindowStyle((UINT16)arguments[0]) : 0;
+}
+
 /* Kernel-side geometry read: the services that answer ring 3 probe the user
  * buffer themselves, so window-to-window arithmetic stays inside the kernel. */
 BOOLEAN W32kWindowRect(UINT16 slot, INT32 *x, INT32 *y, UINT32 *width,
