@@ -99,6 +99,20 @@ static UINT64 NtUserGetThreadDesktop(UINT64 *a)
     return KiUserDesktopHandle(caller->Process);
 }
 
+static UINT64 NtUserSetThreadDesktop(UINT64 *a)
+{
+    PKTHREAD caller = KeGetCurrentThread();
+    UINT16 slot = (UINT16)a[0];
+    if (!caller || !caller->Process || slot < 200 || slot >= USER_OBJECT_SLOTS)
+        return 0;
+    USER_OBJECT_OWNER *object = &g_user_objects[slot];
+    /* All threads already belong to the sole interactive desktop. Accept
+     * reassociation with that desktop, never a stale or foreign USER handle. */
+    return object->Process == caller->Process &&
+           object->Type == USER_TYPE_DESKTOP &&
+           a[0] == (((UINT64)object->Generation << 16) | slot);
+}
+
 /*
  * HCURSOR NtUserFindExistingCursorIcon(PUNICODE_STRING module,
  *                                      PUNICODE_STRING resource, void *param)

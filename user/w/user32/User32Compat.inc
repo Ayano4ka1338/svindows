@@ -682,6 +682,14 @@ USER32_API DWORD GetDialogBaseUnits(void)
 }
 
 __declspec(dllimport) UINT64 NtUserGetThreadDesktop(DWORD thread_id);
+__declspec(dllimport) UINT64 NtUserSetThreadDesktop(void *desktop);
+USER32_API BOOL SetThreadDesktop(void *desktop)
+{
+    if (NtUserSetThreadDesktop(desktop)) return TRUE;
+    SetLastError(6); /* ERROR_INVALID_HANDLE */
+    return FALSE;
+}
+
 USER32_API void *GetThreadDesktop(DWORD thread_id)
 {
     if (!thread_id) {
