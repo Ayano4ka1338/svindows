@@ -102,6 +102,7 @@ void ObRemoveObjectName(POBJECT object);
 void     ObInitializeHandleTable(void);
 POB_HANDLE_TABLE ObCreateHandleTable(void);
 void             ObDestroyHandleTable(POB_HANDLE_TABLE table);
+ULONG            ObCountOpenHandles(POB_HANDLE_TABLE table);
 POB_HANDLE_TABLE ObGetBootstrapHandleTable(void);
 
 /* Create a handle referring to `object` (the object gains a handle + pointer

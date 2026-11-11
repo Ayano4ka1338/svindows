@@ -21,6 +21,7 @@ typedef struct _HANDLE_ENTRY {
 
 struct _OB_HANDLE_TABLE {
     BOOLEAN      ExhaustionReported;
+    ULONG        OpenCount;
     HANDLE_ENTRY Entries[OB_MAX_HANDLES];
 };
 
@@ -75,12 +76,18 @@ void ObInitializeHandleTable(void)
           (unsigned)OB_MAX_HANDLES);
 }
 
-static void release_handle_entry(HANDLE_ENTRY *entry)
+ULONG ObCountOpenHandles(POB_HANDLE_TABLE table)
+{
+    return table ? __atomic_load_n(&table->OpenCount, __ATOMIC_RELAXED) : 0;
+}
+
+static void release_handle_entry(POB_HANDLE_TABLE table, HANDLE_ENTRY *entry)
 {
     POBJECT object = entry->Object;
     POBJECT_HEADER header = ObHeaderFromObject(object);
     entry->Object = NULL;
     entry->GrantedAccess = 0;
+    __atomic_sub_fetch(&table->OpenCount, 1, __ATOMIC_RELAXED);
     LONG handles = InterlockedDecrement(&header->HandleCount);
     if (header->Type->TotalHandles)
         header->Type->TotalHandles--;
@@ -95,7 +102,7 @@ void ObDestroyHandleTable(POB_HANDLE_TABLE table)
         return;
     for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
         if (table->Entries[i].Object)
-            release_handle_entry(&table->Entries[i]);
+            release_handle_entry(table, &table->Entries[i]);
     }
     ExFreePool(table);
 }
@@ -140,6 +147,7 @@ NTSTATUS ObCreateHandleInTable(POB_HANDLE_TABLE table, POBJECT object,
             POBJECT_HEADER header = ObHeaderFromObject(object);
             entry->Object = object;
             entry->GrantedAccess = access;
+            __atomic_add_fetch(&table->OpenCount, 1, __ATOMIC_RELAXED);
             ObReferenceObject(object);
             InterlockedIncrement(&header->HandleCount);
             header->Type->TotalHandles++;
@@ -265,7 +273,7 @@ NTSTATUS ObCloseHandleForObject(POB_HANDLE_TABLE table, HANDLE handle,
         KiIrqRestore(flags);
         return STATUS_INVALID_HANDLE;
     }
-    release_handle_entry(entry);
+    release_handle_entry(table, entry);
     KiIrqRestore(flags);
     return STATUS_SUCCESS;
 }

@@ -505,7 +505,7 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         *(LONG *)(row + 72) = process->BasePriority;
         *(UINT64 *)(row + 80) = process->ProcessId;
         *(UINT64 *)(row + 88) = process->ParentProcessId;
-        *(ULONG *)(row + 96) = 0; /* process handle counts are not tracked */
+        *(ULONG *)(row + 96) = ObCountOpenHandles(process->HandleTable);
         *(ULONG *)(row + 100) = 0; /* this build has one interactive session */
         UINT64 virtual_bytes = 0, committed_bytes = 0;
         for (ULONG r = 0; r < MM_MAX_PROCESS_REGIONS; ++r) {
