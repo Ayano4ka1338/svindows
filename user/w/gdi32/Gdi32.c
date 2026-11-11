@@ -158,7 +158,10 @@ typedef struct { HRGN Handle; RECT Bounds; BOOL Used; } SV_REGION;
 static SV_REGION g_regions[128];
 typedef struct { HDC Dc; HBITMAP Bitmap; } SV_DC_BITMAP;
 static SV_DC_BITMAP g_dc_bitmaps[128];
+typedef struct { HDC Dc; RECT Bounds; BOOL Used; } SV_DC_CLIP;
+static SV_DC_CLIP g_dc_clips[128];
 static SV_REGION *sv_region(HRGN region);
+static SV_DC_CLIP *sv_dc_clip(HDC dc, BOOL create);
 static void sv_track_dc_bitmap(HDC dc, HBITMAP bitmap);
 static void sv_flush_dib(HDC dc);
 static void sv_read_dib(HDC dc);
@@ -369,6 +372,22 @@ GDI32_API BOOL GetTextExtentPointW(HDC dc, const WCHAR *text, int count,
                                     LPSIZE size)
 { return GetTextExtentPoint32W(dc, text, count, size); }
 
+static SV_DC_CLIP *sv_dc_clip(HDC dc, BOOL create)
+{
+    SV_DC_CLIP *available = NULL;
+    for (UINT i = 0; i < 128; ++i) {
+        if (g_dc_clips[i].Used && g_dc_clips[i].Dc == dc)
+            return &g_dc_clips[i];
+        if (!g_dc_clips[i].Used && !available)
+            available = &g_dc_clips[i];
+    }
+    if (!create || !available) return NULL;
+    available->Used = TRUE;
+    available->Dc = dc;
+    available->Bounds = (RECT){0, 0, 0, 0};
+    return available;
+}
+
 static SV_REGION *sv_region(HRGN region)
 {
     for (UINT i=0;i<128;i++)if(g_regions[i].Used&&g_regions[i].Handle==region)return &g_regions[i];
@@ -380,7 +399,24 @@ GDI32_API int SelectClipRgn(HDC dc, HRGN region)
 {
     SV_REGION *clip = region ? sv_region(region) : NULL;
     if (region && !clip) return 0;
-    return (int)SvNtGdiClipRect(dc, 0, clip ? &clip->Bounds : NULL);
+    UINT64 result = SvNtGdiClipRect(dc, 0, clip ? &clip->Bounds : NULL);
+    SV_DC_CLIP *state = sv_dc_clip(dc, region != 0);
+    if (!region) {
+        if (state) state->Used = FALSE;
+    } else if (state) {
+        state->Bounds = clip->Bounds;
+    }
+    return (int)result;
+}
+
+GDI32_API int GetClipRgn(HDC dc, HRGN region)
+{
+    SV_DC_CLIP *state = sv_dc_clip(dc, FALSE);
+    SV_REGION *target = sv_region(region);
+    if (!target) return -1;
+    if (!state) return 0;
+    target->Bounds = state->Bounds;
+    return 1;
 }
 
 GDI32_API int ExcludeClipRect(HDC dc, int left, int top, int right, int bottom)
@@ -392,7 +428,20 @@ GDI32_API int ExcludeClipRect(HDC dc, int left, int top, int right, int bottom)
 GDI32_API int IntersectClipRect(HDC dc, int left, int top, int right, int bottom)
 {
     const RECT rect = {left, top, right, bottom};
-    return (int)SvNtGdiClipRect(dc, 0, &rect);
+    UINT64 result = SvNtGdiClipRect(dc, 0, &rect);
+    SV_DC_CLIP *state = sv_dc_clip(dc, TRUE);
+    if (state) {
+        RECT *clip = &state->Bounds;
+        if (clip->right <= clip->left || clip->bottom <= clip->top) {
+            *clip = rect;
+        } else {
+            if (clip->left < rect.left) clip->left = rect.left;
+            if (clip->top < rect.top) clip->top = rect.top;
+            if (clip->right > rect.right) clip->right = rect.right;
+            if (clip->bottom > rect.bottom) clip->bottom = rect.bottom;
+        }
+    }
+    return (int)result;
 }
 
 GDI32_API HRGN CreateRectRgn(int left,int top,int right,int bottom)
