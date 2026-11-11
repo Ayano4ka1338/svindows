@@ -493,6 +493,7 @@ typedef struct _KPROCESS {
     MM_PROCESS_REGION VmRegions[MM_MAX_PROCESS_REGIONS];
     struct _LINUX_PROCESS_CONTEXT *LinuxContext;
     UINT64 KernelTime, UserTime; /* includes threads which have exited */
+    UINT64 PeakWorkingSetBytes;
 } KPROCESS, *PKPROCESS;
 
 typedef struct _KE_PROCESS_THREAD_INFO {

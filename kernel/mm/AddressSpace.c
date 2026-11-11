@@ -20,6 +20,53 @@ static UINT64 *table(UINT64 phys)
     return (UINT64 *)MmPhysToVirt(phys & PTE_ADDR_MASK);
 }
 
+static UINT64 resident_large_pages(UINT64 entry, UINT64 span, UINT64 ram_pages)
+{
+    UINT64 first = ((entry & PTE_ADDR_MASK) >> PAGE_SHIFT) & ~(span - 1);
+    if (first >= ram_pages) return 0;
+    UINT64 available = ram_pages - first;
+    return available < span ? available : span;
+}
+
+/* Caller holds the process object and excludes local preemption while
+ * walking its current address space. Count mappings, including shared RAM,
+ * because those pages also belong to the process's resident working set. */
+UINT64 MmCountResidentUserPages(UINT64 root)
+{
+    if (!root || root == MM_INVALID_PHYS) return 0;
+    const UINT64 user_present = PTE_USER | PTE_PRESENT;
+    const UINT64 ram_pages = MmTotalPages();
+    UINT64 pages = 0;
+    const UINT64 *pml4 = table(root);
+    for (UINT32 i = 0; i < PT_ENTRIES / 2; ++i) {
+        if ((pml4[i] & user_present) != user_present) continue;
+        const UINT64 *pdpt = table(pml4[i]);
+        for (UINT32 j = 0; j < PT_ENTRIES; ++j) {
+            if ((pdpt[j] & user_present) != user_present) continue;
+            if (pdpt[j] & PTE_LARGE) {
+                pages += resident_large_pages(pdpt[j], 1ULL << 18, ram_pages);
+                continue;
+            }
+            const UINT64 *pd = table(pdpt[j]);
+            for (UINT32 k = 0; k < PT_ENTRIES; ++k) {
+                if ((pd[k] & user_present) != user_present) continue;
+                if (pd[k] & PTE_LARGE) {
+                    pages += resident_large_pages(pd[k], PT_ENTRIES, ram_pages);
+                    continue;
+                }
+                const UINT64 *pt = table(pd[k]);
+                for (UINT32 n = 0; n < PT_ENTRIES; ++n) {
+                    UINT64 leaf = pt[n];
+                    if ((leaf & user_present) == user_present &&
+                        ((leaf & PTE_ADDR_MASK) >> PAGE_SHIFT) < ram_pages)
+                        ++pages;
+                }
+            }
+        }
+    }
+    return pages;
+}
+
 static UINT64 next_table(UINT64 *entry)
 {
     if (!(*entry & PTE_PRESENT)) {

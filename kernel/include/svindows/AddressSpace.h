@@ -6,6 +6,7 @@
 
 UINT64  MmGetCurrentAddressSpace(void);
 UINT64  MmGetKernelAddressSpace(void);
+UINT64  MmCountResidentUserPages(UINT64 directory_table_base);
 UINT64  MmCreateAddressSpace(void);
 void    MmDestroyAddressSpace(UINT64 directory_table_base);
 void    MmSwitchAddressSpace(UINT64 directory_table_base);

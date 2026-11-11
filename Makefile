@@ -914,3 +914,9 @@ system-performance-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined -idirafter kernel/include tools/checks/SystemPerformanceChecks.c -o $(BUILD)/SystemPerformanceChecks
 	$(BUILD)/SystemPerformanceChecks
+
+.PHONY: resident-pages-check
+resident-pages-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -ffunction-sections -fdata-sections -fsanitize=address,undefined -idirafter kernel/include tools/checks/ResidentPagesChecks.c -Wl,--gc-sections -o $(BUILD)/ResidentPagesChecks
+	$(BUILD)/ResidentPagesChecks
