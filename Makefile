@@ -884,3 +884,9 @@ status-control-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/StatusChecks.c -Wl,--gc-sections -o $(BUILD)/StatusChecks
 	$(BUILD)/StatusChecks
+
+.PHONY: tab-layout-check
+tab-layout-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/TabLayoutChecks.c -Wl,--gc-sections -o $(BUILD)/TabLayoutChecks
+	$(BUILD)/TabLayoutChecks

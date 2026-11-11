@@ -1,4 +1,5 @@
 #include "Internal.h"
+__declspec(dllimport) LONG_PTR GetWindowLongPtrW(HWND,int);
 
 typedef struct TAB_ITEM { WCHAR *text; } TAB_ITEM;
 typedef struct TAB_STATE {
@@ -95,6 +96,16 @@ LRESULT SvTabProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp)
     case WM_ERASEBKGND:return 1;
     case TCM_GETITEMCOUNT:return s->count;
     case TCM_GETCURSEL:return s->selected;
+    case TCM_ADJUSTRECT:{
+        RECT *rect=(RECT *)lp;if(!rect)return 0;
+        /* Match the single row painted by tab_rect: a 26-pixel header
+         * followed by two pixels of page padding and four-pixel edges. */
+        int top=28,bottom=4;
+        if(GetWindowLongPtrW(hwnd,-16)&2){top=4;bottom=28;} /* TCS_BOTTOM */
+        int direction=wp?-1:1;
+        rect->left+=direction*4;rect->right-=direction*4;
+        rect->top+=direction*top;rect->bottom-=direction*bottom;
+        return 0;}
     case TCM_SETCURSEL:{int index=(int)wp,old=s->selected;if(index<0||index>=s->count)return -1;s->selected=index;InvalidateRect(hwnd,NULL,FALSE);return old;}
     case TCM_INSERTITEMW:{int index=(int)wp;if(!insert_item(s,index,(const TCITEMW *)lp))return -1;if(s->selected<0)s->selected=0;InvalidateRect(hwnd,NULL,FALSE);return index;}
     case TCM_DELETEITEM:{int index=(int)wp;if(index<0||index>=s->count)return FALSE;SvComctlFree(s->items[index].text);
