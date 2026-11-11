@@ -511,10 +511,10 @@ $(WINMM): user/w/winmm/Winmm.c user/w/winmm/Winmm.def $(KERNEL32)
 	           $(BUILD)/winmm.obj $(KERNEL32LIB)
 	@echo "  DLL   $@"
 
-$(IPHLPAPI): user/w/iphlpapi/Iphlpapi.c user/w/iphlpapi/IpHelper.h kernel/include/abi/NetQuery.h $(NTDLL)
+$(IPHLPAPI): Makefile user/w/iphlpapi/Iphlpapi.c user/w/iphlpapi/IpHelper.h kernel/include/abi/NetQuery.h $(NTDLL)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/w/iphlpapi/Iphlpapi.c -o $(BUILD)/iphlpapi.obj
-	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x2F0000000 /out:$@ $(BUILD)/iphlpapi.obj $(NTDLLLIB)
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x320000000 /out:$@ $(BUILD)/iphlpapi.obj $(NTDLLLIB)
 
 $(WINDOWSCODECS): user/w/windowscodecs/WindowsCodecs.c user/w/windowscodecs/WindowsCodecs.def user/w/windowscodecs/third_party/stb_image.h $(wildcard user/w/windowscodecs/include/*.h) $(KERNEL32)
 	@mkdir -p $(BUILD)
