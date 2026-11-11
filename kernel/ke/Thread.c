@@ -168,6 +168,9 @@ ULONG KeSnapshotProcessThreads(PKPROCESS process,
             info->Priority = thread->Priority;
             info->BasePriority = thread->Priority - thread->RelativePriority;
             info->ExitStatus = thread->ExitStatus;
+            info->KernelTime = __atomic_load_n(&thread->KernelTime,__ATOMIC_RELAXED);
+            info->UserTime = __atomic_load_n(&thread->UserTime,__ATOMIC_RELAXED);
+            info->ContextSwitches = thread->ContextSwitches;
             switch (thread->State) {
                 case ThreadStateReady: info->State = 1; break;
                 case ThreadStateRunning:
@@ -502,6 +505,8 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
         return;
     }
 
+    next->ContextSwitches++;
+    KeGetCurrentProcessorBlock()->ContextSwitches++;
     next->State = ThreadStateRunning;
     next->Quantum = DEFAULT_QUANTUM;
     next->SchedulerBoost = 0;
@@ -826,6 +831,8 @@ static void KepClockDpc(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)
     }
     KiReleaseSchedulerLock(scheduler_flags);
 }
+
+#include "CpuAccounting.inc"
 
 void KeClockTick(void)
 {

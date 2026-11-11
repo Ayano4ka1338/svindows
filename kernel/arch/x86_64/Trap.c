@@ -352,6 +352,8 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
     if (frame->vector >= IRQ_BASE_VECTOR && frame->vector < IRQ_BASE_VECTOR + 16) {
         KIRQL old_irql;
         KeRaiseIrql(HIGH_LEVEL, &old_irql);
+        if(frame->vector==IRQ_BASE_VECTOR)
+            KeAccountClockTick((frame->cs&3)==3);
         HalDispatchIrq((UINT8)(frame->vector - IRQ_BASE_VECTOR));
         KeLowerIrql(old_irql);
         KiScheduleAfterInterrupt();

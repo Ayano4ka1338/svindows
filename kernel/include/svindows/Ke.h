@@ -401,6 +401,8 @@ typedef struct _KTHREAD {
      * managers, and terminals). Appended so assembly-visible offsets stay put. */
     LONG            SchedulerBoost;
     UINT64          UserDesktop; /* explicit desktop association, or inherited */
+    UINT64          KernelTime, UserTime; /* scheduler samples, 100 ns */
+    ULONG           ContextSwitches;
 } KTHREAD, *PKTHREAD;
 
 /* Per-processor state reached through GS after swapgs. Keep the first three
@@ -422,6 +424,8 @@ typedef struct _KPRCB {
     volatile ULONG StartupState;   /* 0=offline, 1=booting, 2=online */
     volatile ULONG StartupRelease; /* AP may enter the shared scheduler */
     PKTHREAD IdleThread;
+    UINT64 IdleTime, KernelTime, UserTime;
+    ULONG ContextSwitches;
 } KPRCB, *PKPRCB;
 
 #define KE_MAXIMUM_PROCESSORS 64u
@@ -485,6 +489,7 @@ typedef struct _KPROCESS {
     char       Environment[2048];
     MM_PROCESS_REGION VmRegions[MM_MAX_PROCESS_REGIONS];
     struct _LINUX_PROCESS_CONTEXT *LinuxContext;
+    UINT64 KernelTime, UserTime; /* includes threads which have exited */
 } KPROCESS, *PKPROCESS;
 
 typedef struct _KE_PROCESS_THREAD_INFO {
@@ -493,6 +498,8 @@ typedef struct _KE_PROCESS_THREAD_INFO {
     LONG BasePriority;
     ULONG State;
     NTSTATUS ExitStatus;
+    UINT64 KernelTime, UserTime;
+    ULONG ContextSwitches;
 } KE_PROCESS_THREAD_INFO;
 ULONG KeSnapshotProcessThreads(PKPROCESS process,
                                KE_PROCESS_THREAD_INFO *buffer, ULONG capacity);
@@ -532,6 +539,7 @@ NORETURN void KeTerminateThread(void);
 
 /* Called from the timer interrupt to drive preemption. */
 void      KeClockTick(void);
+void      KeAccountClockTick(BOOLEAN user_mode);
 void      KiScheduleAfterInterrupt(void);
 UINT64    KeGetTickCount(void);
 

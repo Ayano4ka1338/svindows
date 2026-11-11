@@ -890,3 +890,9 @@ tab-layout-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/TabLayoutChecks.c -Wl,--gc-sections -o $(BUILD)/TabLayoutChecks
 	$(BUILD)/TabLayoutChecks
+
+.PHONY: cpu-accounting-check
+cpu-accounting-check:
+	mkdir -p $(BUILD)
+	clang -O1 -g -fsanitize=address,undefined -idirafter kernel/include tools/checks/CpuAccountingChecks.c -o $(BUILD)/CpuAccountingChecks
+	$(BUILD)/CpuAccountingChecks

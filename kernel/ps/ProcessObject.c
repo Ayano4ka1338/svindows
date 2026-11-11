@@ -497,8 +497,8 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         *(ULONG *)(row + 4) = thread_count;
         *(ULONG *)(row + 16) = 0; /* hard faults are not counted per process */
         *(UINT64 *)(row + 32) = 0; /* process create time not yet accounted */
-        *(INT64 *)(row + 40) = 0;  /* user CPU time not yet accounted */
-        *(INT64 *)(row + 48) = 0;  /* kernel CPU time not yet accounted */
+        *(UINT64 *)(row + 40) = __atomic_load_n(&process->UserTime,__ATOMIC_RELAXED);
+        *(UINT64 *)(row + 48) = __atomic_load_n(&process->KernelTime,__ATOMIC_RELAXED);
         *(UINT16 *)(row + 56) = (UINT16)(visible_chars * sizeof(UINT16));
         *(UINT16 *)(row + 58) = (UINT16)((visible_chars + 1) * sizeof(UINT16));
         *(UINT64 *)(row + 64) = (UINT64)(row + 256 + thread_count * 80);
@@ -528,10 +528,13 @@ NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
         for (ULONG t = 0; t < thread_count; ++t) {
             KE_PROCESS_THREAD_INFO *thread = &g_system_snapshot_threads[i][t];
             UINT8 *entry = thread_out + t * 80;
+            *(UINT64 *)(entry + 0) = thread->KernelTime;
+            *(UINT64 *)(entry + 8) = thread->UserTime;
             *(UINT64 *)(entry + 40) = process->ProcessId;
             *(UINT64 *)(entry + 48) = thread->ThreadId;
             *(LONG *)(entry + 56) = thread->Priority;
             *(LONG *)(entry + 60) = thread->BasePriority;
+            *(ULONG *)(entry + 64) = thread->ContextSwitches;
             *(ULONG *)(entry + 68) = thread->State;
         }
         if (i + 1 < process_count) *(ULONG *)row = row_size;
