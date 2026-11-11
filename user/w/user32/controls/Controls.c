@@ -57,9 +57,9 @@ void SvControlFill(HDC dc, int x, int y, int w, int h, COLORREF color)
 }
 static int class_kind(const WCHAR *name)
 {
-    const WCHAR *names[] = {L"BUTTON", L"EDIT", L"STATIC", L"COMBOBOX"};
+    const WCHAR *names[] = {L"BUTTON", L"EDIT", L"STATIC", L"COMBOBOX", L"SCROLLBAR"};
     if (IS_INTRESOURCE(name)) return 0;
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < sizeof(names) / sizeof(names[0]); ++k) {
         unsigned i = 0;
         for (;; ++i) {
             WCHAR ch = name[i];
@@ -94,10 +94,11 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         c->style = (DWORD)cs->style; c->ex_style = cs->dwExStyle;
         c->font = GetStockObject(DEFAULT_GUI_FONT);
         c->model.limit = kind == SV_EDIT && !(c->style & ES_MULTILINE) ? 32767 : 0x7FFFFFFE;
-        c->theme = OpenThemeData(hwnd, kind == SV_BUTTON ? L"BUTTON" : kind == SV_EDIT ? L"EDIT" : L"STATIC");
+        if (kind == SV_SCROLLBAR) c->scroll.Max = 100;
+        else c->theme = OpenThemeData(hwnd, kind == SV_BUTTON ? L"BUTTON" : kind == SV_EDIT ? L"EDIT" : L"STATIC");
         BOOL image_static = kind == SV_STATIC &&
                             (type == SS_BITMAP || type == SS_ENHMETAFILE);
-        if ((!c->theme && type != BS_GROUPBOX && !image_static) ||
+        if ((!c->theme && kind != SV_SCROLLBAR && type != BS_GROUPBOX && !image_static) ||
             !SvEditSetText(&c->model, image_static ? L"" : cs->lpszName)) {
             if (c->theme) CloseThemeData(c->theme);
             SvEditDispose(&c->model); SvControlFree(c); return FALSE;
@@ -153,6 +154,7 @@ static LRESULT ControlWndProc(int kind, HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (c->kind == SV_BUTTON) result = SvButtonMessage(c, msg, wp, lp);
         else if (c->kind == SV_EDIT) result = SvEditMessage(c, msg, wp, lp);
         else if(c->kind==SV_COMBO)result=SvComboMessage(c,msg,wp,lp);
+        else if (c->kind == SV_SCROLLBAR) result = SvScrollbarMessage(c,msg,wp,lp);
         else result = SvStaticMessage(c, msg, wp, lp);
         break;
     }
@@ -162,6 +164,7 @@ static LRESULT ButtonWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return Contro
 static LRESULT EditWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return ControlWndProc(SV_EDIT, h, m, w, l); }
 static LRESULT StaticWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return ControlWndProc(SV_STATIC, h, m, w, l); }
 static LRESULT ComboWndProc(HWND h,UINT m,WPARAM w,LPARAM l){return ControlWndProc(SV_COMBO,h,m,w,l);}
+static LRESULT ScrollbarWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return ControlWndProc(SV_SCROLLBAR,h,m,w,l); }
 __declspec(dllimport) HANDLE GetModuleHandleA(const char*);
 __declspec(dllimport) HANDLE LoadLibraryA(const char*);
 __declspec(dllimport) void *GetProcAddress(HANDLE,const char*);
@@ -190,7 +193,7 @@ int SvRegisterControl(const WCHAR *name)
     if (!kind) return register_common_control(name);
     /* Registration itself is process scoped and idempotent in win32k. */
     WNDCLASSEXW cls = {0};
-    cls.cbSize = sizeof(cls); cls.lpfnWndProc = kind == SV_BUTTON ? ButtonWndProc : kind == SV_EDIT ? EditWndProc : kind==SV_COMBO?ComboWndProc:StaticWndProc;
+    cls.cbSize = sizeof(cls); cls.lpfnWndProc = kind == SV_BUTTON ? ButtonWndProc : kind == SV_EDIT ? EditWndProc : kind==SV_COMBO?ComboWndProc:kind==SV_SCROLLBAR?ScrollbarWndProc:StaticWndProc;
     cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
     cls.lpszClassName = name;
     return RegisterClassExW(&cls) != 0;

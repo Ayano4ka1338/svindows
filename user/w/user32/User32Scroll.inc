@@ -1,12 +1,5 @@
 /* Scroll ranges belong to the window. Standalone scroll bars receive their
  * standard control messages and keep their own state. */
-typedef struct {
-    UINT Size, Mask;
-    int Min, Max;
-    UINT Page;
-    int Position, TrackPosition;
-} SV_SCROLLINFO;
-
 static SV_SCROLL_STATE *window_scroll(HWND hwnd, int bar)
 {
     if (bar < 0 || bar > 1) return 0;

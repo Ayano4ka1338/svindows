@@ -41,6 +41,7 @@ LRESULT SvStaticMessage(SV_CONTROL *c, UINT m, WPARAM w, LPARAM l) { (void)c; (v
 #include "../../user/w/user32/controls/EditModel.c"
 LRESULT SvComboMessage(SV_CONTROL *c,UINT m,WPARAM w,LPARAM l){(void)c;(void)m;(void)w;(void)l;return 0;}
 void SvComboDispose(SV_CONTROL *c){(void)c;}
+LRESULT SvScrollbarMessage(SV_CONTROL *c,UINT m,WPARAM w,LPARAM l){(void)c;(void)m;(void)w;(void)l;return 0;}
 HANDLE GetModuleHandleA(const char *name){(void)name;return 0;}
 HANDLE LoadLibraryA(const char *name){(void)name;return 0;}
 void *GetProcAddress(HANDLE module,const char *name){(void)module;(void)name;return 0;}
