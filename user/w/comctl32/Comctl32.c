@@ -133,6 +133,35 @@ __declspec(dllexport) BOOL ImageList_Destroy(HANDLE handle)
     sv_image_list_clear(list);return TRUE;
 }
 
+__declspec(dllexport) BOOL ImageList_Remove(HANDLE handle, int index)
+{
+    SV_IMAGELIST *list = 0;
+    for (UINT i = 0; i < 256; ++i)
+        if (handle == &g_image_lists[i] && g_image_lists[i].Magic == SV_IMAGE_LIST_MAGIC)
+            list = &g_image_lists[i];
+    if (!list || index < -1 || index >= list->Count) return FALSE;
+    if (index == -1) {
+        while (list->Count) {
+            DeleteObject(list->Images[--list->Count]);
+            list->Images[list->Count] = 0;
+        }
+    } else {
+        DeleteObject(list->Images[index]);
+        for (int i = index + 1; i < list->Count; ++i)
+            list->Images[i - 1] = list->Images[i];
+        list->Images[--list->Count] = 0;
+    }
+    return TRUE;
+}
+
+__declspec(dllexport) BOOL ImageList_SetIconSize(HANDLE handle, int width, int height)
+{
+    if (width <= 0 || height <= 0 || !ImageList_Remove(handle, -1)) return FALSE;
+    SV_IMAGELIST *list = handle;
+    list->Width = width; list->Height = height;
+    return TRUE;
+}
+
 typedef LRESULT (*SV_SUBCLASSPROC)(HWND, UINT, WPARAM, LPARAM,
                                    UINT_PTR, ULONG_PTR);
 __declspec(dllimport) LONG_PTR SetWindowLongPtrW(HWND, int, LONG_PTR);

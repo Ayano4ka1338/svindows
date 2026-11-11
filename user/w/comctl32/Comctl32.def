@@ -9,6 +9,8 @@ EXPORTS
     Str_SetPtrW @236
     DPA_Destroy @329
     DPA_Create @328
+    DPA_GetPtr @331
+    DPA_DeletePtr @336
     DPA_InsertPtr @334
     DPA_DeleteAllPtrs @337
     DPA_Sort @338

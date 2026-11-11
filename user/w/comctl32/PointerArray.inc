@@ -20,9 +20,24 @@ COMCTL32_API SV_DPA *DPA_CreateEx(int grow, HANDLE heap)
     return array;
 }
 
-COMCTL32_API SV_DPA *DPA_Create(void)
+COMCTL32_API SV_DPA *DPA_Create(int grow)
 {
-    return DPA_CreateEx(8, 0);
+    return DPA_CreateEx(grow, 0);
+}
+
+COMCTL32_API void *DPA_GetPtr(SV_DPA *array, int index)
+{
+    return array && index >= 0 && index < array->Count ? array->Pointers[index] : 0;
+}
+
+COMCTL32_API void *DPA_DeletePtr(SV_DPA *array, int index)
+{
+    if (!array || index < 0 || index >= array->Count) return 0;
+    void *previous = array->Pointers[index];
+    for (int i = index + 1; i < array->Count; ++i)
+        array->Pointers[i - 1] = array->Pointers[i];
+    array->Pointers[--array->Count] = 0;
+    return previous;
 }
 
 COMCTL32_API BOOL DPA_Destroy(SV_DPA *array)
