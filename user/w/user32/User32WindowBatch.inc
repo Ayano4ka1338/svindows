@@ -58,9 +58,14 @@ USER32_API HANDLE DeferWindowPos(HANDLE handle, HWND hwnd, HWND after,
     SV_WINDOW_BATCH *batch = open_window_batch(handle);
     if (!batch) return 0;
     RECT rect;
+    if (!hwnd || !GetWindowRect(hwnd, &rect)) {
+        /* A rejected window does not consume the open batch. */
+        SetLastError(1400); /* ERROR_INVALID_WINDOW_HANDLE */
+        return 0;
+    }
     HWND parent = GetAncestor(hwnd, 1 /* GA_PARENT */);
-    if (!GetWindowRect(hwnd, &rect) || (batch->Count && parent != batch->Parent)) {
-        HeapFree(GetProcessHeap(), 0, batch);
+    if (batch->Count && parent != batch->Parent) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
         return 0;
     }
     if (batch->Count == batch->Capacity) {
