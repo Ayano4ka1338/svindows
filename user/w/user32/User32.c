@@ -358,5 +358,19 @@ USER32_API HWND GetParent(HWND hwnd)
     return (HWND)(UINT_PTR)NtUserGetAncestor(hwnd, 1);
 }
 
+USER32_API BOOL IsChild(HWND parent, HWND child)
+{
+    if (!parent || !child || parent == child || !IsWindow(parent)) return FALSE;
+    /* GA_PARENT follows parent links, excluding top-level owner links. */
+    HWND current = (HWND)(UINT_PTR)NtUserGetAncestor(child, 1);
+    for (UINT depth = 0; current && depth < 65536; ++depth) {
+        if (current == parent) return TRUE;
+        HWND next = (HWND)(UINT_PTR)NtUserGetAncestor(current, 1);
+        if (next == current) break;
+        current = next;
+    }
+    return FALSE;
+}
+
 __declspec(dllimport) UINT64 NtUserWindowRelation(HWND,UINT);
 USER32_API HWND GetWindow(HWND hwnd,UINT command){return (HWND)(UINT_PTR)NtUserWindowRelation(hwnd,command);}

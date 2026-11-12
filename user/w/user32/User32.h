@@ -443,6 +443,7 @@ USER32_API BOOL      SetWindowTextW(HWND hwnd, const WCHAR *text);
 USER32_API int       GetWindowTextW(HWND hwnd, WCHAR *buffer, int capacity);
 USER32_API HWND      WindowFromPoint(POINT point);
 USER32_API HWND      GetParent(HWND hwnd);
+USER32_API BOOL      IsChild(HWND parent, HWND child);
 USER32_API HWND      GetWindow(HWND hwnd, UINT command);
 USER32_API int       GetWindowTextLengthW(HWND hwnd);
 USER32_API HWND      GetForegroundWindow(void);
