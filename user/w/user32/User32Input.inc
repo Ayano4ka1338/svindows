@@ -105,6 +105,21 @@ USER32_API HANDLE GetKeyboardLayout(DWORD thread)
     return (HANDLE)(UINT_PTR)0x04090409;
 }
 
+extern void SetLastError(DWORD error);
+
+USER32_API HANDLE ActivateKeyboardLayout(HANDLE layout, UINT flags)
+{
+    UINT_PTR requested = (UINT_PTR)layout;
+    /* PREV/NEXT both select the sole installed layout. Unsupported layouts
+       must fail rather than claiming that the keyboard mapping changed. */
+    if ((flags & ~(0x100u | 0x8u | 0x10u | 0x40000000u)) ||
+        (requested != 0 && requested != 1 && requested != 0x04090409)) {
+        SetLastError(87);
+        return NULL;
+    }
+    return GetKeyboardLayout(0);
+}
+
 typedef void (*SV_WINEVENTPROC)(HANDLE, DWORD, HWND, LONG, LONG, DWORD, DWORD);
 __declspec(dllimport) UINT64 NtUserSetWinEventHook(DWORD first, DWORD last,
     HINSTANCE module, const void *module_name, SV_WINEVENTPROC callback,
