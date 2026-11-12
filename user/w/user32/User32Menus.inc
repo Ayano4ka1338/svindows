@@ -212,6 +212,23 @@ USER32_API BOOL GetMenuItemInfoW(HMENU menu, UINT id, BOOL position, void *value
     return TRUE;
 }
 
+USER32_API int GetMenuStringW(HMENU menu, UINT id, WCHAR *text, int capacity,
+                              UINT flags)
+{
+    if (text && capacity > 0) text[0] = 0;
+    const SV_MENU_ITEM *item = sv_menu_find(sv_menu(menu), id,
+        (flags & MF_BY_POS) != 0, 0, 0, 0);
+    if (!item || (item->Type & (4 | 0x100 | MF_SEPARATOR_))) return 0;
+    int length = 0;
+    while (item->Text[length]) ++length;
+    if (!text || capacity == 0) return length;
+    if (capacity < 0) return 0;
+    if (length >= capacity) length = capacity - 1;
+    for (int i = 0; i < length; ++i) text[i] = item->Text[i];
+    text[length] = 0;
+    return length;
+}
+
 USER32_API BOOL SetMenuDefaultItem(HMENU handle, UINT id, UINT by_position)
 {
     SV_USER_MENU *menu = sv_menu(handle);
