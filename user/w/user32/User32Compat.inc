@@ -269,6 +269,27 @@ USER32_API BOOL SetWindowPlacement(HWND hwnd, const SV_WINDOWPLACEMENT *placemen
 USER32_API BOOL GetProcessDefaultLayout(DWORD *layout)
 { if(!layout)return FALSE;*layout=0;return TRUE; }
 
+USER32_API BOOL IsRectEmpty(const RECT *rect)
+{
+    return !rect || rect->left >= rect->right || rect->top >= rect->bottom;
+}
+
+USER32_API BOOL UnionRect(LPRECT dst, const RECT *a, const RECT *b)
+{
+    if (!dst || !a || !b) return FALSE;
+    RECT result = {0, 0, 0, 0};
+    BOOL empty_a = IsRectEmpty(a), empty_b = IsRectEmpty(b);
+    if (!empty_a && !empty_b) {
+        result.left = a->left < b->left ? a->left : b->left;
+        result.top = a->top < b->top ? a->top : b->top;
+        result.right = a->right > b->right ? a->right : b->right;
+        result.bottom = a->bottom > b->bottom ? a->bottom : b->bottom;
+    } else if (!empty_a) result = *a;
+    else if (!empty_b) result = *b;
+    *dst = result;
+    return !empty_a || !empty_b;
+}
+
 USER32_API BOOL SetRect(LPRECT rect, int left, int top, int right, int bottom)
 {
     if (!rect) return FALSE;
