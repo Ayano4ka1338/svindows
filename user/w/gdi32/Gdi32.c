@@ -434,6 +434,21 @@ GDI32_API int GetClipBox(HDC dc, RECT *bounds)
     return 2;
 }
 
+GDI32_API BOOL GdiAlphaBlend(HDC destination, int x, int y, int width,
+                             int height, HDC source, int source_x,
+                             int source_y, int source_width,
+                             int source_height, DWORD blend)
+{
+    /* BLENDFUNCTION is passed by value. The fully opaque SRCCOPY case
+       requires no destination readback or alpha channel support. */
+    if (blend == 0x00ff0000 && width > 0 && height > 0 &&
+        source_width > 0 && source_height > 0)
+        return NtGdiStretchBlt(destination, x, y, width, height, source,
+            source_x, source_y, source_width, source_height, 0x00cc0020) != 0;
+    RtlSetLastWin32Error(120);
+    return FALSE;
+}
+
 GDI32_API int ExcludeClipRect(HDC dc, int left, int top, int right, int bottom)
 {
     const RECT rect = {left, top, right, bottom};

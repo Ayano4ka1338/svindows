@@ -222,6 +222,10 @@ GDI32_API BOOL    OffsetViewportOrgEx(HDC dc, int dx, int dy, POINT *previous);
 GDI32_API int     IntersectClipRect(HDC dc, int left, int top, int right, int bottom);
 GDI32_API int     GetClipRgn(HDC dc, HRGN region);
 GDI32_API int     GetClipBox(HDC dc, LPRECT bounds);
+GDI32_API BOOL    GdiAlphaBlend(HDC destination, int x, int y, int width,
+                                int height, HDC source, int source_x,
+                                int source_y, int source_width,
+                                int source_height, DWORD blend);
 GDI32_API BOOL    DeleteDC(HDC hdc);
 
 /* Objects. */
