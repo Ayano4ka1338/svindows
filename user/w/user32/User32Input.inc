@@ -147,6 +147,14 @@ USER32_API BOOL UnhookWinEvent(HANDLE hook)
     return FALSE;
 }
 
+USER32_API BOOL IsWinEventHookInstalled(DWORD event)
+{
+    (void)event;
+    /* NtUserSetWinEventHook currently rejects every registration, so no
+       event can have an installed hook. Keep this query consistent with it. */
+    return FALSE;
+}
+
 __declspec(dllimport) UINT64 NtUserSetTimer(HWND window, UINT_PTR id, UINT timeout,
     void (*callback)(HWND, UINT, UINT_PTR, DWORD), UINT tolerance);
 __declspec(dllimport) UINT64 NtUserKillTimer(HWND window, UINT_PTR id);
