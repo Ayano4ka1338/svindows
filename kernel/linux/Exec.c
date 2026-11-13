@@ -390,8 +390,13 @@ UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp)
                                                           LINUX_EIO);
     }
     if (linux_is_pe_image(image, size)) {
+        KeTrace("[linux-exec] PE image '%s' (%lu bytes), switching pid %u\n",
+                capture->Path, (unsigned long)size, process->ProcessId);
         ExFreePool(image);
         error = linux_exec_windows(thread, process, capture);
+        if (error)
+            KeLog("[linux-exec] PE switch for '%s' returned Linux error %ld\n",
+                  capture->Path, (long)(INT64)error);
         ExFreePool(capture);
         return error;
     }

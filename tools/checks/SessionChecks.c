@@ -122,6 +122,14 @@ int main(void)
     UINT64 initial = NtUserGetThreadDesktop(args);
     assert(station && initial && station != initial);
     assert(thread_a.Win32Desktop == thread_b.Win32Desktop);
+    WCHAR startup_name[32]; ULONG startup_chars = 0;
+    assert(W32kQueryProcessDesktopName(&process_b, NULL, 0,
+                                       &startup_chars) == STATUS_BUFFER_TOO_SMALL);
+    assert(startup_chars == 16);
+    assert(NT_SUCCESS(W32kQueryProcessDesktopName(&process_b, startup_name,
+                                                   32, &startup_chars)));
+    assert(startup_name[0] == 'W' && startup_name[7] == '\\' &&
+           startup_name[8] == 'D' && startup_name[15] == 0);
     WCHAR info[64]; ULONG needed = 0;
     args[0] = station; args[1] = 3; args[2] = (UINT64)info;
     args[3] = sizeof(info); args[4] = (UINT64)&needed;

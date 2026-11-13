@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/dos/Dos.c').read_text()
-start = source.index('static BOOLEAN dos_command_is_image_named(')
+start = source.index('static BOOLEAN dos_command_is_win100_bin(')
 end = source.index('\nU16 free_paragraphs_from(', start)
 helper_source = source[start:end]
 image_start = source.index('BOOLEAN DosIsImage(')
@@ -41,10 +41,10 @@ int main(int argc, char **argv) {
   assert(dos_command_is_win100_bin("C:\\WINDOWS1\\WIN100.BIN"));
   assert(dos_command_is_win100_bin("\"c:\\windows1\\win100.bin\" /n"));
   assert(!dos_command_is_win100_bin("C:\\WINDOWS1\\WIN.COM"));
-  assert(dos_command_is_win200_bin("C:\\WINDOWS3\\WIN200.BIN"));
-  assert(dos_command_is_win200_bin("\"c:\\windows3\\win200.bin\" /s"));
-  assert(!dos_command_is_win200_bin("C:\\WINDOWS3\\WIN.COM"));
-  assert(!dos_command_is_win200_bin("C:\\WINDOWS1\\WIN100.BIN"));
+  assert(dos_command_is_windows31("C:\\WINDOWS3\\WIN200.BIN"));
+  assert(dos_command_is_windows31("\"c:\\windows3\\win200.bin\" /s"));
+  assert(dos_command_is_windows31("C:\\WINDOWS3\\WIN.COM"));
+  assert(!dos_command_is_windows31("C:\\WINDOWS1\\WIN100.BIN"));
   assert(!dos_command_is_win100_bin("C:\\DOOM\\DOOM.EXE"));
 
   /* Windows 1.x MZ/NE files carry a DOS entry stub and must be EXEC-able. */
@@ -120,8 +120,9 @@ assert 'size == parent->ImageSize' in interrupt
 assert 'DosImageHash((const U8 *)image, (U32)size) == parent->ImageHash' in interrupt
 assert 'parent->ExitCode = child_status;' in interrupt
 assert 'parent->Running = FALSE;' in interrupt
-assert 'vm->DosVersion = vm->IsWindows100 ? 0x2203u :' in source
-assert '(vm->IsWindows200 ? 0x0004u : 0x0005u)' in source
+assert 'vm->DosVersion = dos_command_is_win100_bin(command) ? 0x2203u :' in source
+assert 'dos_command_is_windows31(command)' in source
+assert '? 0x1e03u : 0x0005u;' in source
 win_com = (root / 'user/d/windows1/WIN.COM').read_bytes()
 assert b'\xB8\x00\x4B\xCD\x21' in win_com  # WIN.COM EXECs WIN100.BIN via INT 21h/4B00h
 assert 'r[AX] = current()->DosVersion;' in interrupt

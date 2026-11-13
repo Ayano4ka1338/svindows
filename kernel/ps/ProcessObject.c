@@ -1260,6 +1260,12 @@ NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
 
     target->HandleTable = ObCreateHandleTable();
     if (!target->HandleTable) { status = STATUS_NO_MEMORY; goto failed; }
+    /* A forked ELF child can later exec a PE image (xterm -> cmd.exe). Carry
+     * the parent's station/desktop identity into that child now, just as the
+     * normal process-creation path does, so the PE process parameters can
+     * publish a valid startup desktop during the personality switch. */
+    status = W32kInitializeProcessSession(target, source, parent);
+    if (!NT_SUCCESS(status)) goto failed;
     status = LinuxCloneProcessContext(source, target);
     if (!NT_SUCCESS(status)) {
         KeLog("[ps]   Linux fork descriptor clone failed: 0x%08x\n",
@@ -1323,12 +1329,23 @@ NTSTATUS PsSwitchThreadToWindows(PKTHREAD thread, PKPROCESS process,
     NTSTATUS status = LdrLoadExecutable(image_path, &boot.Entry, &base,
                                         &boot.Argument);
     if (!NT_SUCCESS(status)) {
+        KeLog("[linux-exec] loader rejected '%s': status 0x%08x\n",
+              image_path, (unsigned)status);
         LdrSetThreadProcessContext(previous_loader);
         return status;
     }
     status = build_pe_user_environment(process, process->Name, command,
                                        base, &boot);
     if (!NT_SUCCESS(status)) {
+        KeLog("[linux-exec] PE environment for '%s' failed: status 0x%08x\n",
+              image_path, (unsigned)status);
+        LdrSetThreadProcessContext(previous_loader);
+        return status;
+    }
+    status = W32kInitializeThreadSession(thread);
+    if (!NT_SUCCESS(status)) {
+        KeLog("[linux-exec] desktop attachment for '%s' failed: status 0x%08x\n",
+              image_path, (unsigned)status);
         LdrSetThreadProcessContext(previous_loader);
         return status;
     }
