@@ -319,6 +319,9 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
 {
     (void)stack_size; /* KeCreateThread owns and sizes the kernel stack. */
     if (!thread) return NULL;
+    /* Keep the protocol core ahead of ordinary user work so a busy shell or
+     * network client cannot starve packet processing and socket wakeups. */
+    if (priority < 10) priority = 10;
     return KeCreateThread(name ? name : "lwip", (PKSTART_ROUTINE)thread,
                           argument, priority);
 }

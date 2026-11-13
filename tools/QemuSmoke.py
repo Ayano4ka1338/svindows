@@ -21,6 +21,10 @@ def main():
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--skip-network", action="store_true",
                         help="skip the DHCP/DNS/TCP/HTTP/HTTPS check when offline")
+    parser.add_argument("--apk-gcc-probe", action="store_true",
+                        help="install Alpine gcc in the guest and run it")
+    parser.add_argument("--explorer-probe", action="store_true",
+                        help="launch the bundled Windows 7 Explorer executable")
     parser.add_argument("--doom-probe", action="store_true",
                         help="launch the bundled Doom DOS/4G image and require VGA graphics startup")
     parser.add_argument("--doom-probe-timeout", type=float, default=180,
@@ -37,7 +41,8 @@ def main():
             with tempfile.TemporaryDirectory(prefix="svindows-smoke-") as temporary:
                 qmp_path = Path(temporary) / "qmp.sock"
                 process = subprocess.Popen([
-                    "qemu-system-x86_64", "-m", "1024M", "-no-reboot",
+                    "qemu-system-x86_64", "-m",
+                    "1024M", "-no-reboot",
                     "-no-shutdown", "-boot", "d", "-machine", "pc", "-cpu", "max",
                     "-cdrom",
                     str(ROOT / "build/svindows.iso"), "-netdev", "user,id=svnet0",
@@ -110,6 +115,12 @@ def main():
                                  timeout=args.timeout)
                         print("PASS QEMU DHCP lease", flush=True)
                     commands = [
+                        *([("C:\\WINDOWS7\\EXPLORER.EXE", None, "nonzero")]
+                          if args.explorer_probe else []),
+                        *([("apk update", r"OK:.*packages available"),
+                           ("apk add gcc", r"Installing gcc"),
+                           ("gcc --version", r"gcc \(Alpine")]
+                          if args.apk_gcc_probe else []),
                         *(([] if args.skip_network else [
                             ("ping -c 1 10.0.2.2", r"1 packets transmitted, 1 received"),
                             ("ping -c 1 example.com", r"1 packets transmitted, 1 received"),
@@ -138,6 +149,10 @@ def main():
                         ("cd ..", None),
                         ("rmdir smoketest", None),
                     ]
+                    if args.apk_gcc_probe:
+                        commands = commands[:3]
+                    if args.explorer_probe:
+                        commands = commands[:1]
                     for index, check in enumerate(commands):
                         command, expected = check[:2]
                         expected_status = check[2] if len(check) > 2 else 0

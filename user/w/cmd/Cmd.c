@@ -851,7 +851,10 @@ static BOOL launch_external(const char *image, char *command_line,
         environment[used++] = 0;
     }
     environment[used++] = 0;
-    if (ends_ci(image, "xterm.elf")) {
+    /* PATH lookup can find Alpine's extensionless xterm first.  Match both
+     * installed spellings so a terminal launched from cmd.exe gets its own
+     * PTY-backed command shell instead of an empty xterm window. */
+    if (ends_ci(image, "xterm") || ends_ci(image, "xterm.elf")) {
         static const char xterm_command[] = "xterm -e /usr/bin/cmd";
         copy_line(command_line, xterm_command, CMD_LINE_MAX);
     }

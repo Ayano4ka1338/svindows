@@ -9,6 +9,10 @@
 #include <svindows/Rtl.h>
 
 #define IO_BLOCK_CACHE_ENTRIES 64
+/* Large APK installs replace and delete multi-megabyte temporary files.
+ * Their FAT chains can touch far more than 64 distinct FAT sectors. Keep a
+ * separate, larger undo log while the data cache stays small. */
+#define IO_BLOCK_TRANSACTION_BACKUPS 2048
 #ifndef IO_FAULT_AFTER_WRITES
 #define IO_FAULT_AFTER_WRITES (-1)
 #endif
@@ -30,7 +34,7 @@ static IO_BLOCK_CACHE_ENTRY g_block_cache[IO_BLOCK_CACHE_ENTRIES];
 static UINT32 g_block_stamp;
 static INT64 g_write_fault_after = IO_FAULT_AFTER_WRITES;
 static INT64 g_physical_write_count;
-static IO_BLOCK_BACKUP g_transaction_backup[IO_BLOCK_CACHE_ENTRIES];
+static IO_BLOCK_BACKUP g_transaction_backup[IO_BLOCK_TRANSACTION_BACKUPS];
 static UINT32 g_transaction_count;
 static BOOLEAN g_transaction_active;
 
@@ -136,7 +140,7 @@ BOOLEAN IoBlockWriteSectors(UINT32 lba, UINT8 count, const void *buffer)
                 }
             }
             if (!saved) {
-                if (g_transaction_count == IO_BLOCK_CACHE_ENTRIES)
+                if (g_transaction_count == IO_BLOCK_TRANSACTION_BACKUPS)
                     return FALSE;
                 IO_BLOCK_BACKUP *backup =
                     &g_transaction_backup[g_transaction_count++];

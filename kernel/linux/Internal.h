@@ -310,6 +310,9 @@ UINT64 LinuxRenameAt(PKPROCESS process, UINT64 old_directory_fd,
 UINT64 LinuxSymlink(PKPROCESS process, UINT64 target, UINT64 link_path);
 UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
                       UINT64 link_path);
+UINT64 LinuxLinkAt(PKPROCESS process, UINT64 old_directory_fd,
+                   UINT64 old_path, UINT64 new_directory_fd,
+                   UINT64 new_path, UINT64 flags);
 UINT64 LinuxReadlinkAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
                        UINT64 buffer, UINT64 size);
 UINT64 LinuxGetrlimit(PKPROCESS process, UINT64 resource, UINT64 result);

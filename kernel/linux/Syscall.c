@@ -247,6 +247,9 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxOpenAt(process, args[0], args[1], args[2]);
     case 264: /* renameat */
         return LinuxRenameAt(process, args[0], args[1], args[2], args[3]);
+    case 265: /* linkat; materialize a regular-file copy on FAT */
+        return LinuxLinkAt(process, args[0], args[1], args[2], args[3],
+                           args[4]);
     case 316: /* renameat2; flags=0 has renameat semantics */
         return LinuxRenameAt2(process, args[0], args[1], args[2], args[3],
                               args[4]);

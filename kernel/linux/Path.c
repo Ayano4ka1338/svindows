@@ -6,6 +6,7 @@
 
 #define LINUX_AT_FDCWD ((UINT64)(INT64)-100)
 #define LINUX_PENDING_SYMLINK_COUNT 128
+#define LINUX_EMULATED_SYMLINK_COUNT 2048
 
 typedef struct _LINUX_PENDING_SYMLINK {
     BOOLEAN Used;
@@ -17,6 +18,46 @@ typedef struct _LINUX_PENDING_SYMLINK {
  * so retain those links until the target is published by apk's rename. */
 static LINUX_PENDING_SYMLINK g_linux_pending_symlinks[
     LINUX_PENDING_SYMLINK_COUNT];
+static char g_linux_emulated_symlinks[LINUX_EMULATED_SYMLINK_COUNT][260];
+static BOOLEAN linux_path_equal(const char *left, const char *right);
+
+static BOOLEAN linux_is_emulated_symlink(const char *path)
+{
+    for (UINT32 i = 0; i < LINUX_EMULATED_SYMLINK_COUNT; i++)
+        if (g_linux_emulated_symlinks[i][0] &&
+            linux_path_equal(g_linux_emulated_symlinks[i], path))
+            return TRUE;
+    return FALSE;
+}
+
+static void linux_forget_emulated_symlink(const char *path)
+{
+    for (UINT32 i = 0; i < LINUX_EMULATED_SYMLINK_COUNT; i++)
+        if (g_linux_emulated_symlinks[i][0] &&
+            linux_path_equal(g_linux_emulated_symlinks[i], path))
+            g_linux_emulated_symlinks[i][0] = 0;
+}
+
+static void linux_record_emulated_symlink(const char *path)
+{
+    if (linux_is_emulated_symlink(path)) return;
+    for (UINT32 i = 0; i < LINUX_EMULATED_SYMLINK_COUNT; i++) {
+        if (g_linux_emulated_symlinks[i][0]) continue;
+        memcpy(g_linux_emulated_symlinks[i], path, strlen(path) + 1);
+        return;
+    }
+    KeLog("[linux-fs] emulated symlink table full; path '%s' is untracked\n",
+          path);
+}
+
+static void linux_move_emulated_symlink(const char *source,
+                                        const char *target)
+{
+    BOOLEAN source_is_link = linux_is_emulated_symlink(source);
+    linux_forget_emulated_symlink(target);
+    linux_forget_emulated_symlink(source);
+    if (source_is_link) linux_record_emulated_symlink(target);
+}
 
 static BOOLEAN linux_path_equal(const char *left, const char *right)
 {
@@ -46,6 +87,7 @@ static void linux_materialize_pending_symlinks(const char *target_path)
             continue;
         status = FatStoreFile(pending->LinkPath, contents, size, TRUE);
         if (NT_SUCCESS(status)) {
+            linux_record_emulated_symlink(pending->LinkPath);
             pending->Used = FALSE;
         } else {
             KeLog("[linux-fs] deferred symlink '%s' -> '%s' materialization "
@@ -295,6 +337,7 @@ UINT64 LinuxUnlinkAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
     }
     if (flags & AT_REMOVEDIR) return LinuxError(LINUX_ENOTDIR);
     status = FatDeleteFile(dos_path);
+    if (NT_SUCCESS(status)) linux_forget_emulated_symlink(dos_path);
     return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }
 
@@ -338,6 +381,7 @@ UINT64 LinuxRenameAt(PKPROCESS process, UINT64 old_directory_fd,
         return LinuxError(LINUX_EPERM);
     NTSTATUS status = FatRenamePath(source, target);
     if (NT_SUCCESS(status)) {
+        linux_move_emulated_symlink(source, target);
         for (UINT32 i = 0; i < LINUX_PENDING_SYMLINK_COUNT; i++) {
             LINUX_PENDING_SYMLINK *pending = &g_linux_pending_symlinks[i];
             if (!pending->Used) continue;
@@ -351,6 +395,57 @@ UINT64 LinuxRenameAt(PKPROCESS process, UINT64 old_directory_fd,
     if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
         status == STATUS_OBJECT_PATH_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
         return LinuxError(LINUX_ENOENT);
+    if (status == STATUS_OBJECT_NAME_COLLISION) return LinuxError(LINUX_EEXIST);
+    return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
+}
+
+/* APK uses linkat while extracting package aliases. FAT cannot preserve inode
+ * identity, so materialize regular-file aliases as copies and track them so
+ * a later atomic rename can replace the placeholder copy. */
+UINT64 LinuxLinkAt(PKPROCESS process, UINT64 old_directory_fd,
+                   UINT64 old_path, UINT64 new_directory_fd,
+                   UINT64 new_path, UINT64 flags)
+{
+    if (flags) return LinuxError(LINUX_EOPNOTSUPP);
+    char source[260], target[260];
+    UINT64 error = LinuxCapturePathAt(process, old_directory_fd,
+                                      old_path, source);
+    if (error) return error;
+    error = LinuxCapturePathAt(process, new_directory_fd, new_path, target);
+    if (error) return error;
+    if (LinuxProcPathKind(source) != LINUX_PROC_NONE ||
+        LinuxProcPathKind(target) != LINUX_PROC_NONE)
+        return LinuxError(LINUX_EROFS);
+    FAT_FIND_DATA info;
+    NTSTATUS status = FatQueryPath(source, &info);
+    if (!NT_SUCCESS(status)) {
+        KeLog("[linux-fs] linkat source query '%s' status=0x%08x\n",
+              source, (unsigned)status);
+        return LinuxError(LINUX_ENOENT);
+    }
+    if (info.Attributes & 0x10u) return LinuxError(LINUX_EPERM);
+    status = FatQueryPath(target, &info);
+    if (NT_SUCCESS(status) && !linux_is_emulated_symlink(target))
+        return LinuxError(LINUX_EEXIST);
+    if (!NT_SUCCESS(status) && status != STATUS_OBJECT_NAME_NOT_FOUND &&
+        status != STATUS_OBJECT_PATH_NOT_FOUND && status != STATUS_NO_SUCH_FILE)
+        return LinuxError(LINUX_EIO);
+    void *contents = NULL;
+    SIZE_T size = 0;
+    status = FatLoadFile(source, &contents, &size, NULL);
+    if (!NT_SUCCESS(status)) {
+        KeLog("[linux-fs] linkat read '%s' status=0x%08x\n", source,
+              (unsigned)status);
+        return LinuxError(LINUX_EIO);
+    }
+    status = FatStoreFile(target, contents, size, TRUE);
+    ExFreePool(contents);
+    if (!NT_SUCCESS(status))
+        KeLog("[linux-fs] linkat write '%s' -> '%s' size=%lu status=0x%08x\n",
+              source, target, (unsigned long)size, (unsigned)status);
+    if (status == STATUS_DISK_FULL) return LinuxError(LINUX_ENOSPC);
+    if (status == STATUS_NO_MEMORY) return LinuxError(LINUX_ENOMEM);
+    if (NT_SUCCESS(status)) linux_record_emulated_symlink(target);
     if (status == STATUS_OBJECT_NAME_COLLISION) return LinuxError(LINUX_EEXIST);
     return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }
@@ -375,8 +470,9 @@ UINT64 LinuxRenameAt2(PKPROCESS process, UINT64 old_directory_fd,
             return LinuxError(LINUX_EROFS);
         FAT_FIND_DATA info;
         NTSTATUS status = FatQueryPath(target, &info);
-        if (NT_SUCCESS(status)) return LinuxError(LINUX_EEXIST);
-        if (status != STATUS_OBJECT_NAME_NOT_FOUND &&
+        if (NT_SUCCESS(status) && !linux_is_emulated_symlink(target))
+            return LinuxError(LINUX_EEXIST);
+        if (!NT_SUCCESS(status) && status != STATUS_OBJECT_NAME_NOT_FOUND &&
             status != STATUS_OBJECT_PATH_NOT_FOUND &&
             status != STATUS_NO_SUCH_FILE)
             return LinuxError(LINUX_EIO);
@@ -445,6 +541,7 @@ UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
         memcpy(pending->LinkPath, link_dos, strlen(link_dos) + 1);
         memcpy(pending->TargetPath, target_dos, strlen(target_dos) + 1);
         pending->Used = TRUE;
+        linux_record_emulated_symlink(link_dos);
         return 0;
     }
     if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
@@ -458,5 +555,6 @@ UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
     ExFreePool(contents);
     if (status == STATUS_DISK_FULL) return LinuxError(LINUX_ENOSPC);
     if (status == STATUS_NO_MEMORY) return LinuxError(LINUX_ENOMEM);
+    if (NT_SUCCESS(status)) linux_record_emulated_symlink(link_dos);
     return NT_SUCCESS(status) ? 0 : LinuxError(LINUX_EIO);
 }

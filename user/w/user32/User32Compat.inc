@@ -630,6 +630,36 @@ USER32_API DWORD GetWindowThreadProcessId(HWND window, DWORD *process)
     if (process) *process=(DWORD)NtUserQueryWindow(window,4);
     return thread;
 }
+/* GUITHREADINFO has two DWORDs, six HWNDs and a RECT on x64.  The
+ * current input model exposes foreground and focus, but has no caret or
+ * menu state to report. */
+typedef struct {
+    DWORD cbSize, flags;
+    HWND hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+    RECT rcCaret;
+} SV_GUITHREADINFO;
+USER32_API BOOL GetGUIThreadInfo(DWORD thread, SV_GUITHREADINFO *info)
+{
+    if (!info || info->cbSize != sizeof(*info)) {
+        SetLastError(87); /* ERROR_INVALID_PARAMETER */
+        return FALSE;
+    }
+    if (thread && thread != GetCurrentThreadId()) {
+        SetLastError(50); /* Other threads' input state is not exposed yet. */
+        return FALSE;
+    }
+    info->flags = 0;
+    info->hwndActive = GetActiveWindow();
+    info->hwndFocus = GetFocus();
+    info->hwndCapture = NULL;
+    info->hwndMenuOwner = NULL;
+    info->hwndMoveSize = NULL;
+    info->hwndCaret = NULL;
+    info->rcCaret.left = info->rcCaret.top = 0;
+    info->rcCaret.right = info->rcCaret.bottom = 0;
+    SetLastError(0);
+    return TRUE;
+}
 USER32_API LRESULT SendMessageTimeoutW(HWND window, UINT message,
     WPARAM wparam, LPARAM lparam, UINT flags, UINT timeout,
     ULONG_PTR *result)
