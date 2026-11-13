@@ -229,8 +229,15 @@ void MmDestroyAddressSpace(UINT64 root)
     if (!root || root == MmGetCurrentAddressSpace())
         return;
 
-    UINT64 shared = MmGetPhysicalAddress(0x000000007ffe0000ULL);
-    shared &= PTE_ADDR_MASK;
+    UINT64 release[256];
+    SIZE_T release_count = 0;
+#define QUEUE_RELEASE(page_) do { \
+    release[release_count++] = (page_); \
+    if (release_count == sizeof(release) / sizeof(release[0])) { \
+        MmFreePageList(release, release_count); \
+        release_count = 0; \
+    } \
+} while (0)
     UINT64 *pml4 = table(root);
     for (UINT32 i = 0; i < PT_ENTRIES / 2; i++) {
         if (!(pml4[i] & PTE_PRESENT))
@@ -252,15 +259,17 @@ void MmDestroyAddressSpace(UINT64 root)
                 for (UINT32 n = 0; n < PT_ENTRIES; n++) {
                     if (!(pt[n] & PTE_PRESENT))
                         continue;
-                    UINT64 page = pt[n] & PTE_ADDR_MASK;
-                    if (page != shared)
-                        MmFreePages(page, 1);
+                    UINT64 leaf = pt[n];
+                    if (!(leaf & PTE_SHARED))
+                        QUEUE_RELEASE(leaf & PTE_ADDR_MASK);
                 }
-                MmFreePages(pt_phys, 1);
+                QUEUE_RELEASE(pt_phys);
             }
-            MmFreePages(pd_phys, 1);
+            QUEUE_RELEASE(pd_phys);
         }
-        MmFreePages(pdpt_phys, 1);
+        QUEUE_RELEASE(pdpt_phys);
     }
-    MmFreePages(root, 1);
+    QUEUE_RELEASE(root);
+    if (release_count) MmFreePageList(release, release_count);
+#undef QUEUE_RELEASE
 }

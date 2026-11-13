@@ -612,6 +612,9 @@ __declspec(dllexport) BOOL SetStdHandle(DWORD which, HANDLE handle)
         return 0;
     }
     *(HANDLE *)(pp + offset) = handle;
+    extern NTSTATUS SvNtConsoleManage(DWORD,ULONGLONG,ULONGLONG,ULONGLONG,ULONGLONG *);
+    NTSTATUS status=SvNtConsoleManage(17,which,(ULONGLONG)handle,0,0);
+    if(!NT_SUCCESS(status)){SetLastError(ntstatus_to_win32(status));return 0;}
     return 1;
 }
 
@@ -795,25 +798,19 @@ __declspec(dllexport) BOOL IsDBCSLeadByteEx(UINT codepage, BYTE value)
         return value >= 0x81 && value <= 0xfe;
     return 0;
 }
-__declspec(dllexport) BOOL SetHandleInformation(HANDLE handle,
-                                                 DWORD mask,
-                                                 DWORD flags)
+extern NTSTATUS SvNtHandleInformation(HANDLE, DWORD, DWORD, DWORD, DWORD *);
+extern DWORD RtlNtStatusToDosError(NTSTATUS);
+__declspec(dllexport) BOOL SetHandleInformation(HANDLE handle, DWORD mask, DWORD flags)
 {
-    (void)mask;
-    (void)flags;
-    if (!handle) {
-        SetLastError(6); /* ERROR_INVALID_HANDLE */
-        return 0;
-    }
-    SetLastError(0);
+    NTSTATUS status = SvNtHandleInformation(handle, 1, mask, flags, 0);
+    if (!NT_SUCCESS(status)) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
     return 1;
 }
-
 __declspec(dllexport) BOOL GetHandleInformation(HANDLE handle, DWORD *flags)
 {
-    if (!handle || !flags) { SetLastError(6); return 0; }
-    *flags = 0;
-    SetLastError(0);
+    if (!flags) { SetLastError(87); return 0; }
+    NTSTATUS status = SvNtHandleInformation(handle, 0, 0, 0, flags);
+    if (!NT_SUCCESS(status)) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
     return 1;
 }
 

@@ -54,6 +54,7 @@
 #define LINUX_FD_TTY 6u
 #define LINUX_FD_PTY 7u
 #define LINUX_FD_PROC 8u
+#define LINUX_FD_CONSOLE 9u /* inherited native CONIN$/CONOUT$ endpoint */
 #define LINUX_PROC_NONE 0u
 #define LINUX_PROC_UNKNOWN 1u
 #define LINUX_PROC_ROOT 2u

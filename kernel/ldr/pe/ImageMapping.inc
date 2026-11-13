@@ -157,7 +157,7 @@ static NTSTATUS LdrpMapResourceImage(const void *file, SIZE_T file_size,
                bytes + sh->PointerToRawData, sh->SizeOfRawData);
     }
 
-    KeLog("[ldr]  resource-only image mapped at %p (size 0x%lx)\n",
+    KeTrace("[ldr]  resource-only image mapped at %p (size 0x%lx)\n",
           (void *)base, (unsigned long)image_size);
     *base_out = base;
     return STATUS_SUCCESS;
@@ -211,7 +211,7 @@ static NTSTATUS LdrpMapImage(const void *file, SIZE_T file_size, UINT64 *base_ou
         return STATUS_CONFLICTING_ADDRESSES;
 
     if (base != opt->ImageBase)
-        KeLog("[ldr]  rebasing image %p -> %p (size 0x%lx)\n",
+        KeTrace("[ldr]  rebasing image %p -> %p (size 0x%lx)\n",
               (void *)opt->ImageBase, (void *)base,
               (unsigned long)image_size);
 

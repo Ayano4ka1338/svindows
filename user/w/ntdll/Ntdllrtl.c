@@ -94,4 +94,11 @@ void *memcpy(void *dst, const void *src, SIZE_T n);
 #include "Rtl/ResourceRanges.inc"
 #include "Rtl/Compat.inc"
 #include "Rtl/Exception.inc"
+static void rtl_heap_raise(NTSTATUS status)
+{
+    NT_EXCEPTION_RECORD64 record = {0};
+    record.ExceptionCode = status;
+    record.ExceptionAddress = (U64)__builtin_return_address(0);
+    RtlRaiseException(&record);
+}
 #include "Rtl/ElapsedTime.inc"

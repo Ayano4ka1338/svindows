@@ -22,6 +22,19 @@ NTSTATUS PsCreateLinuxSpawn(PKPROCESS creator, const char *image,
                             HANDLE *process_handle, ULONG *process_id);
 NTSTATUS PsSetProcessEnvironment(PKPROCESS process,
                                  const char *const *entries, UINT32 count);
+NTSTATUS PsSetProcessEnvironmentBlock(PKPROCESS process, const char *block, SIZE_T bytes);
+typedef struct _PS_ENVIRONMENT_SNAPSHOT {
+    PVOID Storage;
+    char Inline[2048];
+} PS_ENVIRONMENT_SNAPSHOT;
+void PsCaptureProcessEnvironment(PKPROCESS process, PS_ENVIRONMENT_SNAPSHOT *snapshot);
+void PsRestoreProcessEnvironment(PKPROCESS process, PS_ENVIRONMENT_SNAPSHOT *snapshot);
+void PsReleaseEnvironmentSnapshot(PS_ENVIRONMENT_SNAPSHOT *snapshot);
+void PsCloneProcessEnvironment(PKPROCESS target, PKPROCESS source);
+void PsCleanupProcessEnvironment(PKPROCESS process);
+const char *PsProcessEnvironmentData(PKPROCESS process, SIZE_T *bytes);
+NTSTATUS PsEnvironmentToWide(const char *block, SIZE_T bytes,
+    UINT16 *output, SIZE_T capacity, SIZE_T *characters);
 
 /*
  * Fallback client id for early threads. It has to be even: a GDI handle's cell
@@ -52,10 +65,17 @@ NTSTATUS PsSetProcessEnvironment(PKPROCESS process,
  * GDI handle entry is 24 bytes and the handle index is 16 bits. */
 #define PROCESS_GDI_SHARED_TABLE_VA   0x0000000001000000ULL
 #define PROCESS_GDI_SHARED_TABLE_SIZE (0x10000ULL * 24ULL)
+/* The ABI reserves a 16-bit table, but this kernel can issue only 511 live GDI
+ * handles. Keep the remaining virtual span readable through shared zero pages
+ * instead of allocating and clearing 381 private frames per process. */
+#define PROCESS_GDI_HANDLE_COUNT 512ULL
+#define PROCESS_GDI_SHARED_TABLE_COMMIT_SIZE 0x3000ULL
 
 /* USER32's SHAREDINFO points at a parallel 16-bit handle table. */
 #define PROCESS_USER_SHARED_TABLE_VA   0x0000000001180000ULL
 #define PROCESS_USER_SHARED_TABLE_SIZE (0x10000ULL * 24ULL)
+#define PROCESS_USER_HANDLE_COUNT 512ULL
+#define PROCESS_USER_SHARED_TABLE_COMMIT_SIZE 0x3000ULL
 
 /* SERVERINFO sits between the two handle tables and the object arena. It is
  * read-only shared memory with a published address (SHAREDINFO.psi), so it
@@ -82,6 +102,12 @@ NTSTATUS PsSetProcessEnvironment(PKPROCESS process,
 
 _Static_assert(PROCESS_GDI_SHARED_TABLE_VA + PROCESS_GDI_SHARED_TABLE_SIZE <=
                PROCESS_USER_SHARED_TABLE_VA, "GDI and USER tables overlap");
+_Static_assert(PROCESS_GDI_HANDLE_COUNT * 24 <=
+               PROCESS_GDI_SHARED_TABLE_COMMIT_SIZE,
+               "committed GDI table does not cover supported handles");
+_Static_assert(PROCESS_USER_HANDLE_COUNT * 24 <=
+               PROCESS_USER_SHARED_TABLE_COMMIT_SIZE,
+               "committed USER table does not cover supported handles");
 _Static_assert(PROCESS_USER_SHARED_TABLE_VA + PROCESS_USER_SHARED_TABLE_SIZE <=
                PROCESS_SERVER_INFO_VA, "USER table and SERVERINFO overlap");
 _Static_assert(PROCESS_SERVER_INFO_VA + PROCESS_SERVER_INFO_SIZE <=
@@ -143,6 +169,7 @@ UINT64 NtCreateMutant(UINT64 *args);
 UINT64 NtReleaseMutant(UINT64 *args);
 UINT64 NtQueryInformationProcess(UINT64 *args);
 UINT64 SvNtQueryThreadExitStatus(UINT64 *args);
+UINT64 NtQueryInformationThread(UINT64 *args);
 NTSTATUS PsQuerySystemProcessInformation(void *buffer, ULONG length,
                                          ULONG *return_length);
 UINT64 SvNtReadProcessMemory(UINT64 *args);
@@ -150,6 +177,19 @@ UINT64 NtSetInformationProcess(UINT64 *args);
 UINT64 NtDuplicateObject(UINT64 *args);
 UINT64 NtCreateThreadEx(UINT64 *args);
 UINT64 NtCreateUserProcessSimple(UINT64 *args);
+UINT64 SvNtCreateUserProcessEx(UINT64 *args);
+UINT64 SvNtSetProcessEnvironment(UINT64 *args);
+UINT64 SvNtHandleInformation(UINT64 *args);
+NTSTATUS PsCreateThreadObject(PVOID *object, HANDLE *handle);
+void PsAttachThreadObject(PVOID object, PKTHREAD thread);
+typedef NTSTATUS (*PS_CONSOLE_PROCESS_INITIALIZER)(PKPROCESS process,
+    PKPROCESS parent, ULONG creation_flags, ULONG image_subsystem,
+    HANDLE input, HANDLE output, HANDLE error);
+void PsRegisterConsoleProcessInitializer(PS_CONSOLE_PROCESS_INITIALIZER initialize);
+void PsRegisterConsoleProcessPublished(void (*published)(PKPROCESS process));
+NTSTATUS PsCreateConsoleHost(PKPROCESS owner, const char *command, HANDLE *host);
+NTSTATUS PsCreateUserThreadForProcess(PKPROCESS process, UINT64 entry,
+                                     UINT64 argument, HANDLE *thread_handle);
 NTSTATUS PsCreateInitialProcess(const char *application,
                                 const char *command_line);
 /* Linux execve of a PE image: turn the current Linux thread into the Windows

@@ -37,7 +37,7 @@ _Static_assert(sizeof(GDICELL64) == 24, "GDICELL64 must be 24 bytes");
 #define DCATTR_ULPEN       0x3C
 #define DCATTR_SIZE        0x200
 
-#define GDI_MAX_OBJECTS 512   /* handle indices 1..511 */
+#define GDI_MAX_OBJECTS PROCESS_GDI_HANDLE_COUNT /* handle indices 1..511 */
 #define GDI_TABLE_ENTRIES 0x10000
 
 /* ------------------------------------------------------------------ */
@@ -102,6 +102,7 @@ typedef struct _W32K_FONT {
 typedef struct _W32K_BITMAP {
     W32K_SURFACE Surface;
     void *Storage;
+    UINT16 Planes, BitsPixel;
 } W32K_BITMAP;
 
 typedef struct _W32K_OBJECT {
@@ -226,8 +227,8 @@ static UINT64 gdi_allocate_attr(void)
 void W32kInitializeGdi(void)
 {
     /* New process CR3 is active here; never reset another process's objects. */
-    memset(gdi_table(), 0, GDI_TABLE_ENTRIES * sizeof(GDICELL64));
-    KeLog("[w32k] GDI object table ready (%u handles, cells at 0x%lx, "
+    memset(gdi_table(), 0, PROCESS_GDI_SHARED_TABLE_COMMIT_SIZE);
+    KeTrace("[w32k] GDI object table ready (%u handles, cells at 0x%lx, "
           "attributes at 0x%lx)\n", (unsigned)GDI_MAX_OBJECTS - 1,
           (unsigned long)PROCESS_GDI_SHARED_TABLE_VA,
           (unsigned long)PROCESS_GDI_ATTR_VA);

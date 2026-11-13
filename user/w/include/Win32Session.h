@@ -1,0 +1,63 @@
+#ifndef SV_WINDOWS_SESSION_API_H
+#define SV_WINDOWS_SESSION_API_H
+
+#include <User32.h>
+
+typedef HANDLE HWINSTA;
+typedef HANDLE HDESK;
+typedef struct _USEROBJECTFLAGS { BOOL fInherit, fReserved; DWORD dwFlags; } USEROBJECTFLAGS;
+
+#define WINSTA_ENUMDESKTOPS 0x0001u
+#define WINSTA_READATTRIBUTES 0x0002u
+#define WINSTA_ACCESSCLIPBOARD 0x0004u
+#define WINSTA_CREATEDESKTOP 0x0008u
+#define WINSTA_WRITEATTRIBUTES 0x0010u
+#define WINSTA_ACCESSGLOBALATOMS 0x0020u
+#define WINSTA_EXITWINDOWS 0x0040u
+#define WINSTA_ENUMERATE 0x0100u
+#define WINSTA_READSCREEN 0x0200u
+#define WINSTA_ALL_ACCESS 0x000F037Fu
+#define DESKTOP_READOBJECTS 0x0001u
+#define DESKTOP_CREATEWINDOW 0x0002u
+#define DESKTOP_CREATEMENU 0x0004u
+#define DESKTOP_HOOKCONTROL 0x0008u
+#define DESKTOP_JOURNALRECORD 0x0010u
+#define DESKTOP_JOURNALPLAYBACK 0x0020u
+#define DESKTOP_ENUMERATE 0x0040u
+#define DESKTOP_WRITEOBJECTS 0x0080u
+#define DESKTOP_SWITCHDESKTOP 0x0100u
+#define DESKTOP_ALL_ACCESS 0x000F01FFu
+#define UOI_FLAGS 1
+#define UOI_NAME 2
+#define UOI_TYPE 3
+#define UOI_USER_SID 4
+#define UOI_IO 6
+
+USER32_API HWINSTA CreateWindowStationW(const WCHAR *, DWORD, DWORD, void *);
+USER32_API HWINSTA CreateWindowStationA(const char *, DWORD, DWORD, void *);
+USER32_API HWINSTA OpenWindowStationW(const WCHAR *, BOOL, DWORD);
+USER32_API HWINSTA OpenWindowStationA(const char *, BOOL, DWORD);
+USER32_API BOOL CloseWindowStation(HWINSTA);
+USER32_API HWINSTA GetProcessWindowStation(void);
+USER32_API BOOL SetProcessWindowStation(HWINSTA);
+USER32_API HDESK CreateDesktopW(const WCHAR *, const WCHAR *, void *, DWORD, DWORD, void *);
+USER32_API HDESK CreateDesktopA(const char *, const char *, void *, DWORD, DWORD, void *);
+USER32_API HDESK OpenDesktopW(const WCHAR *, DWORD, BOOL, DWORD);
+USER32_API HDESK OpenDesktopA(const char *, DWORD, BOOL, DWORD);
+USER32_API HDESK OpenInputDesktop(DWORD, BOOL, DWORD);
+USER32_API BOOL CloseDesktop(HDESK);
+USER32_API HDESK GetThreadDesktop(DWORD);
+USER32_API BOOL SetThreadDesktop(HDESK);
+USER32_API BOOL SwitchDesktop(HDESK);
+USER32_API BOOL EnumDesktopsW(HWINSTA, BOOL (*)(WCHAR *, LONG_PTR), LONG_PTR);
+USER32_API BOOL EnumDesktopsA(HWINSTA, BOOL (*)(char *, LONG_PTR), LONG_PTR);
+USER32_API BOOL EnumWindowStationsW(BOOL (*)(WCHAR *, LONG_PTR), LONG_PTR);
+USER32_API BOOL EnumWindowStationsA(BOOL (*)(char *, LONG_PTR), LONG_PTR);
+USER32_API BOOL GetUserObjectInformationW(HANDLE, int, void *, DWORD, DWORD *);
+USER32_API BOOL GetUserObjectInformationA(HANDLE, int, void *, DWORD, DWORD *);
+USER32_API BOOL SetUserObjectInformationW(HANDLE, int, void *, DWORD);
+USER32_API BOOL SetUserObjectInformationA(HANDLE, int, void *, DWORD);
+USER32_API BOOL GetUserObjectSecurity(HANDLE, DWORD *, void *, DWORD, DWORD *);
+USER32_API BOOL SetUserObjectSecurity(HANDLE, DWORD *, void *);
+
+#endif

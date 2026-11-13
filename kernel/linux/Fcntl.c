@@ -55,7 +55,8 @@ UINT64 LinuxFcntl(PKPROCESS process, UINT64 fd, UINT64 command,
             KiIrqRestore(irq);
             return 0;
         }
-        if (entry->Kind == LINUX_FD_TTY || entry->Kind == LINUX_FD_PTY) {
+        if (entry->Kind == LINUX_FD_TTY || entry->Kind == LINUX_FD_PTY ||
+            entry->Kind == LINUX_FD_CONSOLE) {
             entry->NonBlocking = !!(argument & LINUX_O_NONBLOCK);
             return 0;
         }

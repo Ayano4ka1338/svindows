@@ -8,6 +8,7 @@ typedef void *HICON;
 typedef unsigned short WCHAR;
 typedef unsigned long DWORD;
 typedef long HRESULT;
+typedef long LONG;
 typedef int BOOL;
 
 __declspec(dllimport) BOOL CreateDirectoryW(const WCHAR *path,
@@ -34,49 +35,6 @@ static WCHAR *copy_path(WCHAR *out, const WCHAR *src)
     if (src[i]) return 0;
     out[i] = 0;
     return out;
-}
-
-static const WCHAR *folder_path(int folder)
-{
-    static const WCHAR root[] = { 'C', ':', '\\', 0 };
-    static const WCHAR profile[] = {
-        'C', ':', '\\', 'U','s','e','r','s','\\','u','s','e','r',0
-    };
-    static const WCHAR appdata[] = {
-        'C', ':', '\\', 'U','s','e','r','s','\\','u','s','e','r',
-        '\\','A','p','p','D','a','t','a','\\','R','o','a','m','i','n','g',0
-    };
-    static const WCHAR localappdata[] = {
-        'C', ':', '\\', 'U','s','e','r','s','\\','u','s','e','r',
-        '\\','A','p','p','D','a','t','a','\\','L','o','c','a','l',0
-    };
-    switch (folder & 0xff) {
-    case 0x05: /* CSIDL_PERSONAL */
-    case 0x10: /* CSIDL_MYDOCUMENTS */
-    case 0x28: /* CSIDL_PROFILE */
-        return profile;
-    case 0x1a: /* CSIDL_APPDATA */
-        return appdata;
-    case 0x1c: /* CSIDL_LOCAL_APPDATA */
-        return localappdata;
-    default:
-        return root;
-    }
-}
-
-__declspec(dllexport) BOOL SHGetSpecialFolderPathW(HWND owner,
-                    WCHAR *path, int folder, BOOL create)
-{
-    (void)owner;
-    if (create) (void)SHCreateDirectory(0, folder_path(folder));
-    return copy_path(path, folder_path(folder)) != 0;
-}
-
-__declspec(dllexport) HRESULT SHGetFolderPathW(HWND owner, int folder,
-                    HANDLE token, DWORD flags, WCHAR *path)
-{
-    (void)owner; (void)token; (void)flags;
-    return copy_path(path, folder_path(folder)) ? S_OK : E_FAIL;
 }
 
 __declspec(dllexport) BOOL ShellAboutW(HWND owner, const WCHAR *title,
@@ -108,12 +66,8 @@ typedef struct _SHELLEXECUTEINFOW {
     HANDLE hProcess;
 } SHELLEXECUTEINFOW;
 
-__declspec(dllexport) BOOL ShellExecuteExW(SHELLEXECUTEINFOW *info)
-{
-    if (info) info->hInstApp = (HANDLE)(unsigned long long)2;
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
-}
+#include "ShellExecute.inc"
+#include "SpecialFolders.inc"
 
 __declspec(dllimport) long GetWindowLongW(HWND window, int index);
 __declspec(dllimport) long SetWindowLongW(HWND window, int index, long value);
@@ -391,4 +345,5 @@ __declspec(dllexport) HRESULT SHGetStockIconInfo(int id, unsigned flags,
     return SHELL_E_NOTIMPL;
 }
 
+#include "FilesystemNamespace.inc"
 #include "TaskSupport.inc"

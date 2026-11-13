@@ -15,6 +15,7 @@
 #include <Gdi32.h>
 
 typedef unsigned long long UINT_PTR;
+typedef UINT_PTR SIZE_T;
 typedef long long          INT_PTR;
 typedef UINT_PTR           WPARAM;
 typedef INT_PTR            LPARAM;
@@ -28,6 +29,16 @@ typedef void              *HICON;
 typedef void              *HCURSOR;
 typedef void              *HACCEL;
 typedef unsigned short     ATOM;
+typedef struct _CURSORINFO {
+    DWORD cbSize, flags;
+    HCURSOR hCursor;
+    POINT ptScreenPos;
+} CURSORINFO;
+typedef struct _ICONINFO {
+    BOOL fIcon;
+    DWORD xHotspot, yHotspot;
+    HBITMAP hbmMask, hbmColor;
+} ICONINFO;
 
 #ifdef SV_USER32_BUILD
 #define USER32_API __declspec(dllexport)
@@ -483,6 +494,25 @@ USER32_API DWORD     GetSysColor(int index);
 /* Input, cursor and focus. */
 USER32_API HCURSOR   LoadCursorW(HINSTANCE instance, const WCHAR *name);
 USER32_API HCURSOR   SetCursor(HCURSOR cursor);
+USER32_API HCURSOR   GetCursor(void);
+USER32_API BOOL      GetCursorPos(LPPOINT point);
+USER32_API int       ShowCursor(BOOL show);
+USER32_API BOOL      GetCursorInfo(CURSORINFO *info);
+USER32_API BOOL      ClipCursor(const RECT *rect);
+USER32_API BOOL      GetClipCursor(RECT *rect);
+USER32_API HCURSOR   LoadCursorA(HINSTANCE instance, const char *name);
+USER32_API HCURSOR   LoadCursorFromFileW(const WCHAR *name);
+USER32_API HCURSOR   LoadCursorFromFileA(const char *name);
+USER32_API BOOL      DestroyCursor(HCURSOR cursor);
+USER32_API HICON     CreateIconIndirect(const ICONINFO *info);
+USER32_API BOOL      GetIconInfo(HICON icon,ICONINFO *info);
+USER32_API HICON     CopyIcon(HICON icon);
+USER32_API HCURSOR   CopyCursor(HCURSOR cursor);
+USER32_API HCURSOR   CreateCursor(HINSTANCE instance,int hot_x,int hot_y,
+                                 int width,int height,const void *and_bits,
+                                 const void *xor_bits);
+USER32_API UINT      GetDoubleClickTime(void);
+USER32_API BOOL      SetDoubleClickTime(UINT milliseconds);
 USER32_API HWND      SetFocus(HWND hwnd);
 USER32_API HWND      GetFocus(void);
 USER32_API HWND      SetActiveWindow(HWND hwnd);

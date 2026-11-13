@@ -196,7 +196,7 @@ int SvRegisterControl(const WCHAR *name)
     /* Registration itself is process scoped and idempotent in win32k. */
     WNDCLASSEXW cls = {0};
     cls.cbSize = sizeof(cls); cls.lpfnWndProc = kind == SV_BUTTON ? ButtonWndProc : kind == SV_EDIT ? EditWndProc : kind==SV_COMBO?ComboWndProc:kind==SV_SCROLLBAR?ScrollbarWndProc:StaticWndProc;
-    cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    cls.hCursor = LoadCursorW(NULL, kind == SV_EDIT ? IDC_IBEAM : IDC_ARROW);
     cls.lpszClassName = name;
     return RegisterClassExW(&cls) != 0;
 }

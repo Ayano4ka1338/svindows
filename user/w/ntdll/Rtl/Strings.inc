@@ -39,7 +39,7 @@ void RtlInitAnsiString(STRING_NT *astr, const char *text)
 NTSTATUS RtlFreeUnicodeString(UNICODE_STRING_NT *ustr)
 {
     if (ustr && ustr->Buffer)
-        RtlFreeHeap(0, 0, ustr->Buffer);
+        RtlFreeHeap(rtl_process_heap(), 0, ustr->Buffer);
     if (ustr)
         memset(ustr, 0, sizeof(*ustr));
     return STATUS_SUCCESS;
@@ -78,7 +78,7 @@ NTSTATUS RtlAnsiStringToUnicodeString(UNICODE_STRING_NT *dst,
             return 0x80000005L; /* STATUS_BUFFER_OVERFLOW */
     } else {
         dst->Buffer =
-            RtlAllocateHeap(0, 0, (chars + 1) * sizeof(WCHAR));
+            RtlAllocateHeap(rtl_process_heap(), 0, (chars + 1) * sizeof(WCHAR));
         if (!dst->Buffer)
             return STATUS_NO_MEMORY;
         dst->MaximumLength = (WORD)((chars + 1) * sizeof(WCHAR));
@@ -96,7 +96,7 @@ NTSTATUS RtlCreateUnicodeStringFromAsciiz(UNICODE_STRING_NT *out,
     UINT n = 0;
     while (text[n])
         n++;
-    out->Buffer = RtlAllocateHeap(0, 8 /* zero */, (n + 1) * sizeof(WCHAR));
+    out->Buffer = RtlAllocateHeap(rtl_process_heap(), 8 /* zero */, (n + 1) * sizeof(WCHAR));
     if (!out->Buffer)
         return STATUS_NO_MEMORY;
     for (UINT i = 0; i < n; i++)
@@ -740,7 +740,7 @@ BOOLEAN RtlCreateUnicodeString(UNICODE_STRING_NT *out, const WCHAR *source)
     ULONG count = 0;
     while (count < 32767 && source[count]) count++;
     if (count == 32767) return 0;
-    WCHAR *copy = RtlAllocateHeap(0, 0, (count + 1) * sizeof(*copy));
+    WCHAR *copy = RtlAllocateHeap(rtl_process_heap(), 0, (count + 1) * sizeof(*copy));
     if (!copy) return 0;
     memcpy(copy, source, (count + 1) * sizeof(*copy));
     *out = (UNICODE_STRING_NT){(WORD)(count * sizeof(*copy)),

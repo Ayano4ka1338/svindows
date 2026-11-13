@@ -15,8 +15,15 @@
  */
 #ifndef _SVINDOWS_WIN32K_H_
 #define _SVINDOWS_WIN32K_H_
-
 #include <nt/Ntdef.h>
+void W32kInitializeWindowEnvironment(void);
+struct _KPROCESS;
+void W32kMarkProcessInputIdle(struct _KPROCESS *process);
+void W32kCleanupProcessInputIdle(struct _KPROCESS *process);
+UINT64 SvNtUserWaitForInputIdle(UINT64 *arguments);
+BOOLEAN W32kWindowBelongsToProcess(UINT64 hwnd, struct _KPROCESS *process);
+void W32kScreenSetExStyle(UINT16 slot, UINT32 exstyle);
+void W32kInputDesktopChanged(PVOID previous, PVOID current);
 
 /*
  * Build and publish the SERVERINFO page at PROCESS_SERVER_INFO_VA. Requires Mm
@@ -163,6 +170,8 @@ UINT64 SvNtGdiViewportOrigin(UINT64 *args);
 UINT64 SvNtGdiClipRect(UINT64 *args);
 UINT64 NtGdiCreateCompatibleBitmap(UINT64 *args);
 UINT64 NtGdiCreateBitmap(UINT64 *args);
+UINT64 SvNtGdiQueryBitmap(UINT64 *args);
+UINT64 SvNtGdiReadBitmap(UINT64 *args);
 UINT64 NtGdiGetDCObject(UINT64 *args);
 UINT64 NtGdiFlush(UINT64 *args);
 UINT64 NtGdiHfontCreate(UINT64 *args);

@@ -346,6 +346,7 @@ static UINT64 NtUserClassLong(UINT64 *a)
     switch(index) {
     case -24: old=cls->WndProc; if(a[3])cls->WndProc=a[2]; break;
     case -10: old=cls->BackgroundBrush; if(a[3])cls->BackgroundBrush=a[2]; break;
+    case -12: old=cls->Cursor; if(a[3])cls->Cursor=a[2]; break;
     case -26: old=cls->Style; if(a[3])cls->Style=(UINT32)a[2]; break;
     case -16: old=cls->WndExtra; if(a[3])cls->WndExtra=(UINT32)a[2]; break;
     case -8: old=cls->Instance; if(a[3])cls->Instance=a[2]; break;
@@ -626,7 +627,7 @@ static UINT64 NtUserMessageCall(UINT64 *a)
               "type=0x%lx)\n", (void *)hwnd, (unsigned)message, (void *)a[2],
               (void *)a[3], (unsigned long)type);
     }
-    if (message == 0x10) KiDumpUserStack(g_service_user_rsp);
+    if (message == 0x10) KiDumpUserStack(KiServiceUserRsp());
     if (KiSendToWindowProc(hwnd, message, a[2], (INT64)a[3]))
         return 0; /* the WndProc's result is returned by NtCallbackReturn */
     return 0;
@@ -743,7 +744,7 @@ static UINT64 NtUserSetActiveWindow(UINT64 *a)
 {
     if (a[0] && !KiUserWindowValid(a[0], TRUE))
         return 0;
-    UINT64 previous = KiUserWindowHandle(W32kActiveSlot());
+    UINT64 previous = KiUserWindowHandle(W32kCurrentActiveWindow());
     W32kActivateWindow(a[0]);
     return previous;
 }
@@ -780,12 +781,6 @@ static UINT64 NtUserWaitMessage(UINT64 *a)
         if (!KiUserWaitForInput()) return 0;
     return 1;
 }
-/* Desktop/window-station objects are not implemented. Do not return fake
- * handles that clients could later pass to unrelated object services. */
-static UINT64 NtUserOpenInputDesktop(UINT64 *a) { (void)a; return 0; }
-static UINT64 NtUserOpenWindowStation(UINT64 *a) { (void)a; return 0; }
-static UINT64 NtUserSetProcessWindowStation(UINT64 *a) { (void)a; return 0; }
-static UINT64 NtUserCloseWindowStation(UINT64 *a) { (void)a; return 0; }
 static UINT64 NtUserNotifyWinEvent(UINT64 *a) { return 0; }
 static UINT64 NtUserCallHwnd(UINT64 *a) { return 0; }
 static UINT64 NtUserCallHwndLock(UINT64 *a) { return 0; }

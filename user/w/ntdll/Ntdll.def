@@ -84,6 +84,7 @@ EXPORTS
     NtOpenProcessToken
     NtOpenThreadToken
     NtOpenThread
+    NtQueryInformationThread
     NtOpenEvent
     NtCreateJobObject
     NtAssignProcessToJobObject
@@ -128,6 +129,13 @@ EXPORTS
     NtUserSetCapture
     NtUserReleaseCapture
     NtUserSetCursor
+    SvNtUserUploadCursor
+    SvNtUserShowCursor
+    SvNtUserQueryCursor
+    SvNtUserClipCursor
+    SvNtUserDoubleClickTime
+    SvNtGdiQueryBitmap
+    SvNtGdiReadBitmap
     NtUserSetTimer
     NtUserKillTimer
     NtUserSetWinEventHook
@@ -196,6 +204,12 @@ EXPORTS
     RtlSizeHeap
     RtlFlushHeaps
     RtlValidateHeap
+    RtlLockHeap
+    RtlUnlockHeap
+    RtlCompactHeap
+    RtlGetProcessHeaps
+    RtlSetHeapInformation
+    RtlQueryHeapInformation
     RtlInitializeCriticalSection
     RtlInitializeCriticalSectionAndSpinCount
     RtlEnterCriticalSection
@@ -368,6 +382,32 @@ EXPORTS
     NtQueryTimerResolution
     NtTerminateProcess
     SvNtUserGetWindowStyle
+    SvNtUserShellControl
+    SvNtUserWindowLookup
+    SvNtUserClipboardControl
+    SvNtUserWriteClipboard
+    SvNtUserReadClipboard
+    SvNtUserCreateWindowStation
+    SvNtUserCreateDesktop
+    SvNtUserEnumDesktops
+    SvNtUserEnumWindowStations
+    SvNtUserSwitchDesktop
+    SvNtUserSetObjectInformation
+    SvNtCreateUserProcessEx
+    SvNtSetProcessEnvironment
+    SvNtHandleInformation
+    NtSetSecurityObject
+    NtUserRegisterHotKey
+    SvNtUserHotkeyControl
+    SvNtUserWaitForInputIdle
+    SvNtConsoleManage
+    SvNtConsoleHost
+    NtUserDestroyCursor
+    NtUserSystemParametersInfo
+    NtUserOpenWindowStation
+    NtUserCloseWindowStation
+    NtUserSetProcessWindowStation
+    NtUserOpenInputDesktop
     SvNtProcessorCounterQuery
     RtlTimeToElapsedTimeFields
     SvNtQueryThreadExitStatus

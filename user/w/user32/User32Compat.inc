@@ -3,6 +3,10 @@ __declspec(dllimport) UINT64 NtUserClassLong(HWND hwnd, int index, LONG_PTR valu
  * actual windows; this client-side table keeps the small pieces of USER state
  * the current native window ABI does not expose yet. */
 __declspec(dllimport) UINT64 NtUserSetWindowLongPtr(HWND hwnd, int index, LONG_PTR value);
+__declspec(dllimport) UINT64 SvNtUserShellControl(UINT operation, UINT64 argument, UINT64 value);
+__declspec(dllimport) UINT64 SvNtUserWindowLookup(UINT operation, UINT64 parent,
+    UINT64 after, UINT64 class_name, UINT64 title);
+__declspec(dllimport) UINT64 NtUserSystemParametersInfo(UINT action, UINT parameter, void *data, UINT flags);
 #define SV_USER_WINDOWS 128
 #define SV_USER_PROPS 8
 #define GWL_STYLE       (-16)
@@ -36,8 +40,6 @@ typedef struct {
 } SV_USER_WINDOW_STATE;
 static SV_USER_WINDOW_STATE g_sv_windows[SV_USER_WINDOWS];
 
-static HANDLE g_sv_clipboard[32];
-static BOOL g_sv_clipboard_open;
 
 static SV_USER_WINDOW_STATE *sv_user_state(HWND hwnd)
 {
@@ -122,6 +124,7 @@ USER32_API LONG_PTR GetWindowLongPtrW(HWND hwnd, int index)
     /* ShowWindow and window-manager actions can change these flags without
      * updating this process's creation-time metadata. Query the owning state. */
     if (index == GWL_STYLE) return (LONG_PTR)SvNtUserGetWindowStyle(hwnd);
+    if (index == GWL_EXSTYLE) return (LONG_PTR)SvNtUserWindowLookup(2, (UINT_PTR)hwnd, (UINT64)index, 0, 0);
     SV_USER_WINDOW_STATE *s = sv_user_state(hwnd);
     if(s && index>=0 && index<64 && !(index&7)) return s->ExtraLongs[index/8];
     int slot = sv_user_long_slot(index);
@@ -165,13 +168,10 @@ USER32_API LONG SetWindowLongW(HWND hwnd, int index, LONG value)
 
 USER32_API BOOL EnableWindow(HWND hwnd, BOOL enable)
 {
-    SV_USER_WINDOW_STATE *s = sv_user_state(hwnd);
-    if (!s) return FALSE;
-    BOOL previous = s->Enabled; s->Enabled = enable != 0;
-    return previous;
+    return SvNtUserShellControl(5, (UINT_PTR)hwnd, enable != 0) != 0;
 }
 USER32_API BOOL IsWindowEnabled(HWND hwnd)
-{ SV_USER_WINDOW_STATE *s = sv_user_state(hwnd); return s ? s->Enabled : FALSE; }
+{ return SvNtUserShellControl(6, (UINT_PTR)hwnd, 0) != 0; }
 
 #include "User32Characters.inc"
 
@@ -184,18 +184,7 @@ USER32_API const char *CharNextA(const char *text)
     return text + 1;
 }
 
-USER32_API BOOL OpenClipboard(HWND owner)
-{ (void)owner; if (g_sv_clipboard_open) return FALSE; g_sv_clipboard_open = TRUE; return TRUE; }
-USER32_API BOOL CloseClipboard(void)
-{ if (!g_sv_clipboard_open) return FALSE; g_sv_clipboard_open = FALSE; return TRUE; }
-USER32_API BOOL EmptyClipboard(void)
-{ if (!g_sv_clipboard_open) return FALSE; for (UINT i=0;i<32;i++) g_sv_clipboard[i]=0; return TRUE; }
-USER32_API BOOL IsClipboardFormatAvailable(UINT format)
-{ return format < 32 && g_sv_clipboard[format] != 0; }
-USER32_API HANDLE GetClipboardData(UINT format)
-{ return g_sv_clipboard_open && format < 32 ? g_sv_clipboard[format] : 0; }
-USER32_API HANDLE SetClipboardData(UINT format, HANDLE data)
-{ if (!g_sv_clipboard_open || format >= 32 || !data) return 0; g_sv_clipboard[format]=data; return data; }
+#include "User32Clipboard.inc"
 
 #include "User32Menus.inc"
 #include "User32Scroll.inc"
@@ -209,7 +198,7 @@ USER32_API BOOL BringWindowToTop(HWND hwnd)
 }
 
 USER32_API BOOL SetForegroundWindow(HWND hwnd)
-{ return SetActiveWindow(hwnd) != 0 || sv_user_state(hwnd) != 0; }
+{ return SvNtUserShellControl(4, (UINT_PTR)hwnd, 0) != 0; }
 USER32_API HWND GetAncestor(HWND hwnd, UINT flags)
 { return (HWND)(UINT_PTR)NtUserGetAncestor(hwnd, flags); }
 #include "User32WindowBatch.inc"
@@ -221,17 +210,14 @@ USER32_API BOOL IsDialogMessageW(HWND dialog, MSG *message)
 
 USER32_API int GetClassNameW(HWND hwnd, WCHAR *buffer, int capacity)
 {
-    SV_USER_WINDOW_STATE *s=sv_user_state(hwnd);
-    if (!s || !buffer || capacity <= 0) return 0;
-    int n=0; while(s->ClassName[n] && n+1<capacity){buffer[n]=s->ClassName[n];n++;}
-    buffer[n]=0; return n;
+    if (!buffer || capacity <= 0) { SetLastError(87); return 0; }
+    return (int)SvNtUserWindowLookup(1, (UINT_PTR)hwnd, (UINT_PTR)buffer,
+        (UINT64)(UINT)capacity, 0);
 }
 USER32_API HWND FindWindowW(const WCHAR *class_name, const WCHAR *title)
 {
-    for(UINT i=0;i<SV_USER_WINDOWS;i++) { SV_USER_WINDOW_STATE *s=&g_sv_windows[i];
-        if(s->Used && (!class_name || sv_user_wide_equal(class_name,s->ClassName)) &&
-           (!title || sv_user_wide_equal(title,s->Title))) return s->Window; }
-    return 0;
+    return (HWND)(UINT_PTR)SvNtUserWindowLookup(0, 0, 0,
+        (UINT_PTR)class_name, (UINT_PTR)title);
 }
 USER32_API BOOL SetPropW(HWND hwnd, const WCHAR *name, HANDLE value)
 {
@@ -351,19 +337,19 @@ USER32_API HANDLE MonitorFromRect(const RECT *rect, DWORD flags)
 USER32_API BOOL GetMonitorInfoW(HANDLE monitor, SV_MONITORINFO *info)
 {
     if(!monitor||!info||info->Size<sizeof(*info))return FALSE;
-    info->Monitor=(RECT){0,0,1200,800};info->Work=info->Monitor;info->Flags=1;return TRUE;
+    info->Monitor=(RECT){0,0,GetSystemMetrics(0),GetSystemMetrics(1)};
+    if (!NtUserSystemParametersInfo(SPI_GETWORKAREA, 0, &info->Work, 0)) return FALSE;
+    info->Flags=1;return TRUE;
 }
 USER32_API BOOL SystemParametersInfoW(UINT action, UINT parameter,
                                       void *data, UINT update)
 {
-    (void)parameter;(void)update;
-    if(action==SPI_GETWORKAREA&&data){*(RECT*)data=(RECT){0,0,1200,800};return TRUE;}
-    return FALSE;
+    return NtUserSystemParametersInfo(action, parameter, data, update) != 0;
 }
 USER32_API BOOL EnumDisplayMonitors(HDC dc, const RECT *clip,
         BOOL (*callback)(HANDLE,HDC,RECT*,LONG_PTR), LONG_PTR data)
 {
-    RECT monitor={0,0,1200,800};if(clip&&!IntersectRect(&monitor,&monitor,clip))return TRUE;
+    RECT monitor={0,0,GetSystemMetrics(0),GetSystemMetrics(1)};if(clip&&!IntersectRect(&monitor,&monitor,clip))return TRUE;
     return !callback||callback((HANDLE)1,dc,&monitor,data);
 }
 USER32_API BOOL EnumDesktopWindows(HANDLE desktop,
@@ -469,6 +455,8 @@ __declspec(dllimport) UINT64 SvNtUserDestroyIcon(HICON icon);
 USER32_API HBITMAP LoadImageW(HINSTANCE instance,const WCHAR *name,UINT type,
                               int width,int height,UINT flags)
 {
+    if (type == 2) /* IMAGE_CURSOR */
+        return (HBITMAP)sv_load_cursor(instance,name,width,height,flags);
     if (type == 1) /* IMAGE_ICON */
         return load_icon_resource(instance, name, !instance || (flags & 0x8000) != 0);
     if(type!=0)return 0; /* IMAGE_BITMAP */
@@ -714,27 +702,6 @@ USER32_API DWORD GetDialogBaseUnits(void)
     /* The desktop currently uses the fixed 8x16 system raster font.  Windows
      * dialog units are based on the average character width and font height. */
     return (DWORD)8 | ((DWORD)16 << 16);
-}
-
-__declspec(dllimport) UINT64 NtUserGetThreadDesktop(DWORD thread_id);
-__declspec(dllimport) UINT64 NtUserSetThreadDesktop(void *desktop);
-USER32_API BOOL SetThreadDesktop(void *desktop)
-{
-    if (NtUserSetThreadDesktop(desktop)) return TRUE;
-    SetLastError(6); /* ERROR_INVALID_HANDLE */
-    return FALSE;
-}
-
-USER32_API void *GetThreadDesktop(DWORD thread_id)
-{
-    if (!thread_id) {
-        SetLastError(87); /* ERROR_INVALID_PARAMETER */
-        return NULL;
-    }
-    UINT64 desktop = NtUserGetThreadDesktop(thread_id);
-    if (!desktop)
-        SetLastError(1400); /* ERROR_INVALID_HANDLE */
-    return (void *)(UINT_PTR)desktop;
 }
 
 __declspec(dllimport) UINT64 NtUserPostThreadMessage(DWORD, UINT, WPARAM, LPARAM);

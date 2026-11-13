@@ -87,6 +87,46 @@ typedef struct _FILE_OBJECT {
 } FILE_OBJECT;
 
 static POBJECT_TYPE g_file_type;
+typedef struct _IO_CONSOLE_READ_PIN {
+    struct _IO_CONSOLE_READ_PIN *Next;
+    PKTHREAD Thread;
+    POBJECT Object;
+} IO_CONSOLE_READ_PIN;
+static IO_CONSOLE_READ_PIN *g_console_read_pins;
+static IO_CONSOLE_READ_PIN *io_pin_console_read(POBJECT object)
+{
+    IO_CONSOLE_READ_PIN *pin=ExAllocatePoolWithTag(NonPagedPool,sizeof(*pin),'PirC');
+    if(!pin)return NULL;
+    pin->Thread=KeGetCurrentThread();pin->Object=object;
+    UINT64 flags=KiIrqSave();pin->Next=g_console_read_pins;g_console_read_pins=pin;KiIrqRestore(flags);
+    return pin;
+}
+static void io_unpin_console_read(IO_CONSOLE_READ_PIN *pin)
+{
+    if(!pin)return;
+    UINT64 flags=KiIrqSave();
+    IO_CONSOLE_READ_PIN **link=&g_console_read_pins;
+    while(*link&&*link!=pin)link=&(*link)->Next;
+    if(*link){*link=pin->Next;ExFreePool(pin);}KiIrqRestore(flags);
+}
+PVOID IoPinThreadConsoleObject(PVOID referenced_object)
+{return io_pin_console_read(referenced_object);}
+void IoUnpinThreadConsoleObject(PVOID pin)
+{io_unpin_console_read(pin);}
+void IoCleanupThreadConsoleReads(PKTHREAD thread)
+{
+    UINT64 flags=KiIrqSave();IO_CONSOLE_READ_PIN **link=&g_console_read_pins;
+    while(*link){IO_CONSOLE_READ_PIN *pin=*link;if(pin->Thread!=thread){link=&pin->Next;continue;}
+        *link=pin->Next;ObDereferenceObject(pin->Object);ExFreePool(pin);}
+    KiIrqRestore(flags);
+}
+static NTSTATUS io_native_console_permission(HANDLE handle,ACCESS_MASK needed)
+{
+    POBJECT object;
+    NTSTATUS status=ObReferenceObjectByHandle(handle,needed,g_file_type,&object);
+    if(NT_SUCCESS(status))ObDereferenceObject(object);
+    return status;
+}
 
 NTSTATUS IoReferenceFileData(HANDLE handle, PVOID *file_object,
                              const UINT8 **data, SIZE_T *size)
@@ -124,7 +164,12 @@ static NTSTATUS io_read_handle_kernel(HANDLE handle, void *buffer,
     if (file->Kind == FileKindConsole)
         n = wait ? ConRead(buffer, length) : ConTryRead(buffer, length);
     else if (file->Kind == FileKindCharDevice && file->CharOps) {
-        if (wait && file->CharOps->Read)
+        if (file->CharOps->ReadResult) {
+            IO_CONSOLE_READ_PIN *pin=wait&&file->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE?io_pin_console_read(object):NULL;
+            if(wait&&file->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE&&!pin){ObDereferenceObject(object);return STATUS_NO_MEMORY;}
+            status = file->CharOps->ReadResult(file->CharContext, buffer, length, wait, &n);
+            io_unpin_console_read(pin);
+        } else if (wait && file->CharOps->Read)
             n = file->CharOps->Read(file->CharContext, buffer, length);
         else if (!wait && file->CharOps->TryRead)
             n = file->CharOps->TryRead(file->CharContext, buffer, length);
@@ -152,7 +197,7 @@ static NTSTATUS io_read_handle_kernel(HANDLE handle, void *buffer,
     *read_out = n;
     io_record_transfer(FALSE,n);
     ObDereferenceObject(object);
-    return STATUS_SUCCESS;
+    return status;
 }
 
 NTSTATUS IoReadHandleKernel(HANDLE handle, void *buffer, SIZE_T length,
@@ -232,8 +277,11 @@ NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
     SIZE_T n = 0;
     if (file->Kind == FileKindConsole) n = ConWrite(buffer, length);
     else if (file->Kind == FileKindCharDevice && file->CharOps &&
-             file->CharOps->Write)
-        n = file->CharOps->Write(file->CharContext, buffer, length);
+             (file->CharOps->Write || file->CharOps->WriteResult)) {
+        if (file->CharOps->WriteResult)
+            status = file->CharOps->WriteResult(file->CharContext, buffer, length, &n);
+        else n = file->CharOps->Write(file->CharContext, buffer, length);
+    }
     else if (file->Kind == FileKindPipe) {
         IO_PIPE_BUFFER *pipe = file->Pipe;
         while (n < length) {
@@ -280,6 +328,27 @@ NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
     } else status = STATUS_NOT_SUPPORTED;
     *written_out = n;
     if(n||NT_SUCCESS(status))io_record_transfer(TRUE,n);
+    ObDereferenceObject(object);
+    return status;
+}
+
+NTSTATUS IoConsoleControlHandleKernel(HANDLE handle, UINT32 operation,
+                                      UINT64 argument1, UINT64 argument2,
+                                      UINT64 argument3, UINT64 *result)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = object;
+    if (file->Kind == FileKindConsole)
+        status = ConControl(operation, argument1, argument2, argument3, result);
+    else if (file->Kind == FileKindCharDevice && file->CharOps &&
+             file->CharOps->ConsoleControl)
+        status = file->CharOps->ConsoleControl(file->CharContext, operation,
+            argument1, argument2, argument3, result);
+    else
+        status = STATUS_INVALID_HANDLE;
     ObDereferenceObject(object);
     return status;
 }
@@ -575,6 +644,15 @@ NTSTATUS IoQueryFileStatKernel(HANDLE handle, IO_KERNEL_FILE_STAT *out)
 NTSTATUS IoCreateCharDeviceFile(UINT64 tag, void *context,
                                 const IO_CHAR_DEVICE_OPS *ops, HANDLE *out)
 {
+    PKTHREAD thread = KeGetCurrentThread();
+    return IoCreateCharDeviceFileInTable(thread && thread->Process ?
+        thread->Process->HandleTable : ObGetBootstrapHandleTable(), tag, context,
+        ops, GENERIC_ALL, out);
+}
+
+NTSTATUS IoCreateCharDeviceFileInTable(POB_HANDLE_TABLE table, UINT64 tag,
+    void *context, const IO_CHAR_DEVICE_OPS *ops, ACCESS_MASK access, HANDLE *out)
+{
     if (!out || !ops || !ops->Close) return STATUS_INVALID_PARAMETER;
     *out = NULL;
     POBJECT object;
@@ -586,7 +664,13 @@ NTSTATUS IoCreateCharDeviceFile(UINT64 tag, void *context,
     file->CharTag = tag;
     file->CharContext = context;
     file->CharOps = ops;
-    status = ObCreateHandle(object, GENERIC_ALL, out);
+    status = ObCreateHandleInTable(table, object, access, out);
+    if (!NT_SUCCESS(status)) {
+        /* Handle publication transfers the context. On failure it remains
+         * with the creator; deleting the unexposed File must not close it. */
+        file->CharOps = NULL;
+        file->CharContext = NULL;
+    }
     ObDereferenceObject(object);
     return status;
 }
@@ -646,6 +730,9 @@ NTSTATUS IoOpenConsoleKernel(HANDLE *out)
 {
     if (!out) return STATUS_INVALID_PARAMETER;
     *out = NULL;
+    PKTHREAD thread = KeGetCurrentThread();
+    if (thread && thread->Process && thread->Process->NativeConsole)
+        return ConOpenProcessConsole(FALSE, out);
     if (!g_console_file) return STATUS_DEVICE_NOT_READY;
     return ObCreateHandle(g_console_file, GENERIC_ALL, out);
 }
@@ -658,7 +745,8 @@ NTSTATUS IoIsConsoleFileInTable(POB_HANDLE_TABLE table, HANDLE handle)
                                                         NULL);
     if (!NT_SUCCESS(status)) return STATUS_INVALID_HANDLE;
     FILE_OBJECT *file = (FILE_OBJECT *)object;
-    status = file->Kind == FileKindConsole ? STATUS_SUCCESS :
+    status = (file->Kind == FileKindConsole ||
+              (file->Kind == FileKindCharDevice && file->CharTag == IO_CHAR_DEVICE_TAG_CONSOLE)) ? STATUS_SUCCESS :
                                           STATUS_INVALID_HANDLE;
     ObDereferenceObject(object);
     return status;
@@ -671,7 +759,8 @@ NTSTATUS IoIsConsoleFile(HANDLE handle)
                                                  &object);
     if (!NT_SUCCESS(status)) return STATUS_INVALID_HANDLE;
     FILE_OBJECT *file = (FILE_OBJECT *)object;
-    status = file->Kind == FileKindConsole ? STATUS_SUCCESS :
+    status = (file->Kind == FileKindConsole ||
+              (file->Kind == FileKindCharDevice && file->CharTag == IO_CHAR_DEVICE_TAG_CONSOLE)) ? STATUS_SUCCESS :
                                           STATUS_INVALID_HANDLE;
     ObDereferenceObject(object);
     return status;
@@ -737,6 +826,7 @@ void IoInitializeObjects(void)
     InitializeListHead(&g_open_disk_files);
     InitializeListHead(&g_vnodes);
     g_file_type = ObCreateObjectType("File", IopFileDelete);
+    SeConfigureType(g_file_type, 0x120089u, 0x120116u, 0x1200A0u, 0x1F01FFu);
 
     /* \Device directory + a shared console File object at \Device\Console. */
     struct _OBJECT_DIRECTORY *devdir;
@@ -1002,7 +1092,24 @@ UINT64 NtReadFile(UINT64 *a)
             if (!explicit_offset) f->Position += (SIZE_T)n;
         }
     } else if (f->Kind == FileKindCharDevice && f->CharOps) {
-        if (f->CharOps->Read)
+        if (f->CharOps->ReadResult) {
+            if(f->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE) {
+                NTSTATUS allowed=io_native_console_permission(handle,GENERIC_READ);
+                if(!NT_SUCCESS(allowed)){ObDereferenceObject(obj);return (UINT64)allowed;}
+            }
+            IO_CONSOLE_READ_PIN *pin=f->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE?io_pin_console_read(obj):NULL;
+            if(f->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE&&!pin){ObDereferenceObject(obj);return STATUS_NO_MEMORY;}
+            SIZE_T transferred = 0;
+            NTSTATUS status = f->CharOps->ReadResult(f->CharContext, buffer, length, TRUE, &transferred);
+            io_unpin_console_read(pin);
+            n = transferred;
+            if (!NT_SUCCESS(status)) {
+                if (MmProbeForWrite((UINT64)iosb, sizeof(*iosb))) {
+                    iosb->Status = status; iosb->Information = n;
+                }
+                ObDereferenceObject(obj); return (UINT64)status;
+            }
+        } else if (f->CharOps->Read)
             n = f->CharOps->Read(f->CharContext, buffer, length);
     } else if (f->Kind == FileKindPipe) {
         IO_PIPE_BUFFER *pipe = f->Pipe;
@@ -1029,6 +1136,9 @@ UINT64 NtReadFile(UINT64 *a)
         if (!explicit_offset) f->Position += n;
     }
 
+    if (iosb && !MmProbeForWrite((UINT64)iosb,sizeof(*iosb))) {
+        ObDereferenceObject(obj);return STATUS_ACCESS_VIOLATION;
+    }
     if (iosb) {
         iosb->Status = STATUS_SUCCESS;
         iosb->Information = n;
@@ -1070,7 +1180,19 @@ UINT64 NtWriteFile(UINT64 *a)
     } else if (f->Kind == FileKindConsole) {
         n = ConWrite(buffer, length);
     } else if (f->Kind == FileKindCharDevice && f->CharOps) {
-        if (f->CharOps->Write)
+        if (f->CharOps->WriteResult) {
+            if(f->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE) {
+                NTSTATUS allowed=io_native_console_permission(handle,GENERIC_WRITE);
+                if(!NT_SUCCESS(allowed)){ObDereferenceObject(obj);return (UINT64)allowed;}
+            }
+            SIZE_T transferred = 0;
+            NTSTATUS status = f->CharOps->WriteResult(f->CharContext, buffer, length, &transferred);
+            n = transferred;
+            if (!NT_SUCCESS(status)) {
+                iosb->Status = status; iosb->Information = n;
+                ObDereferenceObject(obj); return (UINT64)status;
+            }
+        } else if (f->CharOps->Write)
             n = f->CharOps->Write(f->CharContext, buffer, length);
     } else if (f->Kind == FileKindPipe) {
         IO_PIPE_BUFFER *pipe = f->Pipe;
@@ -1780,19 +1902,49 @@ UINT64 NtConsoleControlSimple(UINT64 *a)
     if (operation == ConsoleControlSetCursorInfo &&
         !MmProbeForRead(argument1, sizeof(CONSOLE_CURSOR_INFO)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
+    if (operation == SV_CONSOLE_CONTROL_WRITE_WIDE &&
+        (a[3]>((SIZE_T)-1)/sizeof(UINT16)||!MmProbeForRead(argument1,a[3]*sizeof(UINT16))))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
 
     POBJECT object;
     NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type, &object);
     if (!NT_SUCCESS(status)) return (UINT64)status;
     FILE_OBJECT *file = (FILE_OBJECT *)object;
+    UINT64 captured_result=0;
+    if(file->Kind==FileKindCharDevice&&file->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE) {
+        ACCESS_MASK needed=GENERIC_READ;
+        switch(operation) {
+        case ConsoleControlSetAttribute:case ConsoleControlSetCursorPosition:case ConsoleControlSetCursorInfo:
+        case ConsoleControlFillCharacter:case ConsoleControlFillAttribute:case SV_CONSOLE_CONTROL_FILL_WIDE:
+        case SV_CONSOLE_CONTROL_WRITE_WIDE:case SV_CONSOLE_CONTROL_RESIZE_BUFFER:case SV_CONSOLE_CONTROL_SET_WINDOW:
+        case SV_CONSOLE_CONTROL_FLUSH_INPUT:case SV_CONSOLE_CONTROL_WRITE_INPUT:case SV_CONSOLE_CONTROL_WRITE_OUTPUT:
+        case SV_CONSOLE_CONTROL_SET_TITLE:case SV_CONSOLE_CONTROL_SET_INFO_EX:needed=GENERIC_WRITE;break;
+        default:break;
+        }
+        NTSTATUS allowed=io_native_console_permission(handle,needed);
+        if(!NT_SUCCESS(allowed)){ObDereferenceObject(object);return (UINT64)allowed;}
+    }
+    IO_CONSOLE_READ_PIN *pin=NULL;
+    if((operation==SV_CONSOLE_CONTROL_READ_WIDE||operation==SV_CONSOLE_CONTROL_READ_INPUT)&&
+       (file->Kind==FileKindConsole || (file->Kind==FileKindCharDevice&&file->CharTag==IO_CHAR_DEVICE_TAG_CONSOLE))) {
+        pin=io_pin_console_read(object);
+        if(!pin){ObDereferenceObject(object);return STATUS_NO_MEMORY;}
+    }
     if (file->Kind == FileKindConsole)
-        status = ConControl(operation, argument1, a[3], a[4], result);
+        status = ConControl(operation, argument1, a[3], a[4], &captured_result);
     else if (file->Kind == FileKindCharDevice && file->CharOps &&
              file->CharOps->ConsoleControl)
         status = file->CharOps->ConsoleControl(file->CharContext, operation,
-                                               argument1, a[3], a[4], result);
+                                               argument1, a[3], a[4], &captured_result);
     else
         status = STATUS_INVALID_HANDLE;
+    io_unpin_console_read(pin);
+    if(result) {
+        UINT64 flags=KiIrqSave();
+        if(MmProbeForWrite((UINT64)result,sizeof(*result)))*result=captured_result;
+        else status=STATUS_ACCESS_VIOLATION;
+        KiIrqRestore(flags);
+    }
     ObDereferenceObject(object);
     return (UINT64)status;
 }
@@ -1815,7 +1967,8 @@ UINT64 NtQueryFileInfo(UINT64 *a)
     out->Size = vnode ? vnode->Size : 0;
     out->Position = file->Position;
     out->Attributes = vnode ? vnode->Attributes : 0;
-    out->IsConsole = file->Kind == FileKindConsole;
+    out->IsConsole = file->Kind == FileKindConsole ||
+        (file->Kind == FileKindCharDevice && file->CharTag == IO_CHAR_DEVICE_TAG_CONSOLE);
     out->FatWriteDate = vnode ? vnode->FatWriteDate : 0;
     out->FatWriteTime = vnode ? vnode->FatWriteTime : 0;
     out->Reserved = 0;

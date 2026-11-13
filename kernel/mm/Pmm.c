@@ -299,6 +299,25 @@ void MmFreePages(UINT64 phys, SIZE_T count)
     KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
 }
 
+/* Release unrelated frames under one PMM lock acquisition. Address-space
+ * teardown otherwise takes the same global lock once per 4 KiB page. */
+void MmFreePageList(const UINT64 *pages, SIZE_T count)
+{
+    if (!pages || !count) return;
+    UINT64 interrupt_state = KiAcquireRawSpinLock(&g_pmm_lock);
+    UINT64 lowest = g_pmm.next_hint;
+    for (SIZE_T i = 0; i < count; ++i) {
+        UINT64 frame = pages[i] >> PAGE_SHIFT;
+        if (frame >= g_pmm.total_pages || !bit_test(frame)) continue;
+        bit_clear(frame);
+        g_pmm.free_pages++;
+        g_pmm.used_pages--;
+        if (frame < lowest) lowest = frame;
+    }
+    g_pmm.next_hint = lowest;
+    KiReleaseRawSpinLock(&g_pmm_lock, interrupt_state);
+}
+
 UINT64 MmTotalPages(void) { return g_pmm.total_pages; }
 UINT64 MmFreePageCount(void)
 {

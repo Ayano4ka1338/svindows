@@ -93,14 +93,14 @@ PLDR_PROCESS_CONTEXT LdrCreateProcessContext(void)
     memset(context, 0, sizeof(*context));
     context->DynamicImageNext = 0x0000000400000000ULL;
     context->TlsRegionNext = LDR_TLS_VA_BASE;
-    KeLog("[ldr]  created process context %p\n", context);
+    KeTrace("[ldr]  created process context %p\n", context);
     return context;
 }
 
 void LdrDestroyProcessContext(PLDR_PROCESS_CONTEXT context)
 {
     if (context && context != &g_early_context) {
-        KeLog("[ldr]  destroying process context %p\n", context);
+        KeTrace("[ldr]  destroying process context %p\n", context);
         ExFreePool(context);
     }
 }

@@ -14,6 +14,9 @@ static void HostIrqRestore(UINT64 flags) { (void)flags; }
 #include "../../kernel/ke/Syscall.c"
 #include "../../kernel/win32k/Gdiobj.c"
 #include "../../kernel/ob/ObHandle.c"
+#include "../../kernel/ob/ObCore.c"
+#include "../../kernel/ob/ObNamespace.c"
+#include "../../kernel/se/Security.c"
 
 static UINT8 x11_requests[16384];
 static SIZE_T x11_length;
@@ -44,6 +47,14 @@ static TEST_PAGE pages[TEST_PAGE_CAPACITY];
 static int fail_allocate_after = -1, fail_map_after = -1;
 static unsigned page_allocations, page_frees;
 GFX_FRAMEBUFFER GfxFramebuffer;
+UINT8 HalMouseWarp(INT32 *x, INT32 *y)
+{
+    if(*x<0) *x=0;
+    if(*y<0) *y=0;
+    if(GfxFramebuffer.Width&&*x>=(INT32)GfxFramebuffer.Width) *x=GfxFramebuffer.Width-1;
+    if(GfxFramebuffer.Height&&*y>=(INT32)GfxFramebuffer.Height) *y=GfxFramebuffer.Height-1;
+    return 0;
+}
 UINT64 NtUserGetSystemMetrics(UINT64 *args) { (void)args; return 0; }
 UINT64 NtUserGetSysColor(UINT64 *args) { (void)args; return 0; }
 PKTHREAD KeGetCurrentThread(void) { return current; }
@@ -87,11 +98,12 @@ void GfxDrawUiTextW(UINT32 x, UINT32 baseline, const UINT16 *text, UINT32 color)
 { (void)x; (void)baseline; (void)text; (void)color; }
 LONG KeSetEvent(PKEVENT e) { LONG old = e->Header.SignalState; e->Header.SignalState = 1; return old; }
 void KeResetEvent(PKEVENT e) { e->Header.SignalState = 0; }
-void ObReferenceObject(POBJECT o) { ObHeaderFromObject(o)->PointerCount++; }
-void ObDereferenceObject(POBJECT o)
-{ if (!--ObHeaderFromObject(o)->PointerCount) ExFreePool(ObHeaderFromObject(o)); }
-void ObRemoveObjectName(POBJECT o)
-{ assert(!ObHeaderFromObject(o)->ParentDirectory); }
+NORETURN VOID KeBugCheck(UINT32 code, const char *message)
+{ fprintf(stderr, "BUGCHECK %x: %s\n", code, message); abort(); }
+UINT64 KiAcquireRawSpinLock(PKSPIN_LOCK lock)
+{ assert(!lock->Held); lock->Held = 1; return 0; }
+void KiReleaseRawSpinLock(PKSPIN_LOCK lock, UINT64 flags)
+{ (void)flags; assert(lock->Held); lock->Held = 0; }
 static OBJECT_TYPE event_type;
 NTSTATUS PsCreateNotificationEvent(PKEVENT *event, HANDLE *handle)
 {
@@ -458,6 +470,18 @@ static void check_damage_matches_full(void)
     assert(partial);
     memcpy(partial, GfxFramebuffer.Base, bytes);
     W32kScreenCompose();
+    if (memcmp(partial, GfxFramebuffer.Base, bytes)) {
+        for (UINT32 y = 0; y < GfxFramebuffer.Height; ++y)
+            for (UINT32 x = 0; x < GfxFramebuffer.Width; ++x) {
+                UINT32 index = y * (GfxFramebuffer.Pitch / 4) + x;
+                if (partial[index] != GfxFramebuffer.Base[index]) {
+                    fprintf(stderr, "damage mismatch at %u,%u: %08x -> %08x pointer=%d,%d valid=%d\n",
+                        x,y,partial[index],GfxFramebuffer.Base[index],g_w32k_pointer_x,g_w32k_pointer_y,g_w32k_pointer_valid);
+                    goto mismatch;
+                }
+            }
+    }
+mismatch:
     assert(!memcmp(partial, GfxFramebuffer.Base, bytes));
     free(partial);
 }
@@ -473,6 +497,150 @@ static UINT64 create_fixture_window(UINT64 *args)
         assert(cls);args[1]=cls->Atom;
     }
     return NtUserCreateWindowEx(args);
+}
+
+static UINT32 mouse_message_count(USER_MSG_QUEUE *queue,UINT32 message)
+{
+    UINT32 count=0;
+    for(UINT32 i=queue->Tail;i!=queue->Head;i=(i+1)%USER_MESSAGE_QUEUE_CAPACITY)
+        if(queue->Msgs[i].Message==message) ++count;
+    return count;
+}
+
+static void check_mouse_click_contracts(void)
+{
+    graphics=FALSE; GfxFramebuffer.Width=80; GfxFramebuffer.Height=60;
+    UINT64 args[16]={0}; args[4]=WS_POPUP; args[5]=10; args[6]=10; args[7]=30; args[8]=20;
+    UINT64 hwnd=create_fixture_window(args); assert(hwnd); W32kShowWindow(hwnd,1);
+    USER_CLASS_LOCAL *cls=g_window_classes[(UINT16)hwnd]; assert(cls); cls->Style=8;
+    USER_MSG_QUEUE *queue=KiUserQueueForThread(thread_a.ThreadId); assert(queue);
+    queue->Head=queue->Tail=0; memset(g_w32k_clicks,0,sizeof(g_w32k_clicks));
+    g_w32k_pointer_valid=TRUE; g_w32k_pointer_buttons=0;
+    test_tick=100; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    test_tick=120; W32kInputMouse(21,15,1); W32kInputMouse(21,15,0);
+    assert(mouse_message_count(queue,0x0201)==1&&mouse_message_count(queue,0x0203)==1&&mouse_message_count(queue,0x0202)==2);
+    queue->Head=queue->Tail=0;
+    test_tick=200; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    test_tick=260; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    assert(mouse_message_count(queue,0x0201)==2&&!mouse_message_count(queue,0x0203));
+    queue->Head=queue->Tail=0; memset(g_w32k_clicks,0,sizeof(g_w32k_clicks));
+    test_tick=300; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    test_tick=310; W32kInputMouse(24,15,1); W32kInputMouse(24,15,0);
+    assert(mouse_message_count(queue,0x0201)==2&&!mouse_message_count(queue,0x0203));
+    queue->Head=queue->Tail=0; memset(g_w32k_clicks,0,sizeof(g_w32k_clicks)); cls->Style=0;
+    test_tick=400; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    test_tick=410; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    assert(mouse_message_count(queue,0x0201)==2&&!mouse_message_count(queue,0x0203));
+    queue->Head=queue->Tail=0; memset(g_w32k_clicks,0,sizeof(g_w32k_clicks)); cls->Style=8;
+    test_tick=500; W32kInputMouse(20,15,2); W32kInputMouse(20,15,0);
+    test_tick=510; W32kInputMouse(20,15,2); W32kInputMouse(20,15,0);
+    assert(mouse_message_count(queue,0x0204)==1&&mouse_message_count(queue,0x0206)==1&&mouse_message_count(queue,0x0205)==2);
+    queue->Head=queue->Tail=0;
+    test_tick=600; W32kInputMouse(20,15,4); W32kInputMouse(20,15,0);
+    test_tick=610; W32kInputMouse(20,15,4); W32kInputMouse(20,15,0);
+    assert(mouse_message_count(queue,0x0207)==1&&mouse_message_count(queue,0x0209)==1&&mouse_message_count(queue,0x0208)==2);
+    queue->Head=queue->Tail=0; memset(g_w32k_clicks,0,sizeof(g_w32k_clicks));
+    test_tick=700; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    UINT64 second=create_fixture_window(args); assert(second); W32kShowWindow(second,1);
+    test_tick=710; W32kInputMouse(20,15,1); W32kInputMouse(20,15,0);
+    assert(mouse_message_count(queue,0x0201)==2&&!mouse_message_count(queue,0x0203));
+    args[0]=second; assert(NtUserDestroyWindow(args));
+    args[0]=0x08000000u; args[5]=45;
+    UINT64 no_activate=create_fixture_window(args); assert(no_activate); W32kShowWindow(no_activate,4);
+    W32kSetFocus(hwnd); assert(g_w32k_active==(UINT16)hwnd);
+    queue->Head=queue->Tail=0; W32kInputMouse(50,15,1); W32kInputMouse(50,15,0);
+    assert(g_w32k_active==(UINT16)hwnd&&mouse_message_count(queue,0x0201)==1&&mouse_message_count(queue,0x0202)==1);
+    args[0]=no_activate; assert(NtUserDestroyWindow(args)); args[0]=hwnd; assert(NtUserDestroyWindow(args));
+    queue->Head=queue->Tail=0; GfxFramebuffer.Width=GfxFramebuffer.Height=0;
+    puts("PASS double clicks require matching target/time/distance/class; right and middle buttons retain complete make/break sequences");
+}
+
+static void check_cursor_contracts(void)
+{
+    enum { WIDTH=80, HEIGHT=60, STRIDE=83 };
+    UINT32 *screen=calloc(STRIDE*HEIGHT,4); assert(screen);
+    GfxFramebuffer.Base=screen; GfxFramebuffer.Width=WIDTH; GfxFramebuffer.Height=HEIGHT;
+    GfxFramebuffer.Pitch=STRIDE*4; graphics=TRUE;
+    g_w32k_pointer_valid=FALSE; g_cursor_hover_window=0; g_cursor_hover_part=0;
+    W32kInputMouse(10,8,0); W32kScreenCompose();
+    W32K_CURSOR_DESCRIPTION shape={sizeof(shape),3,2,1,1,W32K_CURSOR_MONOCHROME};
+    UINT32 pixels[]={0,0xffffff,0xffffff,0,0,0}; UINT8 mask[]={0,0,1,1,1,1};
+    UINT64 upload[]={0,(UINT64)&shape,(UINT64)pixels,(UINT64)mask,0,0,0};
+    UINT64 cursor=SvNtUserUploadCursor(upload); assert(cursor);
+    UINT64 set[]={cursor}; (void)NtUserSetCursor(set);
+    assert(g_cursor_selected==cursor && !g_cursor_default);
+    assert(screen[7*STRIDE+9]==0 && screen[7*STRIDE+10]==0xffffff);
+    assert(screen[7*STRIDE+11]==(g_w32k_composite[7*WIDTH+11]^0xffffff));
+    assert(screen[8*STRIDE+9]==g_w32k_composite[8*WIDTH+9]);
+    UINT32 old_scene=g_w32k_composite[7*WIDTH+10];
+    W32kInputMouse(20,18,0);
+    assert(screen[7*STRIDE+10]==old_scene && screen[17*STRIDE+20]==0xffffff);
+    W32kScreenDamage(20,17,1,1); assert(screen[17*STRIDE+20]==0xffffff);
+    check_damage_matches_full();
+    UINT64 count[]={0}; assert((INT64)SvNtUserShowCursor(count)==-1);
+    assert(!W32kSelectedCursor() && screen[17*STRIDE+20]==g_w32k_composite[17*WIDTH+20]);
+    assert((INT64)SvNtUserShowCursor(count)==-2); count[0]=1;
+    assert((INT64)SvNtUserShowCursor(count)==-1 && !W32kSelectedCursor());
+    assert((INT64)SvNtUserShowCursor(count)==0 && W32kSelectedCursor());
+    KTHREAD alternate=thread_a; alternate.ThreadId+=100;
+    current=&alternate; count[0]=0; assert((INT64)SvNtUserShowCursor(count)==-1);
+    assert(W32kSelectedCursor()); W32kCursorCleanupThread(&alternate); current=&thread_a;
+    set[0]=0; assert(NtUserSetCursor(set)==cursor && !W32kSelectedCursor());
+    set[0]=cursor; assert(!NtUserSetCursor(set)&&W32kSelectedCursor());
+    INT32 clip[]={2,3,6,7}; UINT64 clip_args[]={0,(UINT64)clip};
+    assert(SvNtUserClipCursor(clip_args));
+    UINT64 position[]={50,50}; assert(SvNtUserSetCursorPos(position));
+    assert(g_w32k_pointer_x==5&&g_w32k_pointer_y==6);
+    clip_args[1]=0; assert(SvNtUserClipCursor(clip_args));
+    W32K_CURSOR_DESCRIPTION copied={0}; UINT32 copied_pixels[6]; UINT8 copied_mask[6];
+    UINT64 query[]={2,cursor,(UINT64)&copied,(UINT64)copied_pixels,(UINT64)copied_mask,6};
+    assert(SvNtUserQueryCursor(query)&&!memcmp(pixels,copied_pixels,sizeof(pixels))&&
+           !memcmp(mask,copied_mask,sizeof(mask))&&copied.HotX==1&&copied.HotY==1);
+    query[5]=5; assert(!SvNtUserQueryCursor(query)); query[5]=6;
+    current=&thread_b; assert(!SvNtUserQueryCursor(query));
+    set[0]=cursor; assert(!NtUserSetCursor(set)&&g_cursor_selected==cursor);
+    assert(!NtUserDestroyCursor(set)); current=&thread_a;
+    fail_pool_after=0; assert(!SvNtUserUploadCursor(upload)); fail_pool_after=-1;
+    assert(NtUserDestroyCursor(set)&&!NtUserDestroyCursor(set));
+    set[0]=cursor; assert(!NtUserSetCursor(set)&&g_cursor_selected!=cursor);
+    struct { UINT32 Length,Flags; UINT64 Buffer; } resource={0,0,32513};
+    UINT64 stock_args[]={0,(UINT64)&resource}; UINT64 stock=NtUserFindExistingCursorIcon(stock_args);
+    assert(stock && stock==NtUserFindExistingCursorIcon(stock_args));
+    assert(g_cursor_images[(UINT16)stock]->Description.HotX==16);
+    set[0]=stock; assert(!NtUserDestroyCursor(set));
+    shape=(W32K_CURSOR_DESCRIPTION){sizeof(shape),1,1,0,0,W32K_CURSOR_ALPHA};
+    pixels[0]=0x80ffffffu; upload[1]=(UINT64)&shape;
+    UINT64 alpha_cursor=SvNtUserUploadCursor(upload); assert(alpha_cursor);
+    set[0]=alpha_cursor; (void)NtUserSetCursor(set);
+    UINT32 under=g_w32k_composite[6*WIDTH+5];
+    UINT32 expected=0;
+    for(UINT32 shift=0;shift<24;shift+=8) expected|=((255*128+((under>>shift)&255)*127+127)/255)<<shift;
+    assert(screen[6*STRIDE+5]==expected);
+    UINT64 window_args[16]={0}; window_args[4]=WS_POPUP; window_args[5]=0; window_args[6]=0; window_args[7]=40; window_args[8]=40;
+    UINT64 window=create_fixture_window(window_args); assert(window); W32kShowWindow(window,1);
+    W32kInputMouse(15,15,0); set[0]=alpha_cursor; (void)NtUserSetCursor(set);
+    UINT32 exported[WIDTH*HEIGHT],hidden_export[WIDTH*HEIGHT];
+    assert(W32kComposeWindow((UINT16)window,exported,WIDTH));
+    set[0]=0; (void)NtUserSetCursor(set);
+    assert(W32kComposeWindow((UINT16)window,hidden_export,WIDTH));
+    assert(!memcmp(exported,hidden_export,sizeof(exported)));
+    window_args[0]=window; assert(NtUserDestroyWindow(window_args)); set[0]=alpha_cursor;
+    assert(NtUserDestroyCursor(set));
+    UINT8 bitmap_bits[]={0xa0,0}; UINT64 bitmap_args[]={3,1,1,1,(UINT64)bitmap_bits};
+    UINT64 bitmap=NtGdiCreateBitmap(bitmap_args); assert(bitmap);
+    UINT32 bitmap_info[4],bitmap_pixels[3];
+    UINT64 metadata[]={bitmap,(UINT64)bitmap_info},read[]={bitmap,(UINT64)bitmap_pixels,3};
+    assert(SvNtGdiQueryBitmap(metadata)&&bitmap_info[0]==3&&bitmap_info[3]==1);
+    assert(SvNtGdiReadBitmap(read)&&bitmap_pixels[0]==0xffffff&&bitmap_pixels[1]==0&&bitmap_pixels[2]==0xffffff);
+    assert(NtGdiDeleteObjectApp(&bitmap)); bitmap_args[2]=2; assert(!NtGdiCreateBitmap(bitmap_args));
+    UINT32 rgba[]={0x80010203}; UINT64 rgba_args[]={1,1,1,32,(UINT64)rgba};
+    bitmap=NtGdiCreateBitmap(rgba_args); read[0]=bitmap; read[2]=1;
+    assert(bitmap&&SvNtGdiReadBitmap(read)&&bitmap_pixels[0]==rgba[0]);
+    assert(NtGdiDeleteObjectApp(&bitmap));
+    graphics=FALSE; free(g_w32k_composite); g_w32k_composite=NULL;
+    g_w32k_composite_w=g_w32k_composite_h=0; g_cursor_last_valid=FALSE;
+    free(screen); GfxFramebuffer.Base=NULL; GfxFramebuffer.Width=GfxFramebuffer.Height=GfxFramebuffer.Pitch=0;
+    puts("PASS cursor artwork/hotspots, XOR/alpha, movement restore, repaint, thread counts, clip, ownership and bitmap capture");
 }
 
 static void check_retained_window_painting(void)
@@ -612,7 +780,9 @@ static void check_retained_window_painting(void)
     free(export);
     puts("PASS X11 managed and popup attributes, UTF-8 titles, owner placement and 32-bit resize values");
     W32kShowWindow(popup, 0);
-    assert(screen[75 * STRIDE + 60] == 0xFFFFFF);
+    /* The native pointer is at this pixel; retained application content must
+     * still be white after hiding the covering popup. */
+    assert(g_w32k_composite[75 * g_w32k_composite_w + 60] == 0xFFFFFF);
     check_damage_matches_full();
     W32kShowWindow(hwnd, 0); check_damage_matches_full();
     W32kShowWindow(hwnd, 1); check_damage_matches_full();
@@ -627,6 +797,19 @@ static void check_retained_window_painting(void)
     W32kInputMouse(220, 160, 0);
     assert(!g_w32k_drag && !g_w32k[slot].Dragging);
     puts("PASS caption drag retains its window across large pointer jumps");
+    g_w32k[slot].Style|=WS_THICKFRAME;
+    W32kMoveWindow(hwnd,20,20,190,100);
+    /* Ten pixels inside the client-facing edge must still be an easy resize
+     * target; the visible frame itself is intentionally only one pixel. */
+    W32kInputMouse(200,110,0);W32kInputMouse(200,110,1);
+    assert(g_w32k_drag==slot&&g_w32k[slot].ResizeHit==17);
+    W32kInputMouse(220,130,1);
+    assert(g_w32k[slot].X==20&&g_w32k[slot].Y==20&&
+           g_w32k[slot].W==210&&g_w32k[slot].H==120);
+    W32kInputMouse(220,130,0);
+    assert(!g_w32k_drag&&!g_w32k[slot].ResizeHit);
+    check_damage_matches_full();
+    puts("PASS thick-frame mouse sizing preserves the grabbed corner and sends resize geometry");
     W32K_DC *retained = dc_from_handle(hdc);
     assert(retained);
     void *old_storage = retained->WindowStorage;
@@ -734,6 +917,7 @@ PKTHREAD KeLookupThreadById(ULONG id)
 
 int main(void)
 {
+    ObInitialize();
     check_screen_z_order();
     GfxFramebuffer.RedShift = 16;
     GfxFramebuffer.GreenShift = 8;
@@ -749,6 +933,12 @@ int main(void)
     process_a.DirectoryTableBase = 8; process_b.DirectoryTableBase = 12;
     thread_a.Process = &process_a; thread_b.Process = &process_b;
     thread_a.ThreadId = 1000; thread_b.ThreadId = 2000;
+    InitializeListHead(&process_a.ThreadListHead);
+    InitializeListHead(&process_b.ThreadListHead);
+    InitializeListHead(&thread_a.ProcessEntry);
+    InitializeListHead(&thread_b.ProcessEntry);
+    InsertTailList(&process_a.ThreadListHead, &thread_a.ProcessEntry);
+    InsertTailList(&process_b.ThreadListHead, &thread_b.ProcessEntry);
     process_a.HandleTable = ObCreateHandleTable();
     process_b.HandleTable = ObCreateHandleTable();
     current = &thread_a;
@@ -776,7 +966,7 @@ int main(void)
     assert(fresh != brush_a && !gdi_object(brush_a, 0));
     puts("PASS GDI process ownership, initialization isolation and stale handles");
 
-    args[0] = 2; args[1] = 2;
+    args[0] = 2; args[1] = 2; args[2] = 1; args[3] = 32; args[4] = 0;
     UINT64 bitmap = NtGdiCreateBitmap(args);
     assert(bitmap);
     args[0] = 0;
@@ -960,6 +1150,8 @@ int main(void)
     assert(NtUserDestroyWindow(args));
     puts("PASS class isolation, window ownership/generation and thread window/DC cleanup");
     check_retained_window_painting();
+    check_cursor_contracts();
+    check_mouse_click_contracts();
 
     current = &thread_a;
     UINT64 desktop_args[4] = {0};
@@ -968,6 +1160,7 @@ int main(void)
     assert(desktop && station && desktop != station);
     WCHAR desktop_name[] = {'D','e','f','a','u','l','t',0};
     desktop_args[0] = (UINT64)desktop_name;
+    desktop_args[3] = W32K_DESKTOP_ALL;
     UINT64 opened = NtUserOpenDesktop(desktop_args);
     assert(opened && opened != desktop);
     desktop_args[0] = opened;
@@ -987,7 +1180,8 @@ int main(void)
     assert(!NtUserSetThreadDesktop(desktop_args)); /* stale generation */
     puts("PASS desktop handle ownership, thread association, busy close and foreign window enumeration");
 
-    args[0] = args[1] = 0;
+    struct { UINT32 Length,Flags; UINT64 Buffer; } cursor_resource={0,0,32512};
+    args[0] = 0; args[1] = (UINT64)&cursor_resource;
     UINT64 cursor_a = NtUserFindExistingCursorIcon(args);
     current = &thread_b;
     UINT64 cursor_b = NtUserFindExistingCursorIcon(args);
@@ -995,7 +1189,7 @@ int main(void)
     args[0] = cursor_a;
     assert(!NtUserDestroyCursor(args));
     current = &thread_a;
-    assert(NtUserDestroyCursor(args));
+    assert(!NtUserDestroyCursor(args)); /* LoadCursor objects are shared. */
     W32kCleanupProcessUser(&process_a);
     current = &thread_b;
     assert(g_user_objects[(UINT16)cursor_b].Process == &process_b);

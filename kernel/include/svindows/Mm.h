@@ -117,6 +117,7 @@ UINT64 MmAllocatePagesBelow4G(SIZE_T count);
 /* Legacy 8237 DMA buffers must fit below the 16 MiB address ceiling. */
 UINT64 MmAllocatePagesBelow16M(SIZE_T count);
 void   MmFreePages(UINT64 phys, SIZE_T count);
+void   MmFreePageList(const UINT64 *pages, SIZE_T count);
 
 UINT64 MmTotalPages(void);
 UINT64 MmFreePageCount(void);
@@ -132,12 +133,17 @@ void MmQueryMemoryUsage(MM_MEMORY_USAGE *usage);
 
 void    MmInitializeVirtualMemory(const MM_MEMORY_MAP *map);
 BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags);
+BOOLEAN MmMapContiguousPages(UINT64 virt, UINT64 phys, SIZE_T pages,
+                             UINT64 flags);
+BOOLEAN MmMapAliasedPages(UINT64 virt, UINT64 phys, SIZE_T pages,
+                          UINT64 flags);
 BOOLEAN MmUnmapPage(UINT64 virt);
 BOOLEAN MmUnmapPageInAddressSpace(UINT64 root, UINT64 virt);
 void    MmReleaseUserPagesInAddressSpace(UINT64 root, UINT64 base, SIZE_T pages);
 UINT64  MmGetPhysicalAddress(UINT64 virt);   /* MM_INVALID_PHYS if not mapped */
 UINT64  MmGetPhysicalAddressInAddressSpace(UINT64 root, UINT64 virt);
 UINT64  MmGetPageFlags(UINT64 virt);         /* effective flags; zero if unmapped */
+UINT64  MmGetPageFlagsInAddressSpace(UINT64 root, UINT64 virt);
 
 /* ------------------------------------------------------------------ */
 /* User-pointer validation                                            */

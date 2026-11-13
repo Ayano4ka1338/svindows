@@ -4,6 +4,8 @@
 
 UINT64 MmDirectMapBase;
 UINT64 MmTotalPages(void) { return 1024; }
+void MmFreePageList(const UINT64 *pages, SIZE_T count)
+{ (void)pages; (void)count; }
 
 #include "../../kernel/mm/AddressSpace.c"
 

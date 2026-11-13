@@ -69,12 +69,12 @@ void LdrFlushAlternateResourceModules(void)
 
 void *CsrAllocateCaptureBuffer(ULONG count, ULONG size)
 {
-    return RtlAllocateHeap(0, 0, size ? size : 16);
+    return RtlAllocateHeap(rtl_process_heap(), 0, size ? size : 16);
 }
 
 void CsrFreeCaptureBuffer(void *buffer)
 {
-    RtlFreeHeap(0, 0, buffer);
+    RtlFreeHeap(rtl_process_heap(), 0, buffer);
 }
 
 NTSTATUS CsrAllocateMessagePointer(void *buffer, ULONG size, void **message)

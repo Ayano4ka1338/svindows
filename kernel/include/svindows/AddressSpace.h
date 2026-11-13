@@ -9,6 +9,9 @@ UINT64  MmGetKernelAddressSpace(void);
 UINT64  MmCountResidentUserPages(UINT64 directory_table_base, UINT64 *private_pages);
 UINT64  MmCreateAddressSpace(void);
 void    MmDestroyAddressSpace(UINT64 directory_table_base);
+/* Low-level CR3 primitive for the scheduler, boot, and committed exec paths.
+ * Code which only needs temporary access to a process must use
+ * KeStackAttachProcess so preemption restores the correct address space. */
 void    MmSwitchAddressSpace(UINT64 directory_table_base);
 BOOLEAN MmMapPageInAddressSpace(UINT64 directory_table_base, UINT64 virt,
                                 UINT64 phys, UINT64 flags);

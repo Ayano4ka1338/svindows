@@ -15,6 +15,7 @@ static UINT64 SvNtProcessorCounterQuery(UINT64 *args)
             return (UINT64)STATUS_ACCESS_VIOLATION;
         if (!g_processor_counter_query_type)
             g_processor_counter_query_type = ObCreateObjectType("ProcessorCounterQuery", NULL);
+        SeConfigureType(g_processor_counter_query_type, 0x20001u, 0x20000u, 0x20000u, 0xF0001u);
         if (!g_processor_counter_query_type) return (UINT64)STATUS_NO_MEMORY;
         POBJECT object;
         NTSTATUS status = ObCreateObject(g_processor_counter_query_type,

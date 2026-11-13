@@ -1,5 +1,5 @@
-/* USER cursor handles, independent activation/focus, capture and queued key
- * state. win32k routes pointer input to child HWNDs without drawing a cursor. */
+/* USER cursor images, independent activation/focus, capture and queued key
+ * state. win32k owns pointer presentation and each GUI thread's display count. */
 
 __declspec(dllimport) UINT64 NtUserSetCursor(HCURSOR cursor);
 __declspec(dllimport) UINT64 NtUserSetFocus(HWND hwnd);
@@ -7,27 +7,21 @@ __declspec(dllimport) UINT64 NtUserGetFocus(void);
 __declspec(dllimport) UINT64 NtUserSetCapture(HWND hwnd);
 __declspec(dllimport) UINT64 NtUserReleaseCapture(void);
 
+#include "User32CursorResources.inc"
+
 USER32_API HCURSOR LoadCursorW(HINSTANCE instance, const WCHAR *name)
 {
-    if (!name)
-        return NULL;
-    /* The kernel caches cursors per (module, resource) and hands the same
-     * handle back for a repeated request, which is what a window class needs:
-     * TRUE from LoadCursorW without a second cursor object. */
-    SV_LARGE_STRING resource;
-    resource.length = IS_INTRESOURCE(name) ? 0
-                                           : (ULONG)(sv_wcslen(name) * sizeof(WCHAR));
-    resource.flags = 0;
-    resource.buffer = name;
-    return (HCURSOR)(UINT_PTR)NtUserFindExistingCursorIcon(instance, &resource, NULL);
+    return sv_load_cursor(instance,name,32,32,0x8000u);
 }
 
 USER32_API HCURSOR SetCursor(HCURSOR cursor)
 {
-    (void)NtUserSetCursor(cursor);
-    /* The window manager tracks this handle; cursor rendering is disabled. */
-    return NULL;
+    return (HCURSOR)(UINT_PTR)NtUserSetCursor(cursor);
 }
+
+__declspec(dllimport) UINT64 SvNtUserShowCursor(BOOL show);
+__declspec(dllimport) UINT64 SvNtUserClipCursor(BOOL read, void *rect);
+__declspec(dllimport) UINT64 SvNtUserDoubleClickTime(UINT milliseconds, BOOL set);
 
 __declspec(dllimport) UINT64 SvNtUserSetCursorPos(int x, int y);
 
@@ -38,10 +32,21 @@ USER32_API BOOL SetCursorPos(int x, int y)
 
 USER32_API int ShowCursor(BOOL show)
 {
-    /* Native pointer coordinates exist independently of cursor artwork. */
-    static int display_count;
-    return __atomic_add_fetch(&display_count, show ? 1 : -1, __ATOMIC_RELAXED);
+    return (int)(INT64)SvNtUserShowCursor(show);
 }
+
+USER32_API HCURSOR GetCursor(void)
+{ return (HCURSOR)(UINT_PTR)SvNtUserQueryCursor(0,0,NULL,NULL,NULL,0); }
+USER32_API BOOL GetCursorInfo(CURSORINFO *info)
+{ return info&&info->cbSize==sizeof(*info)&&SvNtUserQueryCursor(1,(UINT_PTR)info,NULL,NULL,NULL,0)!=0; }
+USER32_API BOOL ClipCursor(const RECT *rect)
+{ return SvNtUserClipCursor(FALSE,(void*)rect)!=0; }
+USER32_API BOOL GetClipCursor(RECT *rect)
+{ return rect&&SvNtUserClipCursor(TRUE,rect)!=0; }
+USER32_API UINT GetDoubleClickTime(void)
+{ return (UINT)SvNtUserDoubleClickTime(0,FALSE); }
+USER32_API BOOL SetDoubleClickTime(UINT milliseconds)
+{ (void)SvNtUserDoubleClickTime(milliseconds,TRUE); return TRUE; }
 
 USER32_API HWND SetFocus(HWND hwnd)
 {
@@ -105,7 +110,7 @@ USER32_API HANDLE GetKeyboardLayout(DWORD thread)
     return (HANDLE)(UINT_PTR)0x04090409;
 }
 
-extern void SetLastError(DWORD error);
+__declspec(dllimport) void SetLastError(DWORD error);
 
 USER32_API HANDLE ActivateKeyboardLayout(HANDLE layout, UINT flags)
 {
@@ -125,7 +130,7 @@ __declspec(dllimport) UINT64 NtUserSetWinEventHook(DWORD first, DWORD last,
     HINSTANCE module, const void *module_name, SV_WINEVENTPROC callback,
     DWORD process, DWORD thread, DWORD flags);
 __declspec(dllimport) UINT64 NtUserUnhookWinEvent(HANDLE hook);
-extern void SetLastError(DWORD error);
+__declspec(dllimport) void SetLastError(DWORD error);
 
 USER32_API HANDLE SetWinEventHook(DWORD first, DWORD last, HINSTANCE module,
     SV_WINEVENTPROC callback, DWORD process, DWORD thread, DWORD flags)

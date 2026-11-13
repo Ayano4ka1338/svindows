@@ -45,6 +45,7 @@ static POBJECT_TYPE g_job_type;
 void PsInitializeJobObjects(void)
 {
     g_job_type = ObCreateObjectType("Job", NULL);
+    SeConfigureType(g_job_type, 0x20004u, 0x2001Bu, 0x120000u, 0x1F003Fu);
     if (!g_job_type)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "Job object type");
     g_job_type->UnlinkNameOnLastHandle = TRUE;

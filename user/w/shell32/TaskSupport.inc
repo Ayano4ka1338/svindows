@@ -1,18 +1,3 @@
-__declspec(dllexport) HRESULT SHParseDisplayName(const WCHAR *name, void *context,
-    void **pidl, unsigned attributes, unsigned *result_attributes)
-{
-    (void)name; (void)context; (void)attributes;
-    if (!pidl) return (HRESULT)0x80070057u;
-    *pidl = 0;
-    if (result_attributes) *result_attributes = 0;
-    return (HRESULT)0x80004001u; /* No shell namespace provider. */
-}
-__declspec(dllexport) HRESULT SHOpenFolderAndSelectItems(const void *folder,
-    unsigned count, const void *items, DWORD flags)
-{
-    (void)folder; (void)count; (void)items; (void)flags;
-    return (HRESULT)0x80004001u; /* No Explorer folder window. */
-}
 __declspec(dllexport) HICON DuplicateIcon(HANDLE instance, HICON icon)
 {
     (void)instance; (void)icon;

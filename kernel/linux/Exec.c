@@ -246,8 +246,8 @@ static UINT64 linux_exec_windows(PKTHREAD thread, PKPROCESS process,
     }
     *old_memory = process->LinuxContext->Memory;
 
-    char old_environment[sizeof(process->Environment)];
-    memcpy(old_environment, process->Environment, sizeof(old_environment));
+    PS_ENVIRONMENT_SNAPSHOT old_environment;
+    PsCaptureProcessEnvironment(process, &old_environment);
     const char *windows_environment[LINUX_EXEC_VECTOR_MAX];
     char windows_path[512];
     BOOLEAN path_converted = FALSE;
@@ -262,6 +262,7 @@ static UINT64 linux_exec_windows(PKTHREAD thread, PKPROCESS process,
     NTSTATUS env_status = PsSetProcessEnvironment(process,
         windows_environment, capture->Envc);
     if (!NT_SUCCESS(env_status)) {
+        PsReleaseEnvironmentSnapshot(&old_environment);
         ExFreePool(old_memory);
         for (UINT32 i = 0; i < 3; i++)
             if (standard[i]) ObCloseHandle(standard[i]);
@@ -301,8 +302,7 @@ static UINT64 linux_exec_windows(PKTHREAD thread, PKPROCESS process,
         memcpy(process->ImagePath, old_path, sizeof(old_path));
         memcpy((char *)(ULONG_PTR)process->Name, old_name,
                sizeof(old_name));
-        memcpy(process->Environment, old_environment,
-               sizeof(old_environment));
+        PsRestoreProcessEnvironment(process, &old_environment);
         for (UINT32 i = 0; i < 3; i++)
             if (standard[i]) ObCloseHandle(standard[i]);
         if (created_loader) {
@@ -343,6 +343,7 @@ static UINT64 linux_exec_windows(PKTHREAD thread, PKPROCESS process,
     LinuxReleaseFramebufferOwner(old_memory);
     MmDestroyAddressSpace(old_root);
     ExFreePool(old_memory);
+    PsReleaseEnvironmentSnapshot(&old_environment);
     return 0;
 }
 
@@ -407,10 +408,11 @@ UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp)
         return LinuxError(LINUX_ENOMEM);
     }
     *old_memory = process->LinuxContext->Memory;
-    char old_environment[sizeof(process->Environment)];
-    memcpy(old_environment, process->Environment, sizeof(old_environment));
+    PS_ENVIRONMENT_SNAPSHOT old_environment;
+    PsCaptureProcessEnvironment(process, &old_environment);
     status = PsSetProcessEnvironment(process, capture->Env, capture->Envc);
     if (!NT_SUCCESS(status)) {
+        PsReleaseEnvironmentSnapshot(&old_environment);
         ExFreePool(old_memory);
         ExFreePool(image);
         ExFreePool(capture);
@@ -421,8 +423,7 @@ UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp)
     UINT64 old_root = process->DirectoryTableBase;
     UINT64 new_root = MmCreateAddressSpace();
     if (new_root == MM_INVALID_PHYS) {
-        memcpy(process->Environment, old_environment,
-               sizeof(old_environment));
+        PsRestoreProcessEnvironment(process, &old_environment);
         ExFreePool(old_memory);
         ExFreePool(image);
         ExFreePool(capture);
@@ -442,8 +443,7 @@ UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp)
         MmSwitchAddressSpace(old_root);
         MmDestroyAddressSpace(new_root);
         process->LinuxContext->Memory = *old_memory;
-        memcpy(process->Environment, old_environment,
-               sizeof(old_environment));
+        PsRestoreProcessEnvironment(process, &old_environment);
         memcpy(process->ImagePath, old_path, sizeof(process->ImagePath));
         ExFreePool(old_memory);
         return LinuxError(status == STATUS_NO_MEMORY ? LINUX_ENOMEM : 8);
@@ -458,6 +458,7 @@ UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp)
     LinuxReleaseFramebufferOwner(old_memory);
     MmDestroyAddressSpace(old_root);
     ExFreePool(old_memory);
+    PsReleaseEnvironmentSnapshot(&old_environment);
     thread->UserRip = entry;
     thread->UserRsp = stack;
     thread->UserFsBase = 0;

@@ -36,6 +36,15 @@ UINT32 LinuxPollDescriptor(PKPROCESS process, UINT32 fd)
         return LinuxVtPoll(process, fd);
     if (entry->Kind == LINUX_FD_PTY)
         return LinuxPtyPoll(process, fd);
+    if (entry->Kind == LINUX_FD_CONSOLE) {
+        BOOLEAN available = FALSE;
+        UINT32 ready = entry->Mode != 0 ? LINUX_POLLOUT : 0;
+        if (entry->Mode != 1 &&
+            NT_SUCCESS(IoHandleInputAvailableKernel(entry->Handle, &available)) &&
+            available)
+            ready |= LINUX_POLLIN;
+        return ready;
+    }
     if (entry->Kind == LINUX_FD_FRAMEBUFFER)
         return LINUX_POLLIN | LINUX_POLLOUT;
     if (entry->Kind == LINUX_FD_DIRECTORY)

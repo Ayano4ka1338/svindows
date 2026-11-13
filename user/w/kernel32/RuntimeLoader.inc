@@ -311,6 +311,9 @@ __declspec(dllexport) FARPROC GetProcAddress(HANDLE module, const char *name)
 
 __declspec(dllexport) HANDLE GetStdHandle(DWORD which)
 {
+    if(which!=(DWORD)-10&&which!=(DWORD)-11&&which!=(DWORD)-12) {
+        SetLastError(87);return NT_INVALID_HANDLE;
+    }
     PEB *peb = NtCurrentPeb();
     if (peb) {
         BYTE *params = (BYTE *)peb->ProcessParameters;
@@ -319,7 +322,7 @@ __declspec(dllexport) HANDLE GetStdHandle(DWORD which)
             if (which == (DWORD)-10) inherited = *(HANDLE *)(params + 0x20);
             else if (which == (DWORD)-11) inherited = *(HANDLE *)(params + 0x28);
             else if (which == (DWORD)-12) inherited = *(HANDLE *)(params + 0x30);
-            if (inherited) return inherited;
+            return inherited;
         }
     }
     static HANDLE g_std_console;
@@ -334,18 +337,28 @@ static int wide_ieq(const WCHAR *a, const WCHAR *b);
 __declspec(dllexport) HANDLE OpenConsoleW(const WCHAR *name, DWORD access,
                                           BOOL inherit, DWORD disposition)
 {
-    (void)inherit; /* Namespace file handles are not inheritable yet. */
     if (!name || disposition != 3 ||
         (!wide_ieq(name, L"CONIN$") && !wide_ieq(name, L"CONOUT$"))) {
         SetLastError(87); /* ERROR_INVALID_PARAMETER */
         return NT_INVALID_HANDLE;
     }
-    return nt_open_w(L"\\Device\\Console", access, 3, disposition, 0);
+    extern NTSTATUS SvNtConsoleManage(DWORD,ULONGLONG,ULONGLONG,ULONGLONG,ULONGLONG *);
+    __declspec(dllexport) BOOL SetHandleInformation(HANDLE,DWORD,DWORD);
+    __declspec(dllexport) BOOL CloseHandle(HANDLE);
+    ULONGLONG value=0;
+    NTSTATUS status=SvNtConsoleManage(wide_ieq(name,L"CONIN$")?3:4,0,access,0,&value);
+    HANDLE handle;
+    if(NT_SUCCESS(status))handle=(HANDLE)value;
+    else if(status==(NTSTATUS)0xc0000008u)handle=nt_open_w(L"\\Device\\Console", access,3,disposition,0);
+    else {SetLastError(ntstatus_to_win32(status));return NT_INVALID_HANDLE;}
+    if(handle!=NT_INVALID_HANDLE&&inherit&&!SetHandleInformation(handle,1,1)){CloseHandle(handle);return NT_INVALID_HANDLE;}
+    return handle;
 }
 
+static unsigned int console_codepage(BOOL input);
 __declspec(dllexport) unsigned int GetConsoleOutputCP(void)
 {
-    return 437; /* The console uses the system OEM code page. */
+    return console_codepage(0);
 }
 
 __declspec(dllexport) BOOL GetConsoleMode(HANDLE console, DWORD *mode)
@@ -491,30 +504,11 @@ __declspec(dllexport) BOOL WriteConsoleW(HANDLE console, const WCHAR *text,
                                          DWORD char_count, DWORD *written,
                                          LPVOID reserved)
 {
-    char bytes[256];
-    DWORD done = 0;
-    (void)reserved;
-
-    if (!text) {
-        SetLastError(87); /* ERROR_INVALID_PARAMETER */
-        return 0;
-    }
-
-    while (done < char_count) {
-        DWORD count = char_count - done;
-        DWORD byte_count;
-        if (count > sizeof(bytes)) count = sizeof(bytes);
-        for (byte_count = 0; byte_count < count; byte_count++) {
-            WCHAR c = text[done + byte_count];
-            bytes[byte_count] = c <= 0x7f ? (char)c : '?';
-        }
-        if (!WriteFile(console, bytes, byte_count, 0, 0)) {
-            if (written) *written = done;
-            return 0;
-        }
-        done += count;
-    }
-    if (written) *written = done;
+    if(reserved){SetLastError(87);if(written)*written=0;return 0;}
+    ULONGLONG done=0;
+    NTSTATUS status=NtConsoleControlSimple(console,15,(ULONGLONG)text,char_count,0,&done);
+    if(written)*written=(DWORD)done;
+    if(!NT_SUCCESS(status)){SetLastError(ntstatus_to_win32(status));return 0;}
     return 1;
 }
 
@@ -814,33 +808,39 @@ static DWORD BaseThreadStart(THREAD_INFO *info)
     return code;
 }
 
-__declspec(dllexport) HANDLE CreateThread(LPVOID sa, ULONGLONG stack_size,
-                                          LPTHREAD_START_ROUTINE start,
-                                          LPVOID param, DWORD flags, DWORD *tid)
+extern NTSTATUS NtQueryInformationThread(HANDLE, DWORD, void *, DWORD, DWORD *);
+__declspec(dllexport) DWORD GetThreadId(HANDLE thread)
 {
-    (void)sa; (void)stack_size; (void)tid;
-    if (flags & ~4u) {
-        SetLastError(87);
-        return 0;
-    }
-    THREAD_INFO *info = (THREAD_INFO *)nt_alloc(sizeof(THREAD_INFO));
-    if (!info)
-        return 0;
-    info->Start = start;
-    info->Param = param;
+    struct { NTSTATUS Exit; DWORD Padding; ULONGLONG Teb,Process,Thread,Affinity; LONG Priority,BasePriority; } info;
+    NTSTATUS status=NtQueryInformationThread(thread,0,&info,sizeof(info),0);
+    if(!NT_SUCCESS(status)){SetLastError(ntstatus_to_win32(status));return 0;}
+    return (DWORD)info.Thread;
+}
 
-    HANDLE h = 0;
-    NTSTATUS status = NtCreateThreadEx(&h, 0, 0, NT_INVALID_HANDLE,
-                                       (void *)BaseThreadStart, info,
-                                       (flags & 4u) ? 1u : 0u, 0, 0, 0, 0);
-    if (!NT_SUCCESS(status)) {
-        void *base = info;
-        ULONGLONG size = 0;
-        NtFreeVirtualMemory(NT_INVALID_HANDLE, &base, &size, 0x8000);
-        SetLastError(ntstatus_to_win32(status));
-        return 0;
+__declspec(dllexport) HANDLE CreateThread(LPVOID sa, ULONGLONG stack_size,
+    LPTHREAD_START_ROUTINE start, LPVOID param, DWORD flags, DWORD *tid)
+{
+    if (!start || (flags & ~(4u|0x10000u))) {SetLastError(87);return 0;}
+    OBJECT_ATTRIBUTES attributes={0};attributes.Length=sizeof(attributes);
+    if(sa){
+        const BYTE *security=sa;
+        if(*(const DWORD *)security!=24){SetLastError(87);return 0;}
+        attributes.SecurityDescriptor=*(void *const *)(security+8);
+        if(*(const DWORD *)(security+16)) attributes.Attributes=2;
     }
-    return h;
+    THREAD_INFO *info=(THREAD_INFO *)nt_alloc(sizeof(THREAD_INFO));
+    if(!info) return 0;
+    info->Start=start;info->Param=param;
+    HANDLE handle=0;
+    NTSTATUS status=NtCreateThreadEx(&handle,0x1FFFFFu,sa?&attributes:0,NT_INVALID_HANDLE,
+        (void *)BaseThreadStart,info,(flags&4u)?1u:0u,0,
+        (flags&0x10000u)?0:stack_size,(flags&0x10000u)?stack_size:0,0);
+    if(!NT_SUCCESS(status)){
+        void *base=info;ULONGLONG size=0;NtFreeVirtualMemory(NT_INVALID_HANDLE,&base,&size,0x8000);
+        SetLastError(ntstatus_to_win32(status));return 0;
+    }
+    if(tid) *tid=GetThreadId(handle);
+    return handle;
 }
 
 __declspec(dllexport) DWORD SuspendThread(HANDLE thread)

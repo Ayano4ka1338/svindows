@@ -17,13 +17,6 @@ NTSTATUS NtDeleteFile(const void *attributes)
     return status;
 }
 
-NTSTATUS NtQuerySecurityObject(HANDLE object, ULONG information,
-    void *descriptor, ULONG length, ULONG *required)
-{
-    (void)object; (void)information; (void)descriptor; (void)length;
-    if (required) *required = 0;
-    return STATUS_NOT_IMPLEMENTED;
-}
 NTSTATUS RtlAdjustPrivilege(ULONG privilege, BYTE enable, BYTE thread, BYTE *previous)
 {
     (void)privilege; (void)enable; (void)thread; (void)previous;

@@ -23,12 +23,12 @@ NTSTATUS RtlpEnsureBufferSize(ULONG flags, RTL_BUFFER_LOCAL *buffer,
 {
     if (!buffer || (flags & ~1u)) return STATUS_INVALID_PARAMETER;
     if (required <= buffer->Size) return STATUS_SUCCESS;
-    BYTE *replacement = RtlAllocateHeap(0, 0, required);
+    BYTE *replacement = RtlAllocateHeap(rtl_process_heap(), 0, required);
     if (!replacement) return STATUS_NO_MEMORY;
     if (!(flags & 1u) && buffer->Buffer)
         memcpy(replacement, buffer->Buffer, buffer->Size);
     if (buffer->Buffer && buffer->Buffer != buffer->StaticBuffer)
-        RtlFreeHeap(0, 0, buffer->Buffer);
+        RtlFreeHeap(rtl_process_heap(), 0, buffer->Buffer);
     buffer->Buffer = replacement;
     buffer->Size = required;
     buffer->ReservedForAllocatedSize = required;
@@ -112,7 +112,7 @@ NTSTATUS RtlNtPathNameToDosPathName(ULONG flags,
 
     SIZE_T result_length = length - skip + extra;
     if (result_length > 0x7ffe) return STATUS_INVALID_PARAMETER;
-    WCHAR *replacement = RtlAllocateHeap(0, 0,
+    WCHAR *replacement = RtlAllocateHeap(rtl_process_heap(), 0,
                                           (result_length + 1) * sizeof(WCHAR));
     if (!replacement) return STATUS_NO_MEMORY;
     SIZE_T out = 0;
@@ -140,7 +140,7 @@ NTSTATUS RtlNtPathNameToDosPathName(ULONG flags,
         BYTE *old = path->ByteBuffer.Buffer;
         if (old && old != path->ByteBuffer.StaticBuffer &&
             old == (BYTE *)destination)
-            RtlFreeHeap(0, 0, old);
+            RtlFreeHeap(rtl_process_heap(), 0, old);
         destination = replacement;
         path->ByteBuffer.Buffer = (BYTE *)destination;
         path->ByteBuffer.Size = bytes;
@@ -148,7 +148,7 @@ NTSTATUS RtlNtPathNameToDosPathName(ULONG flags,
         path->String.MaximumLength = (WORD)bytes;
     } else {
         memcpy(destination, replacement, bytes);
-        RtlFreeHeap(0, 0, replacement);
+        RtlFreeHeap(rtl_process_heap(), 0, replacement);
     }
     path->String.Buffer = destination;
     path->String.Length = (WORD)(out * sizeof(WCHAR));
@@ -200,7 +200,7 @@ NTSTATUS RtlDosPathNameToNtPathName_U_WithStatus(const WCHAR *dos,
     SIZE_T extra = 4 + (unc ? 4 : dos[0] == '\\' && !skip ? 2 : 0);
     SIZE_T units = extra + length - skip;
     if (units > 0x7ffe) return STATUS_INVALID_PARAMETER;
-    WCHAR *out = RtlAllocateHeap(0, 0, (units + 1) * sizeof(WCHAR));
+    WCHAR *out = RtlAllocateHeap(rtl_process_heap(), 0, (units + 1) * sizeof(WCHAR));
     if (!out) return STATUS_NO_MEMORY;
     SIZE_T pos = 0;
     for (SIZE_T i = 0; i < 4; i++) out[pos++] = nt_prefix[i];

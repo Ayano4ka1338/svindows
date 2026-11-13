@@ -27,6 +27,8 @@ POBJECT_TYPE ObCreateObjectType(const char *name, OB_DELETE_METHOD del)
     memset(type, 0, sizeof(*type));
     type->Name = name;
     type->DeleteProcedure = del;
+    type->GenericMapping = (SE_GENERIC_MAPPING){0x20000u,0xE0000u,0x120000u,0x1FFFFFu};
+    type->ValidAccessMask = 0x1FFFFFu;
     InsertTailList(&g_type_list, &type->TypeListEntry);
 
     KeLog("[ob]   registered object type '%s'\n", name);
@@ -49,6 +51,10 @@ NTSTATUS ObCreateObject(POBJECT_TYPE type, SIZE_T body_size, POBJECT *out_object
     header->Type = type;
     header->Name = NULL;
     header->ParentDirectory = NULL;
+    PKTHREAD creator = KeGetCurrentThread();
+    ULONG rid = creator && creator->Process ? creator->Process->SecurityUserRid : 0;
+    NTSTATUS status = SeCreateDefaultDescriptor(rid, &header->SecurityDescriptor);
+    if (!NT_SUCCESS(status)) { ExFreePool(header); return status; }
 
     type->TotalObjects++;
 
@@ -75,6 +81,7 @@ static void ObpDeleteObject(POBJECT_HEADER header)
 
     if (type->DeleteProcedure)
         type->DeleteProcedure(ObObjectFromHeader(header));
+    SeDereferenceDescriptor(header->SecurityDescriptor);
 
     if (type->TotalObjects)
         type->TotalObjects--;

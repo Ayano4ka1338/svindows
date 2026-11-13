@@ -13,13 +13,14 @@
 #define SE_GROUP_INTEGRITY 0x00000020u
 #define SE_GROUP_INTEGRITY_ENABLED 0x00000040u
 
-typedef struct { ULONG UserRid; } PS_TOKEN;
+typedef struct { ULONG UserRid, SessionId; } PS_TOKEN;
 typedef struct { PVOID Sid; ULONG Attributes; ULONG Pad; } SID_ATTRIBUTES;
 static POBJECT_TYPE g_token_type;
 
 void PsInitializeTokens(void)
 {
     g_token_type = ObCreateObjectType("Token", NULL);
+    SeConfigureType(g_token_type, 0x20008u, 0x201E0u, 0x20004u, 0xF01FFu);
 }
 
 UINT64 NtOpenProcessToken(UINT64 *a)
@@ -51,6 +52,7 @@ UINT64 NtOpenProcessToken(UINT64 *a)
     NTSTATUS st = ObCreateObject(g_token_type, sizeof(PS_TOKEN), &object);
     if (NT_SUCCESS(st)) {
         ((PS_TOKEN *)object)->UserRid = process->SecurityUserRid;
+        ((PS_TOKEN *)object)->SessionId = process->WindowsSessionId;
         st = ObCreateHandle(object, (ACCESS_MASK)a[1], out);
         ObDereferenceObject(object);
     }
@@ -150,7 +152,7 @@ UINT64 NtQueryInformationToken(UINT64 *a)
         label->Attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
         write_sid(buffer + 16, 16, 1, medium);
     } else if (cls == 8 || cls == 12 || cls == 18) {
-        *(ULONG *)buffer = 1; /* primary, interactive session, default elevation */
+        *(ULONG *)buffer = cls == 12 ? ((PS_TOKEN *)object)->SessionId : 1;
     }
     ObDereferenceObject(object);
     return (UINT64)STATUS_SUCCESS;

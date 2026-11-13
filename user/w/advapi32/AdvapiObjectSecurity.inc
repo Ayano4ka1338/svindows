@@ -1,6 +1,24 @@
 /* The object manager does not store or enforce per-object ACLs yet.
  * Report the unavailable operation instead of returning an invented ACL. */
 #define SECURITY_NOT_SUPPORTED 50u
+extern NTSTATUS NtQuerySecurityObject(HANDLE,DWORD,void *,DWORD,DWORD *);
+extern NTSTATUS NtSetSecurityObject(HANDLE,DWORD,const void *);
+
+__declspec(dllexport) BOOL_K GetKernelObjectSecurity(HANDLE object,DWORD information,
+    void *descriptor,DWORD bytes,DWORD *needed)
+{
+    if(!needed){SetLastError(87);return 0;}
+    NTSTATUS status=NtQuerySecurityObject(object,information,descriptor,bytes,needed);
+    if(!NT_SUCCESS(status)){SetLastError(RtlNtStatusToDosError(status));return 0;}
+    return 1;
+}
+__declspec(dllexport) BOOL_K SetKernelObjectSecurity(HANDLE object,DWORD information,const void *descriptor)
+{
+    if(!descriptor){SetLastError(87);return 0;}
+    NTSTATUS status=NtSetSecurityObject(object,information,descriptor);
+    if(!NT_SUCCESS(status)){SetLastError(RtlNtStatusToDosError(status));return 0;}
+    return 1;
+}
 
 __declspec(dllexport) DWORD GetSecurityInfo(HANDLE object, DWORD object_type,
     DWORD information, void **owner, void **group, void **dacl, void **sacl,

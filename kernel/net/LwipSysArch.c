@@ -107,10 +107,8 @@ err_t sys_mutex_new(sys_mutex_t *mutex)
     struct _SV_LWIP_MUTEX *object = ExAllocatePoolWithTag(
         NonPagedPool, sizeof(*object), SV_LWIP_TAG_MTX);
     if (!object) { *mutex = NULL; return ERR_MEM; }
-    /* lwIP mutex storage is pool memory, not an Object Manager object.
-     * KMUTANT acquire/release currently owns an OB reference and therefore
-     * must not be embedded in this allocation. A binary semaphore provides
-     * the required non-recursive mutex semantics without object refcounts. */
+    /* lwIP asks for a non-recursive mutex. A binary semaphore provides that
+     * contract directly; KMUTANT deliberately retains recursive NT semantics. */
     KeInitializeSemaphore(&object->Semaphore, 1, 1);
     *mutex = object;
     return ERR_OK;

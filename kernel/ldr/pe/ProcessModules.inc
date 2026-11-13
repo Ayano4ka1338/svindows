@@ -89,7 +89,7 @@ void LdrBuildProcessModuleList(struct _PEB *peb_opaque, UINT64 ldr_va,
     ldr_sync_module_list();
 
     peb->Ldr = ldr;
-    KeLog("[ldr]  PEB->Ldr ready @ %p\n", (void *)ldr);
+    KeTrace("[ldr]  PEB->Ldr ready @ %p\n", (void *)ldr);
 }
 
 /* Load a DLL by name at runtime and link it into PEB->Ldr, returning its load
@@ -146,7 +146,7 @@ void LdrSeedCrtCommandLine(UINT64 ansi_va, UINT64 wide_va)
         *(UINT64 *)acmdln = ansi_va;
     if (wcmdln && MmProbeForWrite(wcmdln, sizeof(UINT64)))
         *(UINT64 *)wcmdln = wide_va;
-    KeLog("[ldr]  msvcrt CRT command line seeded (_acmdln %p -> %p, "
+    KeTrace("[ldr]  msvcrt CRT command line seeded (_acmdln %p -> %p, "
           "_wcmdln %p -> %p)\n", (void *)acmdln, (void *)ansi_va,
           (void *)wcmdln, (void *)wide_va);
 }
@@ -369,7 +369,7 @@ static void LdrpAppendInitDfs(int index, UINT8 *state, LDR_INIT_BLOCK *block)
     block->Entries[n].ModuleBase = g_loaded[index].Base;
     block->Entries[n].EntryPoint =
         g_loaded[index].Base + nt->OptionalHeader.AddressOfEntryPoint;
-    KeLog("[ldr]  init[%lu] %s entry %p\n", (unsigned long)n,
+    KeTrace("[ldr]  init[%lu] %s entry %p\n", (unsigned long)n,
           g_loaded[index].Name, (void *)block->Entries[n].EntryPoint);
 }
 
@@ -412,7 +412,7 @@ static NTSTATUS LdrpBuildInitBlock(UINT64 executable_entry,
         UINT64 t = block->TlsCallbackCount++;
         block->TlsCallbacks[t].ModuleBase = module->ModuleBase;
         block->TlsCallbacks[t].CallbackArray = module->AddressOfCallBacks;
-        KeLog("[ldr]  tls callback module %p array %p\n",
+        KeTrace("[ldr]  tls callback module %p array %p\n",
               (void *)module->ModuleBase, (void *)module->AddressOfCallBacks);
     }
 
@@ -422,27 +422,18 @@ static NTSTATUS LdrpBuildInitBlock(UINT64 executable_entry,
         return STATUS_ENTRYPOINT_NOT_FOUND;
     *bootstrap_entry = thunk;
     *bootstrap_arg = LDR_INIT_BLOCK_VA;
-    KeLog("[ldr]  process bootstrap %p: %lu DLL entry points, final %p\n",
+    KeTrace("[ldr]  process bootstrap %p: %lu DLL entry points, final %p\n",
           (void *)thunk, (unsigned long)block->Count,
           (void *)executable_entry);
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
-                           UINT64 *base_out, UINT64 *arg_out)
+NTSTATUS LdrLoadExecutableImage(const char *filename, const void *image,
+                                SIZE_T image_size, UINT64 *entry_out,
+                                UINT64 *base_out, UINT64 *arg_out)
 {
-    void *buf;
-    SIZE_T size;
-    NTSTATUS status = FatLoadFile(filename, &buf, &size, NULL);
-    if (!NT_SUCCESS(status)) {
-        KeLog("[ldr]  cannot read '%s': status 0x%08x\n", filename,
-              (unsigned)status);
-        return status;
-    }
-
     UINT64 base;
-    status = LdrpMapImage(buf, size, &base);
-    ExFreePool(buf);
+    NTSTATUS status = LdrpMapImage(image, image_size, &base);
     if (!NT_SUCCESS(status)) {
         KeLog("[ldr]  '%s' is not a supported PE32+ x64 image "
               "(status 0x%08x)\n", filename, (unsigned)status);
@@ -450,7 +441,7 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
     }
 
     PIMAGE_NT_HEADERS64 nt = nt_headers(base);
-    KeLog("[ldr]  exe base=%p entry_rva=0x%x size=0x%x sections=%u\n",
+    KeTrace("[ldr]  exe base=%p entry_rva=0x%x size=0x%x sections=%u\n",
           (void *)base, nt->OptionalHeader.AddressOfEntryPoint,
           nt->OptionalHeader.SizeOfImage, nt->FileHeader.NumberOfSections);
 
@@ -470,6 +461,11 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    /* PE creation runs inside a syscall whose interrupt flag is masked. The
+     * image is now private and registered, so this is a safe cooperative
+     * scheduling point before recursive import loading begins. */
+    KeYield();
+
     status = LdrResolveImports(base);
     if (!NT_SUCCESS(status))
         return status;
@@ -486,6 +482,23 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
         return status;
     if (base_out)
         *base_out = base;
-    KeLog("[ldr]  executable ready; bootstrap at %p\n", (void *)*entry_out);
+    KeTrace("[ldr]  executable ready; bootstrap at %p\n", (void *)*entry_out);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
+                           UINT64 *base_out, UINT64 *arg_out)
+{
+    void *image = NULL;
+    SIZE_T image_size = 0;
+    NTSTATUS status = FatLoadFile(filename, &image, &image_size, NULL);
+    if (!NT_SUCCESS(status)) {
+        KeLog("[ldr]  cannot read '%s': status 0x%08x\n", filename,
+              (unsigned)status);
+        return status;
+    }
+    status = LdrLoadExecutableImage(filename, image, image_size, entry_out,
+                                    base_out, arg_out);
+    ExFreePool(image);
+    return status;
 }

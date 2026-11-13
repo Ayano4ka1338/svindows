@@ -83,7 +83,8 @@ UINT64 LinuxPread(PKPROCESS process, UINT64 fd, UINT64 buffer,
     HANDLE handle;
     if (!LinuxFileHandle(process, fd, FALSE, &handle))
         return LinuxError(LINUX_EBADF);
-    if (process->LinuxContext->Files[fd].Kind == LINUX_FD_PTY)
+    if (process->LinuxContext->Files[fd].Kind == LINUX_FD_PTY ||
+        process->LinuxContext->Files[fd].Kind == LINUX_FD_CONSOLE)
         return LinuxError(LINUX_ESPIPE);
     if (length > LINUX_IO_MAX || (INT64)offset < 0)
         return LinuxError(LINUX_EINVAL);

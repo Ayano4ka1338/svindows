@@ -8,6 +8,8 @@
 #include <svindows/Trace.h>
 #include <svindows/Mm.h>
 #include <svindows/Io.h>
+#include <svindows/Console.h>
+#include <svindows/Se.h>
 #include <svindows/Ps.h>
 #include <svindows/Ldr.h>
 #include <svindows/Cm.h>
@@ -173,10 +175,13 @@ static UINT64 NtDisplayNumber(UINT64 *a)
     return 0;
 }
 
-/* User RSP of the syscall currently being serviced (set by the dispatcher
- * before the service runs; used for diagnostics such as stack walks). */
-static UINT64 g_service_user_rsp;
-static UINT64 g_service_number;
+/* User RSP of the syscall currently being serviced. Process creation can
+ * yield, so this state belongs to KTHREAD rather than one global slot. */
+static UINT64 KiServiceUserRsp(void)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    return thread ? thread->ServiceUserRsp : 0;
+}
 
 /* Walk the caller's user stack and annotate values that land inside loaded
  * module images (return addresses), giving a poor-man's exit backtrace. */
@@ -272,8 +277,9 @@ static UINT64 NtTraceCall(UINT64 *a)
                            ? names[tag]
                            : "?";
     UINT64 ret = 0;
-    if (MmProbeForRead(g_service_user_rsp, sizeof(UINT64)))
-        ret = *(volatile UINT64 *)g_service_user_rsp;
+    UINT64 user_rsp = KiServiceUserRsp();
+    if (MmProbeForRead(user_rsp, sizeof(UINT64)))
+        ret = *(volatile UINT64 *)user_rsp;
     const char *mod = 0, *symbol = 0;
     UINT64 base = 0, symbol_address = 0;
     if (ret && LdrDescribeUserSymbol(ret, &mod, &base, &symbol,
@@ -339,7 +345,7 @@ static UINT64 NtTerminateThread(UINT64 *a)
 {
     KeLog("[user] NtTerminateThread(handle=%p, status=0x%08lx); ending user thread\n",
           (void *)a[0], (unsigned long)(UINT32)a[1]);
-    KiDumpUserStack(g_service_user_rsp);
+    KiDumpUserStack(KiServiceUserRsp());
     PKTHREAD thread = KeGetCurrentThread();
     if (thread && (!a[0] || a[0] == ~(UINT64)1)) {
         thread->ExitStatus = (NTSTATUS)a[1];
@@ -871,12 +877,34 @@ static UINT64 NtLoadLibrary(UINT64 *a)
 typedef UINT64 (*KI_SERVICE)(UINT64 *args);
 
 
+#include <svindows/Session.h>
+static UINT64 W32kShellSystemParametersInfo(UINT64 *arguments);
+static void W32kShellWorkArea(INT32 *area);
+static void W32kNotifyShell(UINT16 slot, UINT32 event);
+static void W32kClipboardCleanupThread(PKTHREAD thread);
+static void W32kClipboardWindowDestroyed(UINT64 window);
+static BOOLEAN W32kFocusHiddenDesktop(UINT16 slot);
+static BOOLEAN W32kActivateHiddenDesktop(UINT16 slot);
+static UINT16 W32kCurrentFocusWindow(void);
+static UINT16 W32kCurrentActiveWindow(void);
+static BOOLEAN W32kDispatchHotkey(UINT8 key, BOOLEAN release, BOOLEAN repeat);
+static void W32kPhysicalKey(UINT8 key, UINT8 side, BOOLEAN release);
+static void W32kPhysicalMouse(UINT8 buttons);
+static void W32kSyncKeyState(UINT16 slot);
+static void W32kHotkeyCleanupThread(PKTHREAD thread);
+static void W32kHotkeyWindowDestroyed(UINT64 window);
+static UINT8 g_physical_keys[256], g_recent_keys[256];
 #include "../win32k/UserMessages.inc"
+#include "../win32k/InputIdle.inc"
 #include "../win32k/UserWindows.inc"
+#include "../win32k/Session.inc"
 #include "../win32k/UserCallbacks.inc"
 /* Last: the window manager needs the window records, the message queue and the
  * callback machinery of the parts above. */
 #include "../win32k/UserScreen.inc"
+#include "../win32k/Shell.inc"
+#include "../win32k/Clipboard.inc"
+#include "../win32k/Hotkey.inc"
 #include "../win32k/XorgMirror.inc"
 
 static UINT64 SvNtQueryGuiResources(UINT64 *a)
@@ -986,6 +1014,7 @@ static KI_SERVICE KiServiceTable[SVINDOWS_MAX_SYSCALL];
 #define SN_NtMapViewOfSection 0x120
 #define SN_NtUnmapViewOfSection 0x121
 #define SN_NtOpenFile 0x122
+#define SN_NtQueryInformationThread 0x123
 
 /*
  * Window-manager services this kernel needs and the numbering above does not
@@ -1183,6 +1212,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtMapViewOfSection] = NtMapViewOfSection;
     KiServiceTable[SN_NtUnmapViewOfSection] = NtUnmapViewOfSection;
     KiServiceTable[SN_NtOpenFile] = NtOpenFile;
+    KiServiceTable[SN_NtQueryInformationThread] = NtQueryInformationThread;
     KiServiceTable[SN_NtTraceCall] = NtTraceCall;
     KiServiceTable[SN_NtCreateUserProcessSimple] = NtCreateUserProcessSimple;
     KiServiceTable[SN_NtFileSystemControlSimple] = NtFileSystemControlSimple;
@@ -1311,6 +1341,33 @@ void KiInitializeServiceTable(void)
     KiServiceTable[0x1F1F] = NtTerminateProcess;
     KiServiceTable[0x1F20] = SvNtUserGetWindowStyle;
     KiServiceTable[0x1F21] = SvNtProcessorCounterQuery;
+    KiServiceTable[0x1F25] = SvNtUserUploadCursor;
+    KiServiceTable[0x1F26] = SvNtUserShowCursor;
+    KiServiceTable[0x1F27] = SvNtUserQueryCursor;
+    KiServiceTable[0x1F28] = SvNtUserClipCursor;
+    KiServiceTable[0x1F29] = SvNtUserDoubleClickTime;
+    KiServiceTable[0x1F2A] = SvNtGdiQueryBitmap;
+    KiServiceTable[0x1F2B] = SvNtGdiReadBitmap;
+    KiServiceTable[0x1F30] = SvNtUserCreateWindowStation;
+    KiServiceTable[0x1F31] = SvNtUserCreateDesktop;
+    KiServiceTable[0x1F32] = SvNtUserEnumDesktops;
+    KiServiceTable[0x1F33] = SvNtUserEnumWindowStations;
+    KiServiceTable[0x1F34] = SvNtUserSwitchDesktop;
+    KiServiceTable[0x1F35] = SvNtUserSetObjectInformation;
+    KiServiceTable[0x1F36] = SvNtHandleInformation;
+    KiServiceTable[0x1F37] = NtQuerySecurityObject;
+    KiServiceTable[0x1F38] = NtSetSecurityObject;
+    KiServiceTable[0x1F3E] = SvNtCreateUserProcessEx;
+    KiServiceTable[0x1F3F] = SvNtSetProcessEnvironment;
+    KiServiceTable[0x1F40] = SvNtUserClipboardControl;
+    KiServiceTable[0x1F41] = SvNtUserWriteClipboard;
+    KiServiceTable[0x1F42] = SvNtUserReadClipboard;
+    KiServiceTable[0x1F44] = SvNtUserShellControl;
+    KiServiceTable[0x1F45] = SvNtUserWindowLookup;
+    KiServiceTable[0x1F47] = SvNtUserHotkeyControl;
+    KiServiceTable[0x1F49] = SvNtUserWaitForInputIdle;
+    KiServiceTable[0x1F60] = SvNtConsoleManage;
+    KiServiceTable[0x1F61] = SvNtConsoleHost;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =
@@ -1380,8 +1437,10 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
         };
         return LinuxSystemCallDispatch(number, linux_args);
     }
-    g_service_user_rsp = user_rsp;
-    g_service_number = number;
+    if (current) {
+        current->ServiceUserRsp = user_rsp;
+        current->ServiceNumber = number;
+    }
     static UINT8 seen_services[SVINDOWS_MAX_SYSCALL];
     if (number < SVINDOWS_MAX_SYSCALL && number >= 0x1000 &&
         !seen_services[number]) {

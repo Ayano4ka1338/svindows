@@ -14,6 +14,7 @@
 #include <svindows/Ps.h>
 #include <svindows/Rtl.h>
 #include <nt/Ntstatus.h>
+#include "ConsoleCodepage.inc"
 
 #define CONSOLE_INPUT_CAPACITY 256
 #define CONSOLE_CURSOR_BLINK_TICKS 50 /* 500 ms at the 100-Hz system clock */
@@ -238,6 +239,7 @@ static void con_put_character(char character, BOOLEAN write_stream)
 
 void ConInitialize(void)
 {
+    ConInitializeHostedConsoles();
     KeInitializeEvent(&g_console_input_ready, TRUE, FALSE);
     g_console.Width = GfxAvailable() ? GfxFramebuffer.Width / GFX_FONT_W : 80;
     g_console.Height = GfxAvailable() ? GfxFramebuffer.Height / GFX_FONT_H : 25;
@@ -458,6 +460,31 @@ NTSTATUS ConControl(UINT32 operation, UINT64 argument1, UINT64 argument2,
     NTSTATUS status = STATUS_SUCCESS;
     if (result) *result = 0;
     switch (operation) {
+    case SV_CONSOLE_CONTROL_GET_INPUT_CP:
+    case SV_CONSOLE_CONTROL_GET_OUTPUT_CP:
+        if(result)*result=437;
+        break;
+    case SV_CONSOLE_CONTROL_SET_INPUT_CP:
+    case SV_CONSOLE_CONTROL_SET_OUTPUT_CP:
+        if(argument1!=437)status=STATUS_INVALID_PARAMETER;
+        break;
+    case SV_CONSOLE_CONTROL_WRITE_WIDE: {
+        const UINT16 *wide=(const UINT16 *)argument1;
+        for(SIZE_T i=0;i<(SIZE_T)argument2;i++) {
+            char byte='?';
+            for(UINT32 j=0;j<256;j++)if(con_cp437[j]==wide[i]){byte=(char)j;break;}
+            ConWrite(&byte,1);
+        }
+        if(result)*result=argument2;
+        break;
+    }
+    case SV_CONSOLE_CONTROL_FILL_WIDE: {
+        char byte='?';for(UINT32 i=0;i<256;i++)if(con_cp437[i]==(UINT16)argument1){byte=(char)i;break;}
+        return ConControl(ConsoleControlFillCharacter,(UINT8)byte,argument2,argument3,result);
+    }
+    case SV_CONSOLE_CONTROL_FLUSH_INPUT:
+        ConFlushInput();
+        break;
     case ConsoleControlGetMode:
         if (result) *result = g_console.InputMode | g_console.OutputMode;
         break;

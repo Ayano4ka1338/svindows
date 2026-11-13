@@ -14,6 +14,7 @@ static UINT8 child_image[4096];
 static BOOLEAN provide_file;
 
 PKTHREAD KeGetCurrentThread(void) { return NULL; }
+void KeYield(void) {}
 int KeLog(const char *fmt, ...) { (void)fmt; return 0; }
 NORETURN void KeBugCheck(ULONG code, const char *message)
 { (void)code; (void)message; abort(); }

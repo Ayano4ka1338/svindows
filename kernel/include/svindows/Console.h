@@ -8,6 +8,18 @@
 #define _SVINDOWS_CONSOLE_H_
 
 #include <nt/Ntdef.h>
+#include <abi/ConsoleHost.h>
+struct _KPROCESS;
+void ConInitializeHostedConsoles(void);
+NTSTATUS ConInitializeProcessConsole(struct _KPROCESS *process,
+    struct _KPROCESS *parent, ULONG creation_flags, ULONG image_subsystem,
+    HANDLE input, HANDLE output, HANDLE error);
+void ConProcessConsolePublished(struct _KPROCESS *process);
+NTSTATUS ConWaitForProcessConsoleHost(struct _KPROCESS *process);
+void ConDetachProcessConsole(struct _KPROCESS *process);
+NTSTATUS ConOpenProcessConsole(BOOLEAN input, HANDLE *out);
+UINT64 SvNtConsoleManage(UINT64 *arguments);
+UINT64 SvNtConsoleHost(UINT64 *arguments);
 
 #define CON_INPUT_PROCESSED 0x0001u
 #define CON_INPUT_LINE      0x0002u

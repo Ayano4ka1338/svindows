@@ -679,8 +679,11 @@ static int read_line(const char *prompt, char *out, unsigned capacity)
                 SetConsoleInputMode(g_in, g_original_input_mode & 0x0007u);
             return 2;
         }
-        if (c == '\r') continue;
-        if (c == '\n') {
+        /* With native line input disabled, a console Enter key is one CR
+         * record, not the cooked CR/LF pair. Redirected/cooked streams still
+         * ignore CR and terminate on LF so CRLF input is consumed once. */
+        if (c == '\r' && !restore_input_mode) continue;
+        if (c == '\r' || c == '\n') {
             out[n] = 0;
             redraw_line(prompt, out, n, n, &rendered);
             write_s("\r\n");

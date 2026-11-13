@@ -15,14 +15,14 @@
 
 #define USER_OBJECT_SLOTS \
     (PROCESS_USER_OBJECT_ARENA_SIZE / 0x200)
+_Static_assert(USER_OBJECT_SLOTS <= PROCESS_USER_HANDLE_COUNT,
+               "USER table commit does not cover the object arena");
 
 typedef struct _USER_OBJECT_OWNER {
     PKPROCESS Process;
     UINT16 Generation;
     UINT8 Type;
     BOOLEAN Icon, SharedIcon;
-    BOOLEAN Closeable;
-    UINT16 DesktopReferences;
 } USER_OBJECT_OWNER;
 static USER_OBJECT_OWNER g_user_objects[USER_OBJECT_SLOTS];
 
@@ -48,8 +48,6 @@ static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
     object->Generation++;
     object->Type = type;
     object->Icon = object->SharedIcon = FALSE;
-    object->Closeable = FALSE;
-    object->DesktopReferences = 0;
     object->Process = caller->Process;
     UINT64 head = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)index * 0x200;
     memset((void *)head, 0, 0x200);
@@ -58,7 +56,7 @@ static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
     *(UINT32 *)(head + 8) = 1;         /* lock count */
 
     MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
-                   PROCESS_USER_SHARED_TABLE_SIZE, TRUE);
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE, TRUE);
     UINT8 *entry = (UINT8 *)(PROCESS_USER_SHARED_TABLE_VA +
                              (UINT64)index * 24);
     *(UINT64 *)(entry + 0) = head;     /* Object   */
@@ -67,144 +65,23 @@ static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
     entry[17] = 0;                     /* Flags    */
     *(UINT16 *)(entry + 18) = object->Generation;
     MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
-                   PROCESS_USER_SHARED_TABLE_SIZE, FALSE);
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE, FALSE);
 
     if (head_out)
         *head_out = head;
     return handle;
 }
 
-#define USER_TYPE_WINDOWSTATION 18
-#define USER_TYPE_DESKTOP       19
-
-static UINT64 KiUserDesktopHandle(PKPROCESS process)
-{
-    for (UINT16 i = 200; i < USER_OBJECT_SLOTS; ++i) {
-        USER_OBJECT_OWNER *object = &g_user_objects[i];
-        if (object->Process == process && object->Type == USER_TYPE_DESKTOP &&
-            !object->Closeable)
-            return ((UINT64)object->Generation << 16) | i;
-    }
-    PKTHREAD caller = KeGetCurrentThread();
-    if (!caller || caller->Process != process)
-        return 0;
-    return KiUserAllocateObject(USER_TYPE_DESKTOP, NULL);
-}
-
-/* The GUI session has one interactive desktop. Threads in a process inherit
- * that desktop, so expose a real USER handle owned by the querying process. */
-static UINT64 NtUserGetThreadDesktop(UINT64 *a)
-{
-    PKTHREAD caller = KeGetCurrentThread();
-    if (!caller || !caller->Process)
-        return 0;
-    PKTHREAD target = a[0] ? KeLookupThreadById((ULONG)a[0]) : caller;
-    if (!target || target->Process != caller->Process)
-        return 0;
-    return target->UserDesktop ? target->UserDesktop :
-                                KiUserDesktopHandle(caller->Process);
-}
-
-static void KiUserDesktopError(UINT32 error)
-{
-    PKTHREAD caller = KeGetCurrentThread();
-    if (caller && caller->UserGsBase &&
-        MmProbeForWrite(caller->UserGsBase + 0x68, sizeof(error)))
-        *(UINT32 *)(caller->UserGsBase + 0x68) = error;
-}
-
-static USER_OBJECT_OWNER *KiUserDesktopObject(UINT64 handle, UINT8 type)
-{
-    PKTHREAD caller = KeGetCurrentThread();
-    UINT16 slot = (UINT16)handle;
-    if (!caller || slot < 200 || slot >= USER_OBJECT_SLOTS) return NULL;
-    USER_OBJECT_OWNER *object = &g_user_objects[slot];
-    if (object->Process != caller->Process || object->Type != type ||
-        handle != (((UINT64)object->Generation << 16) | slot)) return NULL;
-    return object;
-}
-
-static UINT64 NtUserSetThreadDesktop(UINT64 *a)
-{
-    PKTHREAD caller = KeGetCurrentThread();
-    USER_OBJECT_OWNER *object = KiUserDesktopObject(a[0], USER_TYPE_DESKTOP);
-    if (!object) { KiUserDesktopError(6); return 0; }
-    /* All threads already belong to the sole interactive desktop. Accept
-     * reassociation with that desktop, never a stale or foreign USER handle. */
-    if (caller->UserDesktop != a[0]) {
-        USER_OBJECT_OWNER *old = KiUserDesktopObject(caller->UserDesktop,
-                                                    USER_TYPE_DESKTOP);
-        if (old && old->DesktopReferences) old->DesktopReferences--;
-        caller->UserDesktop = a[0];
-        object->DesktopReferences++;
-    }
-    return 1;
-}
-
-static UINT64 NtUserGetProcessWindowStation(UINT64 *a)
-{
-    (void)a;
-    PKTHREAD caller = KeGetCurrentThread();
-    if (!caller || !caller->Process) return 0;
-    for (UINT16 i = 200; i < USER_OBJECT_SLOTS; ++i) {
-        USER_OBJECT_OWNER *object = &g_user_objects[i];
-        if (object->Process == caller->Process &&
-            object->Type == USER_TYPE_WINDOWSTATION)
-            return ((UINT64)object->Generation << 16) | i;
-    }
-    return KiUserAllocateObject(USER_TYPE_WINDOWSTATION, NULL);
-}
-
-/* Our client ABI captures the name directly; only WinSta0\\Default exists. */
-static UINT64 NtUserOpenDesktop(UINT64 *a)
-{
-    WCHAR name[16] = {0};
-    static const WCHAR default_name[] = {'D','e','f','a','u','l','t',0};
-    KiCopyWideFromUser((const WCHAR *)a[0], name, 16);
-    if (!KiWideEqual(name, default_name)) { KiUserDesktopError(2); return 0; }
-    if (a[1] || a[2]) { KiUserDesktopError(50); return 0; }
-    UINT64 handle = KiUserAllocateObject(USER_TYPE_DESKTOP, NULL);
-    if (handle) g_user_objects[(UINT16)handle].Closeable = TRUE;
-    else KiUserDesktopError(8);
-    return handle;
-}
-
-static UINT64 NtUserCloseDesktop(UINT64 *a)
-{
-    USER_OBJECT_OWNER *object = KiUserDesktopObject(a[0], USER_TYPE_DESKTOP);
-    if (!object || !object->Closeable) { KiUserDesktopError(6); return 0; }
-    if (object->DesktopReferences) { KiUserDesktopError(170); return 0; }
-    (void)W32kClearSharedHandle(object->Process, FALSE, (UINT16)a[0]);
-    object->Process = NULL;
-    object->Type = 0;
-    return 1;
-}
-
-static UINT64 SvNtUserEnumDesktopWindows(UINT64 *a)
-{
-    if (a[0] && !KiUserDesktopObject(a[0], USER_TYPE_DESKTOP)) return (UINT64)-1;
-    if (a[2] < 128 || !MmProbeForWrite(a[1], 128 * sizeof(UINT64)))
-        return (UINT64)-1;
-    UINT64 *windows = (UINT64 *)a[1];
-    UINT32 count = 0;
-    for (UINT16 slot = 1; slot < 128; ++slot)
-        if (g_window_owner[slot] && !W32kWindowParent(slot))
-            windows[count++] = KiUserWindowHandle(slot);
-    return count;
-}
-
 /*
  * HCURSOR NtUserFindExistingCursorIcon(PUNICODE_STRING module,
  *                                      PUNICODE_STRING resource, void *param)
  *
- * win32k caches cursors and icons per (module, resource) and hands the existing
- * object back; in a real session the stock IDC_* cursors are always already
- * there. Answering NULL sends USER32 down a creation path that this build only
- * reaches through NtUserSetCursorIconData, so the cache is what makes
- * LoadCursorW succeed -- and a program that checks its cursor (notepad does,
- * before it will register its window class) stops dead without it.
+ * Shared stock cursors have real kernel rasters. Resource/custom cursors are
+ * decoded by USER32 and captured into immutable kernel-owned image storage.
+ * The cache budget matches the object table so adding a second application
+ * cannot exhaust a smaller, unrelated cursor-only table.
  */
-#define USER_CURSOR_CACHE 32
+#define USER_CURSOR_CACHE USER_OBJECT_SLOTS
 typedef struct _CURSOR_KEY {
     UINT64 Module, Resource, Handle;
     PKPROCESS Process;
@@ -212,30 +89,39 @@ typedef struct _CURSOR_KEY {
 } CURSOR_KEY;
 static CURSOR_KEY g_cursor_cache[USER_CURSOR_CACHE];
 
+#include "UserCursor.inc"
+
 static UINT64 KiUserLoadCursorIcon(UINT64 module, UINT64 key,
                                    BOOLEAN icon, BOOLEAN shared)
 {
     PKTHREAD caller = KeGetCurrentThread();
     if (!caller || !caller->Process) return 0;
+    UINT64 flags = KiIrqSave();
     CURSOR_KEY *empty = NULL;
     if (shared) {
         for (UINT32 i = 0; i < USER_CURSOR_CACHE; i++) {
             CURSOR_KEY *cache = &g_cursor_cache[i];
             if (cache->Process == caller->Process && cache->Module == module &&
-                cache->Resource == key && cache->Icon == icon)
-                return cache->Handle;
+                cache->Resource == key && cache->Icon == icon) {
+                UINT64 existing = cache->Handle;
+                KiIrqRestore(flags);
+                return existing;
+            }
             if (!cache->Process && !empty) empty = cache;
         }
-        if (!empty) return 0;
+        if (!empty) { KiIrqRestore(flags); return 0; }
     }
 
     UINT64 handle = KiUserAllocateObject(USER_TYPE_CURSOR, NULL);
-    if (!handle) return 0;
+    if (!handle) { KiIrqRestore(flags); return 0; }
     USER_OBJECT_OWNER *object = &g_user_objects[(UINT16)handle];
     object->Icon = icon;
-    object->SharedIcon = icon && shared;
+    object->SharedIcon = shared;
+    if (!icon && !module && key)
+        g_cursor_images[(UINT16)handle] = W32kStockCursor(key);
     if (empty)
         *empty = (CURSOR_KEY){module, key, handle, caller->Process, icon};
+    KiIrqRestore(flags);
     return handle;
 }
 
@@ -244,6 +130,7 @@ static UINT64 NtUserFindExistingCursorIcon(UINT64 *a)
     UINT64 resource = a[1], key = resource;
     if (resource && MmProbeForRead(resource, 16))
         key = *(volatile UINT64 *)(resource + 8); /* UNICODE_STRING.Buffer */
+    if (a[0] || !W32kStockCursor(key)) return 0;
     return KiUserLoadCursorIcon(a[0], key, FALSE, TRUE);
 }
 
@@ -275,17 +162,26 @@ static UINT64 KiUserDestroyObject(UINT64 handle, UINT8 type)
     USER_OBJECT_OWNER *object = &g_user_objects[index];
     if (object->Process != caller->Process || object->Type != type ||
         handle != (((UINT64)object->Generation << 16) | index)) return 0;
+    if (type == USER_TYPE_CURSOR) W32kCursorDestroy(handle);
     object->Process = NULL;
     object->Type = 0;
     for (UINT32 i = 0; i < USER_CURSOR_CACHE; i++)
         if (g_cursor_cache[i].Handle == handle) memset(&g_cursor_cache[i], 0, sizeof(CURSOR_KEY));
-    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE, TRUE);
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE, TRUE);
     memset((void *)(PROCESS_USER_SHARED_TABLE_VA + (UINT64)index * 24), 0, 24);
-    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE, FALSE);
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE, FALSE);
     return 1;
 }
 static UINT64 NtUserDestroyAcceleratorTable(UINT64 *a) { return KiUserDestroyObject(a[0], USER_TYPE_ACCEL); }
-static UINT64 NtUserDestroyCursor(UINT64 *a) { return KiUserDestroyObject(a[0], USER_TYPE_CURSOR); }
+static UINT64 NtUserDestroyCursor(UINT64 *a)
+{
+    PKTHREAD caller = KeGetCurrentThread();
+    USER_OBJECT_OWNER *object = caller ? W32kCursorObject(a[0], caller->Process) : NULL;
+    if (!object || object->Icon || object->SharedIcon) return 0;
+    return KiUserDestroyObject(a[0], USER_TYPE_CURSOR);
+}
 static UINT64 SvNtUserDestroyIcon(UINT64 *a)
 {
     UINT16 index = (UINT16)a[0];
@@ -294,8 +190,6 @@ static UINT64 SvNtUserDestroyIcon(UINT64 *a)
         return 0;
     return KiUserDestroyObject(a[0], USER_TYPE_CURSOR);
 }
-
-static UINT64 NtUserSetCursor(UINT64 *a) { return 0; }
 
 /* PAINTSTRUCT on x64: HDC hdc (0), BOOL fErase (8), RECT rcPaint (12..28),
  * BOOL fRestore (28), BOOL fIncUpdate (32), BYTE rgbReserved[32] (36). */
@@ -788,6 +682,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     for (index = 1; index < 128; index++)
         if (!g_window_owner[index] && g_window_generation[index] != 65535) break;
     if (index == 128) return 0;
+    if (!NT_SUCCESS(W32kBindWindowDesktop(index, creator, (UINT16)a[9]))) return 0;
     UINT16 generation = ++g_window_generation[index];
     UINT64 hwnd = ((UINT64)generation << 16) | index;
     USER_HANDLE_ENTRY_LOCAL *entries =
@@ -800,14 +695,16 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     window->LockCount = 1;
     /* Flip the shared handle table writable for the kernel-side fill; ring 3
      * normally sees it read-only (see process environment setup). */
-    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE,
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE,
                    TRUE);
     entries[index].Object = (UINT64)window;
     entries[index].Owner = 0;
     entries[index].Type = 1; /* TYPE_WINDOW */
     entries[index].Flags = 0;
     entries[index].Generation = generation;
-    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE,
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE,
                    FALSE);
 
     g_window_owner[index] = creator ? creator->ThreadId : 0;
@@ -850,6 +747,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
                                 (INT32)a[6], (UINT32)a[7], (UINT32)a[8], kind);
         static const WCHAR static_class[]={'S','T','A','T','I','C',0};
         W32kScreenSetStatic(index,KiWideEqual(cls->Name,static_class));
+        W32kScreenSetExStyle(index, (UINT32)a[0]);
         if (a[9]) W32kScreenSetParent(index, (UINT16)a[9]);
     }
     g_window_menus[index] = ((UINT32)a[4] & 0x40000000u) ? 0 : a[10];
@@ -868,88 +766,6 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     }
 
     return hwnd;
-}
-
-/* RegisterHotKey(hwnd, id, modifiers, vk): the shell registers its Win-key
- * hotkeys during taskbar bring-up. No hotkey table exists yet, so nothing is
- * delivered, but the registration itself must succeed -- FALSE is a failure
- * the shell treats as a broken window station. */
-static UINT64 NtUserRegisterHotKey(UINT64 *a)
-{
-    KeLog("[user] RegisterHotKey(hwnd=%p, id=%ld, mods=0x%lx, vk=0x%lx)\n",
-          (void *)a[0], (long)(INT32)a[1], (unsigned long)(UINT32)a[2],
-          (unsigned long)(UINT32)a[3]);
-    return 1;
-}
-
-static UINT64 NtUserGetObjectInformation(UINT64 *a)
-{
-    /* (handle, index, pvInfo, cbInfo, pcbNeeded) -- GetUserObjectInformationW
-     * reads the name/type/flags of the window station or desktop. Callers
-     * compare the desktop name against L"Default" and expect wide strings; a
-     * NULL pvInfo with pcbNeeded is the documented length-query pattern. */
-    UINT64 handle = a[0];
-    UINT32 index = (UINT32)a[1];
-    WCHAR *out = (WCHAR *)a[2];
-    UINT32 size = (UINT32)a[3];
-    UINT32 *needed = (UINT32 *)a[4];
-
-    KeLog("[user] GetObjectInformation(h=%lu, idx=%lu, out=%p, size=%lu)\n",
-          (unsigned long)(UINT32)handle, (unsigned long)index, (void *)out,
-          (unsigned long)size);
-    UINT16 object_index = (UINT16)handle;
-    UINT16 object_generation = (UINT16)(handle >> 16);
-    PKTHREAD caller = KeGetCurrentThread();
-    if (!caller || object_index < 200 || object_index >= USER_OBJECT_SLOTS ||
-        !object_generation ||
-        g_user_objects[object_index].Process != caller->Process ||
-        g_user_objects[object_index].Generation != object_generation ||
-        (g_user_objects[object_index].Type != USER_TYPE_DESKTOP &&
-         g_user_objects[object_index].Type != USER_TYPE_WINDOWSTATION))
-        return 0;
-    BOOLEAN station = g_user_objects[object_index].Type == USER_TYPE_WINDOWSTATION;
-    static const WCHAR name_desktop[] = {'D','e','f','a','u','l','t',0};
-    static const WCHAR name_station[] = {'W','i','n','S','t','a','0',0};
-    static const WCHAR type_desktop[] = {'D','e','s','k','t','o','p',0};
-    static const WCHAR type_station[] =
-        {'W','i','n','d','o','w','S','t','a','t','i','o','n',0};
-    const WCHAR *text = 0;
-    UINT32 bytes = 0;
-    UINT32 flags_word = 0; /* for UOI_FLAGS */
-
-    if (index == 1) { /* UOI_FLAGS: USEROBJECTFLAGS {inherit, reserved, flags} */
-        bytes = 12;
-        flags_word = station ? 1 : 0; /* WSF_VISIBLE; desktop has no flags. */
-    } else if (index == 2) { /* UOI_NAME */
-        text = station ? name_station : name_desktop;
-        for (UINT32 i = 0; text[i]; i++)
-            bytes += sizeof(WCHAR);
-        bytes += sizeof(WCHAR);
-    } else if (index == 3) { /* UOI_TYPE */
-        text = station ? type_station : type_desktop;
-        for (UINT32 i = 0; text[i]; i++)
-            bytes += sizeof(WCHAR);
-        bytes += sizeof(WCHAR);
-    } else {
-        return 0;
-    }
-
-    if (needed && MmProbeForWrite((UINT64)needed, sizeof(UINT32)))
-        *needed = bytes;
-    if (!out)
-        return 1; /* length query */
-    if (size < bytes || !MmProbeForWrite((UINT64)out, bytes))
-        return 0;
-    if (index == 1) {
-        UINT32 *words = (UINT32 *)out;
-        words[0] = 0;
-        words[1] = 0;
-        words[2] = flags_word;
-    } else {
-        for (UINT32 i = 0; i * sizeof(WCHAR) < bytes; i++)
-            out[i] = text[i];
-    }
-    return 1;
 }
 
 static UINT64 NtUserChangeWindowMessageFilterEx(UINT64 *a)
@@ -987,6 +803,7 @@ static void KiUserDropOneWindow(UINT16 slot)
     UINT32 owner = g_window_owner[slot];
     (void)W32kClearSharedHandle(g_window_process[slot], FALSE, slot);
     W32kScreenWindowDestroyed(slot);
+    W32kUnbindWindowDesktop(slot);
     W32kCleanupWindowDc(g_window_process[slot], handle);
     for (UINT32 i = 0; i < USER_MAX_PROPS; i++)
         if (g_user_props[i].Used && g_user_props[i].Hwnd == handle)
@@ -1030,16 +847,14 @@ static void KiUserDropWindow(UINT16 root)
 
 void W32kCleanupThreadUser(PKTHREAD thread)
 {
+    W32kHotkeyCleanupThread(thread);
+    W32kClipboardCleanupThread(thread);
+    W32kCursorCleanupThread(thread);
     KiReleaseCallbackResources(thread);
-    if (thread->UserDesktop) {
-        USER_OBJECT_OWNER *object = &g_user_objects[(UINT16)thread->UserDesktop];
-        if (object->Process == thread->Process && object->DesktopReferences)
-            object->DesktopReferences--;
-        thread->UserDesktop = 0;
-    }
     for (UINT16 slot = 1; slot < 128; slot++)
         if (g_window_owner[slot] == thread->ThreadId && g_window_process[slot] == thread->Process)
             KiUserDropWindow(slot);
+    W32kCleanupThreadSession(thread);
     for (UINT32 i = 0; i < USER_MAX_THREAD_QUEUES; i++) {
         USER_MSG_QUEUE *queue = &g_user_thread_queues[i];
         if (queue->ThreadId != thread->ThreadId || queue->Process != thread->Process) continue;
@@ -1053,6 +868,10 @@ void W32kCleanupThreadUser(PKTHREAD thread)
 
 void W32kCleanupProcessUser(PKPROCESS process)
 {
+    W32kCursorCleanupProcess(process);
+    for (UINT16 i = 200; i < USER_OBJECT_SLOTS; ++i)
+        if (g_user_objects[i].Process == process && g_user_objects[i].Type == USER_TYPE_CURSOR)
+            W32kCursorDestroy(((UINT64)g_user_objects[i].Generation << 16) | i);
     for (UINT32 i = 0; i < USER_MAX_CLASSES; i++)
         if (g_user_classes[i].Process == process) memset(&g_user_classes[i], 0, sizeof(g_user_classes[i]));
     for (UINT32 i = 200; i < USER_OBJECT_SLOTS; i++)

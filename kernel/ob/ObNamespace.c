@@ -23,6 +23,7 @@ static void ObpDirectoryDelete(POBJECT object)
 void ObpInitializeNamespace(void)
 {
     ObpDirectoryType = ObCreateObjectType("Directory", ObpDirectoryDelete);
+    SeConfigureType(ObpDirectoryType, 0x20003u, 0x2000Cu, 0x20002u, 0xF000Fu);
 
     POBJECT root;
     if (!NT_SUCCESS(ObCreateObject(ObpDirectoryType, sizeof(OBJECT_DIRECTORY),

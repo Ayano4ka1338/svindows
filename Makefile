@@ -1,6 +1,6 @@
 CROSS   ?=
-CC      := $(CROSS)gcc
-LD      := $(CROSS)ld
+CC      := $(CROSS)/usr/bin/gcc
+LD      := $(CROSS)/usr/bin/ld
 NASM    := nasm
 HOSTCC  ?= clang
 
@@ -40,7 +40,8 @@ LIMINE_FILES := limine-bin/BOOTX64.EFI limine-bin/limine-bios-cd.bin \
 
 .DEFAULT_GOAL := all
 
-# The PE to start after boot: the command processor, the normal system shell.
+# Boot into the command processor. The native Windows session remains an
+# explicit user choice: running wininit.exe starts userinit and Explorer.
 PROGRAM ?= cmd.exe
 CMDLINE ?= $(PROGRAM)
 
@@ -105,6 +106,15 @@ MSVCRTLIB  := $(BUILD)/msvcrt.lib
 CRT0       := $(BUILD)/crt0.obj
 CMD        := $(BUILD)/cmd.exe
 CMDUTIL    := $(BUILD)/cmdutil.exe
+WININIT    := $(BUILD)/wininit.exe
+USERINIT   := $(BUILD)/userinit.exe
+EXPLORER   := $(BUILD)/explorer.exe
+CONHOST    := $(BUILD)/conhost.exe
+WININIT_PARTS := user/w/wininit/InitRuntime.c user/w/wininit/InitRuntime.h
+EXPLORER_SRC := user/w/explorer/Explorer.c user/w/explorer/Common.c \
+                user/w/explorer/Dialogs.c user/w/explorer/FileManager.c
+EXPLORER_OBJ := $(patsubst user/w/explorer/%.c,$(BUILD)/explorer_%.obj,$(EXPLORER_SRC))
+EXPLORER_HEADERS := $(wildcard user/w/explorer/*.h)
 # USER/GDI client layer: user32.dll and gdi32.dll provide Win32 graphics APIs.
 USER32     := $(BUILD)/user32.dll
 USER32LIB  := $(BUILD)/user32.lib
@@ -397,6 +407,43 @@ $(CMD): user/w/cmd/Cmd.c $(CMD_PARTS) $(CRT0) $(KERNEL32) $(NTDLL)
 	           /out:$@ $(BUILD)/cmd.obj $(CRT0) $(KERNEL32LIB) $(NTDLLLIB)
 	@echo "  PE    $@"
 
+$(BUILD)/init_runtime.obj: $(WININIT_PARTS) $(BUILD_CONFIG)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) $(NOTEPAD_INC) -c user/w/wininit/InitRuntime.c -o $@
+
+$(WININIT): user/w/wininit/Wininit.c $(WININIT_PARTS) $(BUILD)/init_runtime.obj $(CRT0) $(KERNEL32) $(ADVAPI32) $(USER32) $(MSVCRT)
+	$(CLANGWIN) $(NOTEPAD_INC) -c user/w/wininit/Wininit.c -o $(BUILD)/wininit.obj
+	$(LLDLINK) /subsystem:windows /entry:mainCRTStartup /nodefaultlib /machine:x64 \
+	    /out:$@ $(BUILD)/wininit.obj $(BUILD)/init_runtime.obj $(CRT0) \
+	    $(KERNEL32LIB) $(ADVAPI32LIB) $(USER32LIB) $(MSVCRTLIB)
+
+$(USERINIT): user/w/wininit/Userinit.c $(WININIT_PARTS) $(BUILD)/init_runtime.obj $(CRT0) $(KERNEL32) $(ADVAPI32) $(USER32) $(MSVCRT)
+	$(CLANGWIN) $(NOTEPAD_INC) -c user/w/wininit/Userinit.c -o $(BUILD)/userinit.obj
+	$(LLDLINK) /subsystem:windows /entry:mainCRTStartup /nodefaultlib /machine:x64 \
+	    /out:$@ $(BUILD)/userinit.obj $(BUILD)/init_runtime.obj $(CRT0) \
+	    $(KERNEL32LIB) $(ADVAPI32LIB) $(USER32LIB) $(MSVCRTLIB)
+
+$(BUILD)/explorer_%.obj: user/w/explorer/%.c $(EXPLORER_HEADERS) $(BUILD_CONFIG)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) $(NOTEPAD_INC) -Iuser/w/comctl32 -Wall -Wextra -c $< -o $@
+
+$(BUILD)/explorer_stack.obj: user/w/explorer/StackProbe.asm
+	@mkdir -p $(BUILD)
+	$(NASM) -f win64 $< -o $@
+
+$(EXPLORER): $(EXPLORER_OBJ) $(BUILD)/explorer_stack.obj $(USER32) $(GDI32) $(COMCTL32) $(KERNEL32) $(SHELL32) $(MSVCRT) $(ADVAPI32)
+	$(LLDLINK) /subsystem:windows /entry:WinMainCRTStartup /nodefaultlib /machine:x64 \
+	    /out:$@ $(EXPLORER_OBJ) $(BUILD)/explorer_stack.obj \
+	    $(USER32LIB) $(GDI32LIB) $(COMCTL32LIB) $(KERNEL32LIB) $(SHELL32LIB) $(MSVCRTLIB) $(ADVAPI32LIB)
+
+$(SHELL32): $(ADVAPI32)
+
+$(CONHOST): user/w/conhost/Conhost.c $(wildcard user/w/conhost/*.h) kernel/include/abi/ConsoleHost.h $(BUILD)/explorer_stack.obj $(USER32) $(GDI32) $(KERNEL32) $(SHELL32) $(MSVCRT)
+	$(CLANGWIN) $(NOTEPAD_INC) -Iuser/w/comctl32 -Wall -Wextra -c user/w/conhost/Conhost.c -o $(BUILD)/conhost.obj
+	$(LLDLINK) /subsystem:windows /entry:WinMainCRTStartup /nodefaultlib /machine:x64 \
+	    /out:$@ $(BUILD)/conhost.obj $(BUILD)/explorer_stack.obj \
+	    $(USER32LIB) $(GDI32LIB) $(KERNEL32LIB) $(SHELL32LIB) $(MSVCRTLIB) $(NTDLLLIB)
+
 # gdi32.dll: the GDI client layer over the NtGdi* services. It links ntdll only:
 # the shared GDI handle table and the DC_ATTR arena are ordinary user memory the
 # kernel publishes per process, so object bookkeeping costs no extra syscalls.
@@ -460,7 +507,7 @@ $(SHELL32): user/w/shell32/Shell32.c user/w/shell32/Shell32.def $(wildcard user/
 	$(CLANGWIN) -c user/w/shell32/Shell32.c -o $(BUILD)/shell32.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x260000000 \
 	           /def:user/w/shell32/Shell32.def /out:$@ /implib:$(SHELL32LIB) \
-	           $(BUILD)/shell32.obj $(KERNEL32LIB) $(USER32LIB)
+	           $(BUILD)/shell32.obj $(KERNEL32LIB) $(USER32LIB) $(ADVAPI32LIB)
 	@echo "  DLL   $@"
 
 $(ADVPACK): user/w/advpack/Advpack.c
@@ -550,7 +597,6 @@ $(USER32): user/w/user32/User32.c user/w/user32/User32.h $(USER32_PARTS) $(CONTR
 	           /export:GetModuleHandleW=kernel32.GetModuleHandleW \
 	           /export:LoadStringW=kernel32.LoadStringW \
 	           /export:RegisterWindowMessageW=kernel32.RegisterWindowMessageW \
-	           /export:RegisterClipboardFormatW=kernel32.RegisterWindowMessageW \
 	           $(BUILD)/user32.obj $(CONTROL_OBJ) $(UXTHEMELIB) $(GDI32LIB) $(KERNEL32LIB) $(NTDLLLIB)
 	@echo "  DLL   $@"
 
@@ -566,6 +612,9 @@ $(CMDUTIL): user/w/cmdutils/Cmdutils.c $(CRT0) $(KERNEL32)
 
 $(COMMAND_BINS): $(CMDUTIL)
 	cp $(CMDUTIL) $@
+
+# Native session programs are installed alongside the compatibility runtimes.
+$(INITRD): $(WININIT) $(USERINIT) $(EXPLORER) $(CONHOST)
 
 # FAT32 initrd holding user-space executables and Mesa's software GL runtime.
 # LLVM's llvmpipe library needs the enlarged image; default QEMU RAM remains
@@ -595,6 +644,10 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mformat -i $(INITRD) -F -v SVINDOWS ::
 	mcopy -i $(INITRD) $(CMD) ::CMD.EXE
 	mmd -i $(INITRD) ::WINDOWS ::WINDOWS/SYSTEM32
+	mcopy -i $(INITRD) $(WININIT) ::WINDOWS/SYSTEM32/WININIT.EXE
+	mcopy -i $(INITRD) $(USERINIT) ::WINDOWS/SYSTEM32/USERINIT.EXE
+	mcopy -i $(INITRD) $(CONHOST) ::WINDOWS/SYSTEM32/CONHOST.EXE
+	mcopy -i $(INITRD) $(EXPLORER) ::WINDOWS/EXPLORER.EXE
 	if [ -n "$(WINDOWS_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS_FILES) ::WINDOWS/; fi
 	mcopy -i $(INITRD) $(KERNEL32) ::WINDOWS/SYSTEM32/KERNEL32.DLL
 	mcopy -i $(INITRD) $(NTDLL) ::WINDOWS/SYSTEM32/NTDLL.DLL
@@ -697,7 +750,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	for d in var var/log var/cache var/cache/apk; do \
 	    mdir -i $(INITRD) "::$$d" >/dev/null 2>&1 || mmd -i $(INITRD) "::$$d"; \
 	done
-	if [ -n "$(IMAGE_PROGRAM)" ]; then mcopy -i $(INITRD) $(IMAGE_PROGRAM) ::$(PROGRAM); fi
+	if [ -n "$(IMAGE_PROGRAM)" ]; then mcopy -o -i $(INITRD) $(IMAGE_PROGRAM) ::$(PROGRAM); fi
 
 	@echo "  INITRD $(INITRD)"
 
@@ -768,6 +821,10 @@ run-gui:
 	$(QEMU) $(QEMUFLAGS) -cdrom build/gui/svindows.iso \
 	    -serial $(QEMU_SERIAL)
 
+.PHONY: run-console
+run-console:
+	$(MAKE) PROGRAM=cmd.exe CMDLINE=cmd.exe run
+
 # Explicit alias for testing DHCP/DNS/TCP/HTTP with the kernel's lwIP smoke
 # test. The test result is printed to the serial console during boot.
 run-net: run-gui
@@ -776,7 +833,7 @@ clean:
 	rm -rf $(BUILD)
 
 # Host checks execute the actual USER menu model and native USER/GDI code.
-.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check elapsed-time-check shell-command-line-check pe-loader-check thread-exit-check process-terminate-check icon-dib-check
+.PHONY: user-menu-check win32k-check crt-wide-conversion-check shell-path-check ip-helper-check elapsed-time-check shell-command-line-check pe-loader-check thread-exit-check process-terminate-check icon-dib-check mutant-check
 icon-dib-check:
 	@mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined tools/checks/IconDibChecks.c -o $(BUILD)/IconDibChecks
@@ -791,6 +848,13 @@ thread-exit-check:
 	@mkdir -p $(BUILD)
 	clang -O1 -g -fsanitize=address,undefined -idirafter kernel/include tools/checks/ThreadExitChecks.c -o $(BUILD)/ThreadExitChecks
 	$(BUILD)/ThreadExitChecks
+
+mutant-check:
+	@mkdir -p $(BUILD)/checks
+	clang -O1 -g -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+		-Wno-multichar -idirafter kernel/include tools/checks/MutantChecks.c \
+		-Wl,--gc-sections -o $(BUILD)/checks/MutantChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/MutantChecks
 
 pe-loader-check:
 	@mkdir -p $(BUILD)
@@ -835,6 +899,45 @@ win32k-check:
 	$(BUILD)/Win32kChecks
 
 .PHONY: common-controls-check
+WINDOWS_CHECK_FLAGS := -O1 -g -fshort-wchar -fdeclspec -Wno-ignored-attributes -fsanitize=address,undefined -pthread
+.PHONY: windows-environment-check session-check process-environment-check heap-contracts-check shell-execute-check shell-model-check list-view-scroll-check console-host-check
+windows-environment-check: session-check process-environment-check heap-contracts-check shell-execute-check shell-model-check list-view-scroll-check console-host-check win32k-check
+
+session-check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) $(WINDOWS_CHECK_FLAGS) -Wno-multichar -idirafter kernel/include tools/checks/SessionChecks.c -o $(BUILD)/checks/SessionChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/SessionChecks
+
+process-environment-check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) $(WINDOWS_CHECK_FLAGS) -Wno-multichar -idirafter kernel/include tools/checks/ProcessEnvironmentChecks.c -o $(BUILD)/checks/ProcessEnvironmentChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/ProcessEnvironmentChecks
+
+heap-contracts-check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) $(WINDOWS_CHECK_FLAGS) tools/checks/HeapContractsChecks.c -o $(BUILD)/checks/HeapContractsChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/HeapContractsChecks
+
+shell-execute-check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) $(WINDOWS_CHECK_FLAGS) tools/checks/ShellExecuteChecks.c -o $(BUILD)/checks/ShellExecuteChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/ShellExecuteChecks
+
+shell-model-check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) $(WINDOWS_CHECK_FLAGS) $(NOTEPAD_INC) -Iuser/w/comctl32 -ffunction-sections -fdata-sections tools/checks/ShellModelChecks.c -Wl,--gc-sections -o $(BUILD)/checks/ShellModelChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/ShellModelChecks
+
+list-view-scroll-check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) $(WINDOWS_CHECK_FLAGS) $(NOTEPAD_INC) -Iuser/w/comctl32 -ffunction-sections -fdata-sections tools/checks/ListViewScrollChecks.c -Wl,--gc-sections -o $(BUILD)/checks/ListViewScrollChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/ListViewScrollChecks
+
+console-host-check:
+	@mkdir -p $(BUILD)/checks
+	$(HOSTCC) $(WINDOWS_CHECK_FLAGS) -Wno-multichar -idirafter kernel/include tools/checks/ConsoleHostChecks.c -o $(BUILD)/checks/ConsoleHostChecks
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD)/checks/ConsoleHostChecks
+
 common-controls-check:
 	mkdir -p $(BUILD)
 	clang -O1 -g -fshort-wchar -ffunction-sections -fdata-sections -fsanitize=address,undefined $(NOTEPAD_INC) tools/checks/DateTimeChecks.c -Wl,--gc-sections -o $(BUILD)/DateTimeChecks

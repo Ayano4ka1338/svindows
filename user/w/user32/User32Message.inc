@@ -96,6 +96,23 @@ USER32_API LRESULT CallWindowProcW(WNDPROC proc, HWND hwnd, UINT message,
 USER32_API LRESULT DefWindowProcW(HWND hwnd, UINT message, WPARAM wparam,
                                   LPARAM lparam)
 {
+    if (message == WM_SETCURSOR) {
+        HWND parent = GetParent(hwnd);
+        if (parent && SendMessageW(parent,message,wparam,lparam)) return 1;
+        UINT hit = LOWORD(lparam);
+        HCURSOR cursor = hit == 1 ? (HCURSOR)(UINT_PTR)GetClassLongPtrW(hwnd,-12) :
+            LoadCursorW(NULL,MAKEINTRESOURCEW(
+                hit==10||hit==11?32644:hit==12||hit==15?32645:
+                hit==13||hit==17?32642:hit==14||hit==16?32643:32512));
+        if (!cursor) return 0;
+        SetCursor(cursor); return 1;
+    }
+    if (message == WM_RBUTTONUP) {
+        POINT point;
+        if (GetCursorPos(&point)) return SendMessageW(hwnd,0x007b,(WPARAM)hwnd,
+                                                       MAKELONG(point.x,point.y));
+        return 0;
+    }
     if(message==WM_SYSCOMMAND&&((wparam&0xfff0)==0xf090||(wparam&0xfff0)==0xf100)&&sv_user_menu_command(hwnd,wparam,lparam))return 0;
     if (message == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
     if (message == WM_SYSCOMMAND) {
@@ -144,6 +161,8 @@ USER32_API LRESULT DefWindowProcW(HWND hwnd, UINT message, WPARAM wparam,
 USER32_API LRESULT DefWindowProcA(HWND hwnd, UINT message, WPARAM wparam,
                                   LPARAM lparam)
 {
+    if (message == WM_SETCURSOR || message == WM_RBUTTONUP)
+        return DefWindowProcW(hwnd,message,wparam,lparam);
     return NtdllDefWindowProc_A(hwnd, message, wparam, lparam);
 }
 

@@ -178,6 +178,8 @@ static UINT64 gdi_create_bitmap(INT32 width, INT32 height)
     object->u.Bitmap.Surface.Height = (UINT32)height;
     object->u.Bitmap.Surface.Stride = (UINT32)width;
     object->u.Bitmap.Surface.IsScreen = FALSE;
+    object->u.Bitmap.Planes = 1;
+    object->u.Bitmap.BitsPixel = 32;
     return handle;
 }
 
@@ -190,7 +192,70 @@ UINT64 NtGdiCreateCompatibleBitmap(UINT64 *a)
 /* HBITMAP NtGdiCreateBitmap(int cx, int cy, UINT planes, UINT bpp, void *bits) */
 UINT64 NtGdiCreateBitmap(UINT64 *a)
 {
-    return gdi_create_bitmap((INT32)a[0], (INT32)a[1]);
+    INT32 width=(INT32)a[0],height=(INT32)a[1];
+    UINT32 planes=(UINT32)a[2],bits=(UINT32)a[3];
+    if(width<=0||height<=0||width>4096||height>2160||planes!=1||
+       (bits!=1&&bits!=4&&bits!=8&&bits!=16&&bits!=24&&bits!=32)) return 0;
+    SIZE_T stride=(((SIZE_T)width*bits+15)/16)*2;
+    if(a[4]&&!MmProbeForRead(a[4],stride*(UINT32)height)) return 0;
+    UINT64 handle=gdi_create_bitmap(width,height);
+    W32K_OBJECT *object=gdi_object(handle,GDI_TYPE_BITMAP);
+    if(!object) return 0;
+    object->u.Bitmap.Planes=1; object->u.Bitmap.BitsPixel=(UINT16)bits;
+    if(a[4]) {
+        static const UINT32 palette[16]={0x000000,0x800000,0x008000,0x808000,
+            0x000080,0x800080,0x008080,0xc0c0c0,0x808080,0xff0000,0x00ff00,
+            0xffff00,0x0000ff,0xff00ff,0x00ffff,0xffffff};
+        UINT32 channel_mask=(255u<<GfxFramebuffer.RedShift)|(255u<<GfxFramebuffer.GreenShift)|
+                             (255u<<GfxFramebuffer.BlueShift);
+        UINT32 alpha_shift=24;
+        for(UINT32 shift=0;shift<=24;shift+=8) if(!(channel_mask&(255u<<shift))) { alpha_shift=shift; break; }
+        const UINT8 *source=(const UINT8*)a[4];
+        for(INT32 y=0;y<height;++y) for(INT32 x=0;x<width;++x) {
+            const UINT8 *line=source+(SIZE_T)y*stride; UINT32 rgb=0,alpha=0;
+            if(bits==1) rgb=(line[x/8]&(0x80u>>(x%8)))?0xffffffu:0;
+            else if(bits==4) rgb=palette[(line[x/2]>>(x&1?0:4))&15];
+            else if(bits==8) { UINT32 index=line[x]; rgb=index<16?palette[index]:
+                (((index>>5)*255/7)<<16)|((((index>>2)&7)*255/7)<<8)|((index&3)*255/3); }
+            else if(bits==16) { UINT32 value=line[x*2]|((UINT32)line[x*2+1]<<8);
+                rgb=(((value>>10)&31)*255/31<<16)|(((value>>5)&31)*255/31<<8)|((value&31)*255/31); }
+            else { const UINT8 *pixel=line+(SIZE_T)x*(bits/8);
+                rgb=pixel[0]|((UINT32)pixel[1]<<8)|((UINT32)pixel[2]<<16);
+                if(bits==32) alpha=pixel[3]; }
+            object->u.Bitmap.Surface.Bits[(SIZE_T)y*width+x]=
+                GfxColor((UINT8)(rgb>>16),(UINT8)(rgb>>8),(UINT8)rgb)|(alpha<<alpha_shift);
+        }
+    }
+    return handle;
+}
+
+UINT64 SvNtGdiQueryBitmap(UINT64 *a)
+{
+    W32K_OBJECT *object=gdi_object(a[0],GDI_TYPE_BITMAP);
+    if(!object||!MmProbeForWrite(a[1],4*sizeof(UINT32))) return 0;
+    UINT32 description[4]={object->u.Bitmap.Surface.Width,object->u.Bitmap.Surface.Height,
+                          object->u.Bitmap.Planes,object->u.Bitmap.BitsPixel};
+    memcpy((void*)a[1],description,sizeof(description)); return 1;
+}
+
+UINT64 SvNtGdiReadBitmap(UINT64 *a)
+{
+    W32K_OBJECT *object=gdi_object(a[0],GDI_TYPE_BITMAP);
+    if(!object) return 0;
+    W32K_SURFACE *surface=&object->u.Bitmap.Surface;
+    SIZE_T count=(SIZE_T)surface->Width*surface->Height;
+    if(a[2]<count||!MmProbeForWrite(a[1],count*sizeof(UINT32))) return 0;
+    UINT32 mask=(255u<<GfxFramebuffer.RedShift)|(255u<<GfxFramebuffer.GreenShift)|
+                (255u<<GfxFramebuffer.BlueShift),alpha_shift=24;
+    for(UINT32 shift=0;shift<=24;shift+=8) if(!(mask&(255u<<shift))) { alpha_shift=shift; break; }
+    UINT32 *out=(UINT32*)a[1];
+    for(UINT32 y=0;y<surface->Height;++y) for(UINT32 x=0;x<surface->Width;++x) {
+        UINT32 pixel=surface->Bits[(SIZE_T)y*surface->Stride+x];
+        out[(SIZE_T)y*surface->Width+x]=((pixel>>GfxFramebuffer.RedShift)&255)<<16|
+            ((pixel>>GfxFramebuffer.GreenShift)&255)<<8|((pixel>>GfxFramebuffer.BlueShift)&255)|
+            (((pixel>>alpha_shift)&255)<<24);
+    }
+    return 1;
 }
 
 /* HBITMAP NtGdiSelectBitmap(HDC, HBITMAP): binds the memory DC to the bitmap's

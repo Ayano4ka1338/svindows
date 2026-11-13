@@ -26,6 +26,8 @@ void MmFreePages(UINT64 phys, SIZE_T count)
     assert(phys && count == 1);
     released_pages += count;
 }
+void MmFreePageList(const UINT64 *pages, SIZE_T count)
+{ for (SIZE_T i = 0; i < count; ++i) MmFreePages(pages[i], 1); }
 
 static void check_thread_user_pages(void)
 {

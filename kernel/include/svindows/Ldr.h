@@ -40,6 +40,9 @@ PLDR_PROCESS_CONTEXT LdrSetThreadProcessContext(
  */
 NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
                            UINT64 *base_out, UINT64 *arg_out);
+NTSTATUS LdrLoadExecutableImage(const char *filename, const void *image,
+                                SIZE_T image_size, UINT64 *entry_out,
+                                UINT64 *base_out, UINT64 *arg_out);
 
 /* Clear the loader namespace selected by the current thread/process. */
 void LdrResetProcessContext(void);

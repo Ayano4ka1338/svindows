@@ -5,6 +5,7 @@
 typedef unsigned char  UINT8;
 typedef unsigned short UINT16;
 typedef unsigned int   UINT32;
+typedef signed int     INT32;
 typedef unsigned long long UINT64;
 typedef long long      INT64;
 
@@ -343,7 +344,10 @@ USER32_API DWORD GetSysColor(int index)
 #include "User32Input.inc"
 #include "User32Paint.inc"
 #include "User32Compat.inc"
+#include "User32Session.inc"
 #include "User32Tasks.inc"
+#include "User32Shell.inc"
+#include "User32InputIdle.inc"
 
 USER32_API int GetWindowTextLengthW(HWND hwnd)
 {

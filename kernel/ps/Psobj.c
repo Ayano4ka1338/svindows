@@ -15,6 +15,8 @@
 #include <svindows/Rtl.h>
 #include <svindows/Ldr.h>
 #include <svindows/Io.h>
+#include <svindows/AddressSpace.h>
+#include <svindows/Session.h>
 #include <nt/Ntstatus.h>
 #include <nt/Ntobject.h>
 #include <nt/Peb.h>
@@ -23,6 +25,9 @@ typedef struct _THREAD_OBJECT {
     DISPATCHER_HEADER Header;   /* signaled on thread exit */
     PKTHREAD          Thread;
     NTSTATUS          ExitStatus;
+    ULONG ProcessId, ThreadId;
+    UINT64 TebBase;
+    LONG Priority, BasePriority;
 } THREAD_OBJECT;
 
 static POBJECT_TYPE g_event_type;
@@ -30,6 +35,40 @@ static POBJECT_TYPE g_thread_type;
 static POBJECT_TYPE g_semaphore_type;
 static POBJECT_TYPE g_mutant_type;
 static struct _OBJECT_DIRECTORY *g_named_objects;
+
+NTSTATUS PsCreateThreadObject(PVOID *object_out, HANDLE *handle_out)
+{
+    if (!object_out) return STATUS_INVALID_PARAMETER;
+    POBJECT object;
+    NTSTATUS status = ObCreateObject(g_thread_type, sizeof(THREAD_OBJECT), &object);
+    if (!NT_SUCCESS(status)) return status;
+    THREAD_OBJECT *record = object;
+    record->Header.Type = ThreadObject;
+    InitializeListHead(&record->Header.WaitListHead);
+    record->ExitStatus = STATUS_PENDING;
+    if (handle_out) {
+        status = ObCreateHandle(object, GENERIC_ALL, handle_out);
+        if (!NT_SUCCESS(status)) { ObDereferenceObject(object); return status; }
+    }
+    *object_out = object;
+    return STATUS_SUCCESS;
+}
+
+void PsAttachThreadObject(PVOID object, PKTHREAD thread)
+{
+    THREAD_OBJECT *record = object;
+    record->Thread = thread;
+    record->ExitStatus = thread->ExitStatus;
+    record->ProcessId = thread->Process->ProcessId;
+    record->ThreadId = thread->ThreadId;
+    record->TebBase = thread->UserGsBase;
+    record->Priority = thread->Priority;
+    record->BasePriority = thread->Process->BasePriority;
+    ObReferenceObject(object);
+    PVOID previous = thread->TerminationObject;
+    thread->TerminationObject = &record->Header;
+    if (previous) ObDereferenceObject(previous);
+}
 
 NTSTATUS PsCaptureNamedObjectPath(POBJECT_ATTRIBUTES attributes,
                                    char *path, SIZE_T capacity)
@@ -87,6 +126,15 @@ UINT64 NtOpenThread(UINT64 *a)
         !MmProbeForRead((UINT64)id, sizeof(*id)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
     *out = NULL;
+    BOOLEAN inherit = FALSE;
+    if (a[2]) {
+        OBJECT_ATTRIBUTES attributes;
+        if (!MmProbeForRead(a[2], sizeof(attributes))) return (UINT64)STATUS_ACCESS_VIOLATION;
+        memcpy(&attributes, (void *)a[2], sizeof(attributes));
+        if (attributes.Length != sizeof(attributes) || attributes.ObjectName || attributes.RootDirectory ||
+            (attributes.Attributes & 0x200u)) return (UINT64)STATUS_INVALID_PARAMETER;
+        inherit = (attributes.Attributes & 2u) != 0;
+    }
     PKTHREAD thread = KeLookupThreadById((ULONG)(ULONG_PTR)id->Thread);
     if (!thread || (id->Process && (ULONG_PTR)id->Process !=
                     thread->Process->ProcessId))
@@ -94,7 +142,8 @@ UINT64 NtOpenThread(UINT64 *a)
 
     POBJECT object;
     BOOLEAN created = FALSE;
-    if (thread->TerminationObject) {
+    if (thread->TerminationObject &&
+        ObHeaderFromObject(thread->TerminationObject)->Type == g_thread_type) {
         object = (POBJECT)thread->TerminationObject;
     } else {
         NTSTATUS status = ObCreateObject(g_thread_type, sizeof(THREAD_OBJECT),
@@ -109,13 +158,20 @@ UINT64 NtOpenThread(UINT64 *a)
         created = TRUE;
     }
     HANDLE handle;
-    NTSTATUS status = ObCreateHandle(object, (ACCESS_MASK)a[1], &handle);
+    PKTHREAD caller = KeGetCurrentThread();
+    SE_DESCRIPTOR *descriptor = SeReferenceObjectDescriptor(object);
+    ACCESS_MASK granted = 0;
+    NTSTATUS status = SeAccessCheck(descriptor, caller->Process->SecurityUserRid, (ACCESS_MASK)a[1],
+                                    &g_thread_type->GenericMapping, &granted);
+    SeDereferenceDescriptor(descriptor);
+    if (NT_SUCCESS(status)) status = ObCreateHandle(object, granted, &handle);
     if (NT_SUCCESS(status)) {
         if (created) {
-            ObReferenceObject(object); /* owned until thread termination */
-            thread->TerminationObject = (PDISPATCHER_HEADER)object;
+            PsAttachThreadObject(object, thread);
         }
         *out = handle;
+        if (inherit) ObSetHandleAttributesInTable(caller->Process->HandleTable, handle,
+                                                   OB_HANDLE_INHERIT, OB_HANDLE_INHERIT);
     }
     if (created) ObDereferenceObject(object);
     return (UINT64)status;
@@ -240,10 +296,14 @@ void PsInitialize(void)
     PsInitializeTimerObjects();
     PsInitializeTokens();
     g_event_type = ObCreateObjectType("Event", NULL);
+    SeConfigureType(g_event_type, 0x20001u, 0x20002u, 0x120000u, 0x1F0003u);
     if (g_event_type) g_event_type->UnlinkNameOnLastHandle = TRUE;
     g_thread_type = ObCreateObjectType("Thread", NULL);
+    SeConfigureType(g_thread_type, 0x20048u, 0x20337u, 0x120000u, 0x1FFFFFu);
     g_semaphore_type = ObCreateObjectType("Semaphore", NULL);
+    SeConfigureType(g_semaphore_type, 0x20001u, 0x20002u, 0x120000u, 0x1F0003u);
     g_mutant_type = ObCreateObjectType("Mutant", NULL);
+    SeConfigureType(g_mutant_type, 0x20001u, 0x20000u, 0x120000u, 0x1F0001u);
     PsInitializeJobObjects();
     if (!NT_SUCCESS(ObCreateDirectory(ObRootDirectory, "BaseNamedObjects",
                                       &g_named_objects)))
@@ -483,7 +543,7 @@ UINT64 NtCreateMutant(UINT64 *a)
     NTSTATUS status = ObCreateObject(g_mutant_type, sizeof(KMUTANT), &object);
     if (!NT_SUCCESS(status))
         return (UINT64)status;
-    KeInitializeMutant((PKMUTANT)object, (BOOLEAN)a[3]);
+    KeInitializeMutantWithReference((PKMUTANT)object, (BOOLEAN)a[3], object);
 
     HANDLE handle;
     status = ObCreateHandle(object, GENERIC_ALL, &handle);
@@ -725,10 +785,10 @@ UINT64 NtQueryInformationProcess(UINT64 *a)
     void *buffer = (void *)a[2];
     ULONG length = (ULONG)a[3];
     ULONG *return_length = (ULONG *)a[4];
-    if (info_class != 0 && info_class != 18 && info_class != 27 &&
+    if (info_class != 0 && info_class != 18 && info_class != 24 && info_class != 27 &&
         info_class != 0x1000 && info_class != 0x1001)
         return (UINT64)STATUS_INVALID_INFO_CLASS;
-    ULONG required = info_class == 0x1001 ? sizeof(ULONG) :
+    ULONG required = info_class == 0x1001 || info_class == 24 ? sizeof(ULONG) :
                      info_class == 0x1000 ? 2 * sizeof(ULONG) :
                      info_class == 18 ? sizeof(PRIORITY_CLASS_INFO) :
                                       sizeof(PROCESS_BASIC_INFORMATION_LOCAL);
@@ -782,6 +842,11 @@ UINT64 NtQueryInformationProcess(UINT64 *a)
         return (UINT64)STATUS_SUCCESS;
     }
 
+    if (info_class == 24) {
+        *(ULONG *)buffer = process->WindowsSessionId;
+        if (referenced) ObDereferenceObject(referenced);
+        return (UINT64)STATUS_SUCCESS;
+    }
     if (info_class == 18) {
         PRIORITY_CLASS_INFO *info = buffer;
         info->Foreground = 0;
@@ -993,25 +1058,29 @@ static void unmap_user_pages(UINT64 base, SIZE_T pages)
  *   SIZE_T ZeroBits, SIZE_T StackSize, SIZE_T MaximumStackSize, PVOID AttrList)
  * The modern (Vista+) thread-creation service kernel32's CreateThread uses.
  */
-UINT64 NtCreateThreadEx(UINT64 *a)
+static NTSTATUS PspCreateThreadInAddressSpace(UINT64 *a, PKPROCESS process, PHANDLE out, SE_DESCRIPTOR *descriptor, BOOLEAN inherit)
 {
-    PHANDLE out = (PHANDLE)a[0];
     UINT64 entry = a[4], arg = a[5];
     ULONG create_flags = (ULONG)a[6];
-    PKPROCESS process = KeGetCurrentThread()->Process;
     if (create_flags & ~1u)
-        return (UINT64)STATUS_INVALID_PARAMETER;
-    if (!MmProbeForWrite((UINT64)out, sizeof(HANDLE)))
-        return (UINT64)STATUS_ACCESS_VIOLATION;
+        return STATUS_INVALID_PARAMETER;
+    if (!MmIsUserAddress(entry) || !MmProbeForRead(entry, 1) ||
+        (MmGetPageFlags(entry) & PTE_NX)) return STATUS_ACCESS_VIOLATION;
 
-    /* Stack + TEB for the new thread. */
+    /* Honor the requested reservation/commit size using the current eager
+     * MM commitment model; reservation is rounded to Windows allocation units. */
+    UINT64 reserve = a[9] ? a[9] : a[8] > THREAD_STACK_PAGES * PAGE_SIZE ? a[8] : THREAD_STACK_PAGES * PAGE_SIZE;
+    if (a[9] && a[8] > a[9]) return STATUS_INVALID_PARAMETER;
+    if (reserve > MM_USER_MAX - 0xFFFFu) return STATUS_NO_MEMORY;
+    reserve = (reserve + 0xFFFFu) & ~0xFFFFull;
+    SIZE_T stack_pages = reserve / PAGE_SIZE;
     UINT64 allocation_start = process->ThreadAllocationNext;
     UINT64 stack_base = map_user_pages(
-        process, THREAD_STACK_PAGES + PROCESS_TEB_SIZE / PAGE_SIZE);
+        process, stack_pages + PROCESS_TEB_SIZE / PAGE_SIZE);
     if (!stack_base)
-        return (UINT64)STATUS_NO_MEMORY;
-    UINT64 teb_va = stack_base + THREAD_STACK_PAGES * PAGE_SIZE;
-    UINT64 stack_top = stack_base + THREAD_STACK_PAGES * PAGE_SIZE;
+        return STATUS_NO_MEMORY;
+    UINT64 teb_va = stack_base + stack_pages * PAGE_SIZE;
+    UINT64 stack_top = stack_base + stack_pages * PAGE_SIZE;
 
     PTEB teb = (PTEB)teb_va;
     memset(teb, 0, PROCESS_TEB_SIZE);
@@ -1037,11 +1106,11 @@ UINT64 NtCreateThreadEx(UINT64 *a)
         teb_va, &tls_base, &tls_pages);
     if (!NT_SUCCESS(tls_status)) {
         unmap_user_pages(teb_va, PROCESS_TEB_SIZE / PAGE_SIZE);
-        unmap_user_pages(stack_base, THREAD_STACK_PAGES);
+        unmap_user_pages(stack_base, stack_pages);
         if (process->ThreadAllocationNext ==
-            stack_base + (THREAD_STACK_PAGES + PROCESS_TEB_SIZE / PAGE_SIZE) * PAGE_SIZE)
+            stack_base + (stack_pages + PROCESS_TEB_SIZE / PAGE_SIZE) * PAGE_SIZE)
             process->ThreadAllocationNext = allocation_start;
-        return (UINT64)tls_status;
+        return tls_status;
     }
 
     /* Waitable thread object (signaled on exit). */
@@ -1053,14 +1122,17 @@ UINT64 NtCreateThreadEx(UINT64 *a)
     to->Header.SignalState = 0;
     InitializeListHead(&to->Header.WaitListHead);
     to->ExitStatus = STATUS_PENDING;
+    if (descriptor) SeAssignObjectDescriptor(obj, descriptor);
 
     /* Install the handle before publishing the runnable KTHREAD. This leaves
      * no allocation that can fail after the child has been enqueued. */
     HANDLE h;
-    if (!NT_SUCCESS(ObCreateHandle(obj, GENERIC_ALL, &h))) {
+    if (!NT_SUCCESS(ObCreateHandle(obj, (ACCESS_MASK)a[1], &h))) {
         ObDereferenceObject(obj);
         goto rollback_mappings;
     }
+
+    if (inherit) ObSetHandleAttributesInTable(KeGetCurrentThread()->Process->HandleTable, h, OB_HANDLE_INHERIT, OB_HANDLE_INHERIT);
 
     /* Interrupts are masked during a syscall, so the new thread cannot run
      * before we finish wiring it up. */
@@ -1073,12 +1145,15 @@ UINT64 NtCreateThreadEx(UINT64 *a)
         goto rollback_mappings;
     }
     kt->OwnedUserStackBase = stack_base;
-    kt->OwnedUserStackPages = THREAD_STACK_PAGES;
+    kt->OwnedUserStackPages = stack_pages;
     kt->OwnedUserTebBase = teb_va;
     kt->OwnedUserTebPages = PROCESS_TEB_SIZE / PAGE_SIZE;
     kt->OwnedTlsBase = tls_base;
     kt->OwnedTlsPages = tls_pages;
+    W32kInitializeThreadSessionForCreator(kt, KeGetCurrentThread());
     to->Thread = kt;
+    to->ProcessId = process->ProcessId; to->ThreadId = kt->ThreadId;
+    to->TebBase = kt->UserGsBase; to->Priority = kt->Priority; to->BasePriority = process->BasePriority;
     /* The KTHREAD keeps a raw pointer to this object until it exits, so it owns
      * a reference of its own: user mode routinely closes the thread handle long
      * before the thread runs to completion, and without this the exit path would
@@ -1103,17 +1178,128 @@ UINT64 NtCreateThreadEx(UINT64 *a)
      * hands a worker a short-lived stack context and waits for the worker to
      * copy it. Let the child execute now instead of allowing the creator to
      * reuse that stack storage first. */
-    if (!(create_flags & 1u)) KeYield();
-    return (UINT64)STATUS_SUCCESS;
+    return STATUS_SUCCESS;
 
 rollback_mappings:
     LdrRollbackThreadTls(tls_base, tls_pages);
     unmap_user_pages(teb_va, PROCESS_TEB_SIZE / PAGE_SIZE);
-    unmap_user_pages(stack_base, THREAD_STACK_PAGES);
+    unmap_user_pages(stack_base, stack_pages);
     if (process->ThreadAllocationNext ==
-        stack_base + (THREAD_STACK_PAGES + PROCESS_TEB_SIZE / PAGE_SIZE) * PAGE_SIZE)
+        stack_base + (stack_pages + PROCESS_TEB_SIZE / PAGE_SIZE) * PAGE_SIZE)
         process->ThreadAllocationNext = allocation_start;
-    return (UINT64)STATUS_NO_MEMORY;
+    return STATUS_NO_MEMORY;
+}
+
+
+static NTSTATUS PspCreateThreadForProcess(PKPROCESS process, UINT64 *arguments,
+                                         HANDLE *out, SE_DESCRIPTOR *descriptor, BOOLEAN inherit)
+{
+    if (!process || process->Exiting || !process->LoaderContext) return STATUS_INVALID_PARAMETER;
+    PLDR_PROCESS_CONTEXT previous_loader = LdrSetThreadProcessContext(process->LoaderContext);
+    KAPC_STATE attach_state;
+    KeStackAttachProcess(process, &attach_state);
+    NTSTATUS status = PspCreateThreadInAddressSpace(arguments, process, out, descriptor, inherit);
+    KeUnstackDetachProcess(&attach_state);
+    LdrSetThreadProcessContext(previous_loader);
+    return status;
+}
+
+NTSTATUS PsCreateUserThreadForProcess(PKPROCESS process, UINT64 entry,
+                                      UINT64 argument, HANDLE *thread_handle)
+{
+    if (!process || !thread_handle) return STATUS_INVALID_PARAMETER;
+    UINT64 arguments[11] = {0};
+    arguments[1] = GENERIC_ALL; arguments[4] = entry; arguments[5] = argument;
+    SE_DESCRIPTOR *descriptor = NULL;
+    NTSTATUS status = SeCreateDefaultDescriptor(process->SecurityUserRid, &descriptor);
+    if (NT_SUCCESS(status)) status = PspCreateThreadForProcess(process, arguments, thread_handle, descriptor, FALSE);
+    SeDereferenceDescriptor(descriptor); return status;
+}
+
+UINT64 NtCreateThreadEx(UINT64 *arguments)
+{
+    HANDLE *out = (HANDLE *)arguments[0];
+    if (!MmProbeForWrite((UINT64)out, sizeof(*out))) return (UINT64)STATUS_ACCESS_VIOLATION;
+    *out = NULL;
+    POBJECT reference = NULL;
+    PKPROCESS process = NULL;
+    if (arguments[3] == (UINT64)-1) {
+        PKTHREAD caller = KeGetCurrentThread(); process = caller ? caller->Process : NULL;
+    } else {
+        NTSTATUS status = ObReferenceObjectByHandle((HANDLE)arguments[3], 0x0002u, NULL, &reference);
+        if (!NT_SUCCESS(status)) return (UINT64)status;
+        process = PsGetProcessFromObject(reference);
+    }
+    HANDLE handle = NULL;
+    SE_DESCRIPTOR *descriptor = NULL;
+    PKTHREAD caller = KeGetCurrentThread();
+    NTSTATUS status = SeCreateDefaultDescriptor(caller->Process->SecurityUserRid, &descriptor);
+    BOOLEAN inherit = FALSE;
+    if (NT_SUCCESS(status) && arguments[2]) {
+        OBJECT_ATTRIBUTES attributes;
+        if (!MmProbeForRead(arguments[2], sizeof(attributes))) status = STATUS_ACCESS_VIOLATION;
+        else {
+            memcpy(&attributes, (void *)arguments[2], sizeof(attributes));
+            if (attributes.Length != sizeof(attributes) || attributes.ObjectName || attributes.RootDirectory ||
+                (attributes.Attributes & 0x200u)) status = STATUS_INVALID_PARAMETER;
+            else {
+                inherit = (attributes.Attributes & 2u) != 0;
+                if (attributes.SecurityDescriptor) {
+                    SeDereferenceDescriptor(descriptor); descriptor = NULL;
+                    status = SeCaptureDescriptor((UINT64)attributes.SecurityDescriptor, caller->Process->SecurityUserRid, &descriptor);
+                    if (NT_SUCCESS(status) && SeDescriptorOwnerRid(descriptor) != caller->Process->SecurityUserRid)
+                        status = STATUS_INVALID_OWNER;
+                }
+            }
+        }
+    }
+    if (NT_SUCCESS(status)) status = PspCreateThreadForProcess(process, arguments, &handle, descriptor, inherit);
+    SeDereferenceDescriptor(descriptor);
+    if (reference) ObDereferenceObject(reference);
+    if (NT_SUCCESS(status)) {
+        *out = handle;
+        /* Restore the caller's address-space/loader context before allowing
+         * either a local or remote worker to execute. */
+        if (!((ULONG)arguments[6] & 1u)) KeYield();
+    }
+    return (UINT64)status;
+}
+
+/* ThreadBasicInformation retains identifiers even after the KTHREAD reaper
+ * runs; a live object reads current priority from its referenced thread. */
+UINT64 NtQueryInformationThread(UINT64 *args)
+{
+    typedef struct { NTSTATUS Exit; ULONG Padding; UINT64 Teb,Process,Thread,Affinity;
+        LONG Priority,BasePriority; } THREAD_BASIC_LOCAL;
+    if ((ULONG)args[1] != 0) return (UINT64)STATUS_INVALID_INFO_CLASS;
+    if (args[4]) {
+        if (!MmProbeForWrite(args[4],4)) return (UINT64)STATUS_ACCESS_VIOLATION;
+        *(ULONG *)args[4] = sizeof(THREAD_BASIC_LOCAL);
+    }
+    if ((ULONG)args[3] < sizeof(THREAD_BASIC_LOCAL)) return (UINT64)STATUS_INFO_LENGTH_MISMATCH;
+    if (!MmProbeForWrite(args[2],sizeof(THREAD_BASIC_LOCAL))) return (UINT64)STATUS_ACCESS_VIOLATION;
+    THREAD_BASIC_LOCAL info = {0};
+    if (args[0] == (UINT64)-2) {
+        PKTHREAD thread = KeGetCurrentThread();
+        info.Exit=thread->State==ThreadStateTerminated?thread->ExitStatus:STATUS_PENDING;
+        info.Teb=thread->UserGsBase;info.Process=thread->Process->ProcessId;info.Thread=thread->ThreadId;
+        info.Priority=thread->Priority;info.BasePriority=thread->Process->BasePriority;
+    } else {
+        POBJECT object; ACCESS_MASK granted;
+        PKTHREAD caller = KeGetCurrentThread();
+        NTSTATUS status = ObReferenceObjectByHandleInTable(caller->Process->HandleTable,
+            (HANDLE)args[0],0,g_thread_type,&object,&granted);
+        if (!NT_SUCCESS(status)) return (UINT64)status;
+        if (!(granted & (0x40u|0x800u))) {ObDereferenceObject(object);return (UINT64)STATUS_ACCESS_DENIED;}
+        THREAD_OBJECT *record=object;
+        info.Exit=record->Header.SignalState?record->ExitStatus:STATUS_PENDING;
+        info.Teb=record->TebBase;info.Process=record->ProcessId;info.Thread=record->ThreadId;
+        info.Priority=record->Header.SignalState?record->Priority:record->Thread->Priority;
+        info.BasePriority=record->BasePriority;
+        ObDereferenceObject(object);
+    }
+    info.Affinity=1; /* APs are parked; execution is actually confined to CPU0. */
+    memcpy((void *)args[2],&info,sizeof(info));return (UINT64)STATUS_SUCCESS;
 }
 
 /* Private query used by GetExitCodeThread. The handle type and requested

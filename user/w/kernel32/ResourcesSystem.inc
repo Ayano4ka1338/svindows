@@ -303,56 +303,6 @@ __declspec(dllexport) DWORD CheckForReadOnlyResource(HANDLE module, DWORD flag)
 /* Global / Local memory                                               */
 /* ------------------------------------------------------------------ */
 
-#define GMEM_ZEROINIT 0x0040u
-
-__declspec(dllexport) void *GlobalAlloc(UINT flags, SIZE_T bytes)
-{
-    if (!bytes)
-        bytes = 1;
-    void *p = HeapAlloc(GetProcessHeap(),
-                        (flags & GMEM_ZEROINIT) ? HEAP_ZERO_MEMORY : 0, bytes);
-    if (!p)
-        SetLastError(8);
-    return p;
-}
-
-__declspec(dllexport) void *GlobalReAlloc(void *h, SIZE_T bytes, UINT flags)
-{
-    if (!h)
-        return 0;
-    if (!bytes)
-        bytes = 1;
-    void *p = HeapReAlloc(GetProcessHeap(),
-                          (flags & GMEM_ZEROINIT) ? HEAP_ZERO_MEMORY : 0,
-                          h, bytes);
-    if (!p)
-        SetLastError(8);
-    return p;
-}
-
-__declspec(dllexport) void *GlobalFree(void *h)
-{
-    if (h)
-        HeapFree(GetProcessHeap(), 0, h);
-    return 0;
-}
-
-__declspec(dllexport) SIZE_T GlobalSize(void *h)
-{
-    if (!h) return 0;
-    return HeapSize(GetProcessHeap(), 0, h);
-}
-
-__declspec(dllexport) void *GlobalLock(void *h)
-{
-    return h;
-}
-
-__declspec(dllexport) BOOL GlobalUnlock(void *h)
-{
-    (void)h;
-    return 1;
-}
 
 /* ------------------------------------------------------------------ */
 /* String comparison and misc helpers                                  */
@@ -508,10 +458,44 @@ __declspec(dllexport) void GetNativeSystemInfo(SYSTEM_INFO_K *info)
 
 __declspec(dllexport) void GetStartupInfoW(void *info)
 {
-    if (!info)
-        return;
-    memset(info, 0, 104);
-    *(DWORD *)info = 104;
+    if (!info) { SetLastError(87); return; }
+    memset(info, 0, 104); *(DWORD *)info = 104;
+    PEB *peb = NtCurrentPeb();
+    BYTE *parameters = peb ? peb->ProcessParameters : 0;
+    if (!parameters) return;
+    BYTE *output = info;
+    *(void **)(output + 16) = *(void **)(parameters + 0xC8);
+    *(void **)(output + 24) = *(void **)(parameters + 0xB8);
+    for (DWORD i = 0; i < 7; i++) *(DWORD *)(output + 32 + i * 4) = *(DWORD *)(parameters + 0x88 + i * 4);
+    *(DWORD *)(output + 60) = *(DWORD *)(parameters + 0xA4);
+    *(WORD *)(output + 64) = (WORD)*(DWORD *)(parameters + 0xA8);
+    *(HANDLE *)(output + 80) = *(HANDLE *)(parameters + 0x20);
+    *(HANDLE *)(output + 88) = *(HANDLE *)(parameters + 0x28);
+    *(HANDLE *)(output + 96) = *(HANDLE *)(parameters + 0x30);
+}
+static char *g_startup_desktop_ansi, *g_startup_title_ansi;
+static char *startup_ansi(const WCHAR *wide, char **cached)
+{
+    if (!wide) return 0;
+    if (*cached) return *cached;
+    int bytes = WideCharToMultiByte(0,0,wide,-1,0,0,0,0);
+    if (!bytes) return 0;
+    char *copy = HeapAlloc(GetProcessHeap(),0,(SIZE_T)bytes);
+    if (!copy) return 0;
+    if (!WideCharToMultiByte(0,0,wide,-1,copy,bytes,0,0)) { HeapFree(GetProcessHeap(),0,copy); return 0; }
+    char *expected = 0;
+    if (!__atomic_compare_exchange_n(cached,&expected,copy,0,__ATOMIC_RELEASE,__ATOMIC_ACQUIRE)) {
+        HeapFree(GetProcessHeap(),0,copy); return expected;
+    }
+    return copy;
+}
+__declspec(dllexport) void GetStartupInfoA(void *info)
+{
+    if (!info) { SetLastError(87); return; }
+    GetStartupInfoW(info);
+    BYTE *output = info;
+    *(char **)(output+16) = startup_ansi(*(WCHAR **)(output+16),&g_startup_desktop_ansi);
+    *(char **)(output+24) = startup_ansi(*(WCHAR **)(output+24),&g_startup_title_ansi);
 }
 
 __declspec(dllexport) UINT GetACP(void)

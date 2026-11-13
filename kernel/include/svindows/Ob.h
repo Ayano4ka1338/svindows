@@ -16,6 +16,7 @@
 
 #include <nt/Ntdef.h>
 #include <nt/Ntstatus.h>
+#include <svindows/Se.h>
 
 typedef PVOID POBJECT;
 struct _OBJECT_TYPE;
@@ -25,6 +26,7 @@ typedef struct _OB_HANDLE_TABLE OB_HANDLE_TABLE, *POB_HANDLE_TABLE;
 
 /* Type-specific teardown, invoked when an object's last reference is released. */
 typedef VOID (*OB_DELETE_METHOD)(POBJECT Object);
+typedef NTSTATUS (*OB_CLOSE_METHOD)(POBJECT Object, HANDLE Handle);
 
 /*
  * OBJECT_TYPE - describes a class of objects. Unlike Windows, a type is not
@@ -38,7 +40,10 @@ typedef struct _OBJECT_TYPE {
     ULONG            TotalHandles;
     SIZE_T           DefaultBodySize; /* informational */
     OB_DELETE_METHOD DeleteProcedure; /* may be NULL */
+    OB_CLOSE_METHOD  CloseProcedure; /* user close validation; teardown bypasses */
     BOOLEAN          UnlinkNameOnLastHandle;
+    SE_GENERIC_MAPPING GenericMapping;
+    ACCESS_MASK ValidAccessMask;
 } OBJECT_TYPE, *POBJECT_TYPE;
 
 /*
@@ -52,6 +57,7 @@ typedef struct _OBJECT_HEADER {
     const char              *Name;         /* leaf name if in the namespace   */
     LIST_ENTRY               NamespaceEntry;
     struct _OBJECT_DIRECTORY *ParentDirectory;
+    SE_DESCRIPTOR *SecurityDescriptor;
 } OBJECT_HEADER, *POBJECT_HEADER;
 
 /* Header <-> body conversions. */
@@ -110,6 +116,15 @@ POB_HANDLE_TABLE ObGetBootstrapHandleTable(void);
 NTSTATUS ObCreateHandle(POBJECT object, ACCESS_MASK access, HANDLE *out_handle);
 NTSTATUS ObCreateHandleInTable(POB_HANDLE_TABLE table, POBJECT object,
                                ACCESS_MASK access, HANDLE *out_handle);
+#define OB_HANDLE_INHERIT 0x1u
+#define OB_HANDLE_PROTECT_FROM_CLOSE 0x2u
+NTSTATUS ObSetHandleAttributesInTable(POB_HANDLE_TABLE table, HANDLE handle,
+                                      ULONG mask, ULONG attributes);
+NTSTATUS ObQueryHandleAttributesInTable(POB_HANDLE_TABLE table, HANDLE handle,
+                                        ULONG *attributes);
+NTSTATUS ObInheritHandleInTable(POB_HANDLE_TABLE source, HANDLE handle,
+                                POB_HANDLE_TABLE destination);
+NTSTATUS ObInheritHandles(POB_HANDLE_TABLE source, POB_HANDLE_TABLE destination);
 NTSTATUS ObDuplicateHandleToTable(HANDLE source,
                                   POB_HANDLE_TABLE destination,
                                   HANDLE *out_handle);

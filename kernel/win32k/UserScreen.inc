@@ -21,6 +21,7 @@
 #define W32K_PART_BORDER   6
 #define W32K_PART_MENU     7
 #define W32K_MENU_HEIGHT  19
+#define W32K_RESIZE_GRIP   12 /* invisible inside-edge mouse target */
 
 /* Windows 10 frame metrics at 100% scaling come from svindows/Win32k.h, so the
  * services that size a window from its style and the painter below agree. */
@@ -64,13 +65,16 @@ typedef struct _W32K_WINDOW_STATE {
     UINT8   Maximized;
     UINT8   HotPart;        /* non-client part under the pointer            */
     UINT8   Dragging;       /* moving the window by its caption             */
+    UINT8   ResizeHit;      /* HTLEFT..HTBOTTOMRIGHT during frame sizing    */
     UINT8   TrackLeave;
     INT32   X, Y;
     UINT32  W, H;
     INT32   DragPointerX, DragPointerY;
     INT32   DragOriginX, DragOriginY;
+    UINT32  DragOriginW, DragOriginH;
     UINT32  RestoreX, RestoreY, RestoreW, RestoreH;
     UINT16  Parent;
+    UINT16  LastFocus;
     UINT64  Owner;
     UINT16  ZPrev, ZNext;   /* z-order list, ZNext toward the top           */
     UINT32  Style;          /* cached: the record lives in user memory      */
@@ -94,6 +98,18 @@ static UINT16 g_w32k_drag;       /* caption drag keeps its owner across hit test
 static BOOLEAN g_w32k_shift, g_w32k_ctrl, g_w32k_alt;
 static INT32 g_w32k_cascade;     /* CW_USEDEFAULT placement walk           */
 static volatile UINT32 g_w32k_xorg_frame_sequence;
+static UINT32 g_w32k_double_click_time = 500;
+typedef struct { UINT64 Window, Time; INT32 X, Y; BOOLEAN Valid; } W32K_CLICK;
+static W32K_CLICK g_w32k_clicks[3];
+static UINT64 g_cursor_hover_window;
+static UINT8 g_cursor_hover_part;
+
+static UINT64 SvNtUserDoubleClickTime(UINT64 *a)
+{
+    UINT32 old = g_w32k_double_click_time;
+    if (a[1]) g_w32k_double_click_time = !a[0] ? 500 : a[0] > 5000 ? 5000 : (UINT32)a[0];
+    return old;
+}
 
 static void W32kComposeRect(INT32 x, INT32 y, INT32 width, INT32 height);
 static void W32kInvalidateWindow(UINT16 slot);
@@ -201,6 +217,8 @@ static void W32kButtonRect(UINT16 slot, UINT8 part, INT32 *x, INT32 *y,
     *y = window->Y + W32K_BORDER;
 }
 
+static UINT8 W32kResizeHit(UINT16 slot, INT32 x, INT32 y);
+
 static UINT8 W32kHitTest(UINT16 slot, INT32 x, INT32 y, BOOLEAN *in_client)
 {
     W32K_WINDOW_STATE *window = &g_w32k[slot];
@@ -219,6 +237,12 @@ static UINT8 W32kHitTest(UINT16 slot, INT32 x, INT32 y, BOOLEAN *in_client)
         return W32K_PART_NONE;
     if (window->Kind != W32K_KIND_TOPLEVEL)
         return W32K_PART_CLIENT;
+
+    /* Thick frames have a forgiving invisible target inside the visual
+     * one-pixel border. Test it before caption/client classification, otherwise
+     * only the outermost pixel can ever start sizing. */
+    if (W32kResizeHit(slot, x, y))
+        return W32K_PART_BORDER;
 
     if (style & WS_CAPTION) {
         if (y < window->Y + W32K_CAPTION_HEIGHT) {
@@ -245,6 +269,22 @@ static UINT8 W32kHitTest(UINT16 slot, INT32 x, INT32 y, BOOLEAN *in_client)
         return W32K_PART_CLIENT;
     }
     return W32K_PART_BORDER;
+}
+
+static UINT8 W32kResizeHit(UINT16 slot, INT32 x, INT32 y)
+{
+    W32K_WINDOW_STATE *window = &g_w32k[slot];
+    if (!(window->Style & WS_THICKFRAME) || window->Maximized ||
+        window->Minimized)
+        return 0;
+    INT32 left = window->X, top = window->Y;
+    BOOLEAN on_left = x < left + W32K_RESIZE_GRIP;
+    BOOLEAN on_right = x >= left + (INT32)window->W - W32K_RESIZE_GRIP;
+    BOOLEAN on_top = y < top + W32K_RESIZE_GRIP;
+    BOOLEAN on_bottom = y >= top + (INT32)window->H - W32K_RESIZE_GRIP;
+    return on_top ? (on_left ? 13 : on_right ? 14 : 12) :
+           on_bottom ? (on_left ? 16 : on_right ? 17 : 15) :
+           on_left ? 10 : on_right ? 11 : 0;
 }
 
 /* --- z-order ------------------------------------------------------------- */
@@ -338,6 +378,7 @@ static UINT16 W32kWindowAt(INT32 x, INT32 y)
     for (UINT16 slot = g_w32k_top; slot; slot = g_w32k[slot].ZPrev) {
         W32K_WINDOW_STATE *window = &g_w32k[slot];
         if (!window->Kind || !window->Visible || window->Minimized || window->Parent ||
+            !W32kWindowOnInputDesktop(slot) ||
             window->Kind == W32K_KIND_CHILD || (window->Style & 0x08000000u))
             continue;
         if (x >= window->X && y >= window->Y &&
@@ -351,6 +392,7 @@ static UINT16 W32kWindowAt(INT32 x, INT32 y)
 static UINT16 W32kFocusWindow(void)
 {
     if (!W32kWindowExists(g_w32k_active) || !g_w32k[g_w32k_active].Visible ||
+        !W32kWindowOnInputDesktop(g_w32k_active) ||
         g_w32k[g_w32k_active].Minimized || (g_w32k[g_w32k_active].Style & 0x08000000u)) return 0;
     if (W32kWindowExists(g_w32k_focus) && W32kRootSlot(g_w32k_focus) == g_w32k_active) {
         UINT16 slot = g_w32k_focus;
@@ -386,6 +428,7 @@ static void W32kSetActive(UINT16 slot)
     if (previous) W32kSendWindowMessage(previous, W32K_WM_NCACTIVATE, 0, 0);
     if (slot)
         W32kSendWindowMessage(slot, W32K_WM_NCACTIVATE, 1, 0);
+    if (slot) W32kNotifyShell(slot, 4);
     KiIrqRestore(flags);
 }
 
@@ -394,6 +437,7 @@ static void W32kSetActive(UINT16 slot)
 /* Activation belongs to a root window; keyboard focus may belong to a child. */
 void W32kActivateWindow(UINT64 hwnd)
 {
+    if (W32kActivateHiddenDesktop(hwnd ? W32kRootSlot((UINT16)hwnd) : 0)) return;
     W32kSetActive(W32kRootSlot((UINT16)hwnd));
 }
 void W32kSetFocus(UINT64 hwnd)
@@ -401,11 +445,18 @@ void W32kSetFocus(UINT64 hwnd)
     UINT16 slot = hwnd ? (UINT16)(hwnd & 0xFFFF) : 0;
     if (!W32kWindowExists(slot))
         slot = 0;
+    if (W32kFocusHiddenDesktop(slot)) return;
+    UINT16 requested_root = W32kRootSlot(slot);
+    if (requested_root && (g_w32k[requested_root].ExStyle & 0x08000000u) &&
+        g_w32k[requested_root].Kind == W32K_KIND_TASKBAR) return;
     UINT16 previous = W32kFocusWindow();
     if (previous == slot)
         return;
     W32kSetActive(W32kRootSlot(slot));
     g_w32k_focus = slot;
+    W32kSyncKeyState(slot);
+    UINT16 root = W32kRootSlot(slot);
+    if (root) g_w32k[root].LastFocus = slot;
     if (previous)
         W32kSendWindowMessage(previous, W32K_WM_KILLFOCUS, slot ? KiUserWindowHandle(slot) : 0, 0);
     if (slot)
@@ -648,10 +699,9 @@ static void W32kComposeRect(INT32 x, INT32 y, INT32 width, INT32 height)
         UINT16 slot = list[i - 1];
         W32K_WINDOW_STATE *window = &g_w32k[slot];
         if (!window->Kind || !window->Visible || window->Minimized ||
+            !W32kWindowOnInputDesktop(slot) ||
             window->Kind == W32K_KIND_CHILD || !window->W || !window->H)
             continue;
-        if (window->Kind == W32K_KIND_DESKTOP)
-            continue; /* the backdrop layer already covers the screen */
         INT32 margin = window->Kind == W32K_KIND_TOPLEVEL ? W32K_SHADOW_MARGIN : 0;
         if (window->X - margin >= x + width || window->Y - margin >= y + height ||
             window->X + (INT32)window->W + margin <= x ||
@@ -789,6 +839,7 @@ void W32kScreenWindowCreated(UINT16 slot, const WCHAR *title, UINT32 style,
         window->Title[i] = 0;
     }
     W32kRaise(slot);
+    if (window->Visible) W32kNotifyShell(slot, 1);
     if (kind == W32K_KIND_DESKTOP) {
         window->Visible = TRUE;
         W32kScreenCompose();
@@ -806,6 +857,9 @@ void W32kScreenWindowDestroyed(UINT16 slot)
     UINT64 flags = KiIrqSave();
     INT32 x, y; W32kScreenPosition(slot, &x, &y);
     INT32 w = (INT32)g_w32k[slot].W, h = (INT32)g_w32k[slot].H;
+    W32kNotifyShell(slot, 2);
+    W32kClipboardWindowDestroyed(KiUserWindowHandle(slot));
+    W32kHotkeyWindowDestroyed(KiUserWindowHandle(slot));
     W32kUnlink(slot);
     if (g_w32k_active == slot)
         g_w32k_active = 0;
@@ -830,6 +884,7 @@ void W32kScreenSetTitle(UINT16 slot, const WCHAR *title)
         for (; i < W32K_TITLE_CHARS - 1 && title[i]; ++i)
             g_w32k[slot].Title[i] = title[i];
     g_w32k[slot].Title[i] = 0;
+    W32kNotifyShell(slot, 6);
     W32kComposeRect(g_w32k[slot].X, g_w32k[slot].Y, (INT32)g_w32k[slot].W,
                     W32K_CAPTION_HEIGHT + 2);
     KiIrqRestore(flags);
@@ -900,6 +955,7 @@ static void W32kShowWindowLocked(UINT64 hwnd, UINT32 command)
         g_w32k_drag == slot) {
         g_w32k_drag = 0;
         g_w32k[slot].Dragging = 0;
+        g_w32k[slot].ResizeHit = 0;
     }
     if (g_w32k[slot].Kind == W32K_KIND_DESKTOP) {
         g_w32k[slot].Visible = TRUE;
@@ -1021,8 +1077,9 @@ static void W32kMaximizeWindow(UINT16 slot, BOOLEAN maximize)
         window->RestoreY = (UINT32)window->Y;
         window->RestoreW = window->W;
         window->RestoreH = window->H;
-        W32kMoveWindow(KiUserWindowHandle(slot), 0, 0, GfxFramebuffer.Width,
-                       GfxFramebuffer.Height);
+        INT32 area[4]; W32kShellWorkArea(area);
+        W32kMoveWindow(KiUserWindowHandle(slot), area[0], area[1],
+                       (UINT32)(area[2]-area[0]), (UINT32)(area[3]-area[1]));
     } else {
         W32kMoveWindow(KiUserWindowHandle(slot), (INT32)window->RestoreX,
                        (INT32)window->RestoreY, window->RestoreW,
@@ -1093,12 +1150,69 @@ static void W32kHandleCaptionDrag(UINT16 slot)
     W32kMoveWindow(KiUserWindowHandle(slot), x, y, window->W, window->H);
 }
 
+static void W32kHandleFrameResize(UINT16 slot)
+{
+    W32K_WINDOW_STATE *window = &g_w32k[slot];
+    INT32 dx = g_w32k_pointer_x - window->DragPointerX;
+    INT32 dy = g_w32k_pointer_y - window->DragPointerY;
+    INT32 x = window->DragOriginX, y = window->DragOriginY;
+    INT32 width = (INT32)window->DragOriginW;
+    INT32 height = (INT32)window->DragOriginH;
+    UINT8 hit = window->ResizeHit;
+    if (hit == 10 || hit == 13 || hit == 16) { x += dx; width -= dx; }
+    if (hit == 11 || hit == 14 || hit == 17) width += dx;
+    if (hit == 12 || hit == 13 || hit == 14) { y += dy; height -= dy; }
+    if (hit == 15 || hit == 16 || hit == 17) height += dy;
+    const INT32 minimum_width = 160, minimum_height = 80;
+    if (width < minimum_width) {
+        if (hit == 10 || hit == 13 || hit == 16)
+            x -= minimum_width - width;
+        width = minimum_width;
+    }
+    if (height < minimum_height) {
+        if (hit == 12 || hit == 13 || hit == 14)
+            y -= minimum_height - height;
+        height = minimum_height;
+    }
+    W32kMoveWindow(KiUserWindowHandle(slot), x, y, (UINT32)width,
+                   (UINT32)height);
+}
+
 static void W32kInputMouseMoved(INT32 x, INT32 y, UINT8 buttons)
 {
     UINT16 slot = g_w32k_drag ? g_w32k_drag :
                   g_w32k_capture ? g_w32k_capture : W32kWindowAt(x, y);
     BOOLEAN in_client = FALSE;
     UINT8 part = slot ? W32kHitTest(slot, x, y, &in_client) : W32K_PART_NONE;
+    UINT32 hit = part == W32K_PART_CLIENT ? 1 : part == W32K_PART_CAPTION ? 2 :
+                 part == W32K_PART_MINIMIZE ? 8 : part == W32K_PART_MAXIMIZE ? 9 :
+                 part == W32K_PART_CLOSE ? 20 : part == W32K_PART_MENU ? 5 : 18;
+    if (slot && part == W32K_PART_BORDER && (g_w32k[slot].Style & WS_THICKFRAME)) {
+        UINT8 resize = W32kResizeHit(slot, x, y);
+        if (resize) hit = resize;
+    }
+
+    UINT64 hwnd = slot ? KiUserWindowHandle(slot) : 0;
+    if (g_cursor_hover_window != hwnd || g_cursor_hover_part != hit) {
+        g_cursor_hover_window = hwnd; g_cursor_hover_part = (UINT8)hit;
+        g_cursor_process = slot ? g_window_process[slot] : NULL;
+        g_cursor_thread = slot ? g_window_owner[slot] : 0;
+        g_cursor_owner_thread = slot ? KeLookupThreadById(g_cursor_thread) : NULL;
+        USER_CLASS_LOCAL *cls = slot ? g_window_classes[slot] : NULL;
+        UINT64 cursor = part == W32K_PART_CLIENT && cls ? cls->Cursor : 0;
+        USER_OBJECT_OWNER *object = cursor ? W32kCursorObject(cursor, g_cursor_process) : NULL;
+        if (object && !object->Icon && g_cursor_images[(UINT16)cursor]) {
+            g_cursor_selected = cursor; g_cursor_default = FALSE;
+        } else {
+            g_cursor_selected = 0; g_cursor_default = TRUE;
+            g_cursor_default_id=hit==10||hit==11?32644:hit==12||hit==15?32645:
+                hit==13||hit==17?32642:hit==14||hit==16?32643:32512;
+        }
+    }
+    if (slot) {
+        W32kSendWindowMessage(slot, 0x0020, hwnd,
+                                  (INT64)(hit | ((UINT32)W32K_WM_MOUSEMOVE << 16)));
+    }
 
     UINT16 hovered = W32kWindowAt(x, y);
     for (UINT16 other = 1; other < W32K_SLOTS; ++other) {
@@ -1121,7 +1235,10 @@ static void W32kInputMouseMoved(INT32 x, INT32 y, UINT8 buttons)
         }
     }
 
-    if (slot && g_w32k[slot].Dragging) {
+    if (slot && g_w32k[slot].ResizeHit) {
+        W32kHandleFrameResize(slot);
+        part = W32K_PART_BORDER;
+    } else if (slot && g_w32k[slot].Dragging) {
         W32kHandleCaptionDrag(slot);
         part = W32K_PART_CAPTION;
     }
@@ -1135,6 +1252,17 @@ static void W32kInputMouseMoved(INT32 x, INT32 y, UINT8 buttons)
 
 static void W32kInputMouseLocked(INT32 x, INT32 y, UINT8 buttons)
 {
+    W32kCursorSynchronizeDesktop();
+    if (g_cursor_clipped && !W32kXorgConnected()) {
+        INT32 old_x = x, old_y = y;
+        if (x < g_cursor_clip[0]) x = g_cursor_clip[0];
+        if (y < g_cursor_clip[1]) y = g_cursor_clip[1];
+        if (x >= g_cursor_clip[2]) x = g_cursor_clip[2] - 1;
+        if (y >= g_cursor_clip[3]) y = g_cursor_clip[3] - 1;
+        if (old_x != x || old_y != y) (void)HalMouseWarp(&x, &y);
+    }
+    UINT8 old_buttons = g_w32k_pointer_buttons;
+    UINT8 changed_buttons = buttons ^ old_buttons;
     BOOLEAN pressed = (buttons & 1) && !(g_w32k_pointer_buttons & 1);
     BOOLEAN released = !(buttons & 1) && (g_w32k_pointer_buttons & 1);
     if (!g_w32k_pointer_valid) {
@@ -1142,23 +1270,31 @@ static void W32kInputMouseLocked(INT32 x, INT32 y, UINT8 buttons)
         g_w32k_pointer_x = x;
         g_w32k_pointer_y = y;
         g_w32k_pointer_buttons = buttons;
+        W32kInputMouseMoved(x, y, buttons);
+        W32kCursorRefresh();
         return;
     }
 
     g_w32k_pointer_x = x;
     g_w32k_pointer_y = y;
 
+    /* Restore old scanout pixels before hover/activation can present another
+     * damage rectangle and replace the remembered cursor bounds. */
+    W32kCursorRefresh();
+
     UINT16 target = g_w32k_drag ? g_w32k_drag :
                     g_w32k_capture ? g_w32k_capture : W32kWindowAt(x, y);
     BOOLEAN in_client = FALSE;
     UINT8 part = target ? W32kHitTest(target, x, y, &in_client)
                         : W32K_PART_NONE;
+    UINT16 target_root=target?W32kRootSlot(target):0;
+    BOOLEAN no_activate=target_root&&(g_w32k[target_root].ExStyle&0x08000000u);
 
     if (pressed && target) {
         if (g_w32k[target].Kind == W32K_KIND_TOPLEVEL &&
             part != W32K_PART_NONE && part != W32K_PART_CLIENT) {
             W32kRaise(target);
-            if (g_w32k_active != target) W32kSetFocus(KiUserWindowHandle(target));
+            if (!no_activate && g_w32k_active != target) W32kSetFocus(KiUserWindowHandle(target));
             if(part==W32K_PART_MENU){
                 W32kSendWindowMessage(target,W32K_WM_SYSCOMMAND,0xf090,W32kMouseLParam(x,y));
             } else if (part == W32K_PART_CAPTION) {
@@ -1169,6 +1305,19 @@ static void W32kInputMouseLocked(INT32 x, INT32 y, UINT8 buttons)
                 window->DragPointerY = y;
                 window->DragOriginX = window->X;
                 window->DragOriginY = window->Y;
+            } else if (part == W32K_PART_BORDER) {
+                W32K_WINDOW_STATE *window = &g_w32k[target];
+                UINT8 resize = W32kResizeHit(target, x, y);
+                if (resize) {
+                    window->ResizeHit = resize;
+                    g_w32k_drag = target;
+                    window->DragPointerX = x;
+                    window->DragPointerY = y;
+                    window->DragOriginX = window->X;
+                    window->DragOriginY = window->Y;
+                    window->DragOriginW = window->W;
+                    window->DragOriginH = window->H;
+                }
             } else if (part == W32K_PART_MINIMIZE) {
                 W32kSendWindowMessage(target, W32K_WM_SYSCOMMAND,
                                       W32K_SC_MINIMIZE, 0);
@@ -1192,37 +1341,75 @@ static void W32kInputMouseLocked(INT32 x, INT32 y, UINT8 buttons)
             UINT16 root = W32kRootSlot(target);
             if (root && root != target) W32kRaise(root);
             else W32kRaise(target);
-            W32kSetFocus(KiUserWindowHandle(target));
+            if(!no_activate) W32kSetFocus(KiUserWindowHandle(target));
         }
     }
 
     if (released) {
         for (UINT16 slot = 1; slot < W32K_SLOTS; ++slot)
+        {
             g_w32k[slot].Dragging = 0;
+            g_w32k[slot].ResizeHit = 0;
+        }
         g_w32k_drag = 0;
     }
 
     g_w32k_pointer_buttons = buttons;
 
-    if (target && (pressed || released) &&
+    if (target && changed_buttons &&
         (part == W32K_PART_CLIENT || g_w32k_capture == target)) {
         INT32 cx, cy, cw, ch;
         W32kClientOrigin(target, &cx, &cy, &cw, &ch);
-        W32kSendWindowMessage(target,
-                              pressed ? W32K_WM_LBUTTONDOWN
-                                      : W32K_WM_LBUTTONUP,
-                              W32kMouseWParam(buttons),
-                              W32kMouseLParam(x - cx, y - cy));
+        static const UINT32 down_messages[] = {0x0201,0x0204,0x0207};
+        UINT64 now = KeGetTickCount() * (KE_TIME_UNITS_PER_TICK / 10000);
+        for (UINT32 button = 0; button < 3; ++button) {
+            UINT8 mask = (UINT8)(1u << button);
+            if (!(changed_buttons & mask)) continue;
+            UINT32 message = down_messages[button] + ((buttons & mask) ? 0 : 1);
+            if (buttons & mask) {
+                W32K_CLICK *click = &g_w32k_clicks[button];
+                INT64 dx = (INT64)x - click->X, dy = (INT64)y - click->Y;
+                USER_CLASS_LOCAL *cls = g_window_classes[target];
+                if (click->Valid && click->Window == KiUserWindowHandle(target) &&
+                    now >= click->Time && now - click->Time <= g_w32k_double_click_time &&
+                    dx >= -2 && dx <= 2 && dy >= -2 && dy <= 2 &&
+                    cls && (cls->Style & 0x0008u)) {
+                    message = down_messages[button] + 2;
+                    click->Valid = FALSE;
+                } else *click = (W32K_CLICK){KiUserWindowHandle(target),now,x,y,TRUE};
+                if (button && !g_w32k_capture) {
+                    W32kRaise(W32kRootSlot(target));
+                    if(!no_activate) W32kSetFocus(KiUserWindowHandle(target));
+                }
+            }
+            W32kSendWindowMessage(target,message,W32kMouseWParam(buttons),
+                                  W32kMouseLParam(x-cx,y-cy));
+        }
+    } else if (target) {
+        for (UINT32 button=1;button<3;++button) {
+            UINT8 mask=(UINT8)(1u<<button);
+            if(changed_buttons&mask) W32kSendWindowMessage(target,
+                (button==1?0x00a4:0x00a7)+((buttons&mask)?0:1),
+                part==W32K_PART_CAPTION?2:18,W32kMouseLParam(x,y));
+        }
     }
 
     W32kInputMouseMoved(x, y, buttons);
+    W32kCursorRefresh();
 }
 
 void W32kInputMouse(INT32 x, INT32 y, UINT8 buttons)
 {
     UINT64 flags = KiIrqSave();
+    W32kPhysicalMouse(buttons);
     W32kInputMouseLocked(x, y, buttons);
     KiIrqRestore(flags);
+}
+
+static void W32kCursorConstrain(void)
+{
+    if(g_w32k_pointer_valid&&g_cursor_clipped&&!W32kXorgConnected())
+        W32kInputMouseLocked(g_w32k_pointer_x,g_w32k_pointer_y,g_w32k_pointer_buttons);
 }
 
 /* Scan code to virtual key: the Set 1 make codes Windows uses. */
@@ -1296,17 +1483,24 @@ void W32kInputKey(UINT16 event, UINT16 character)
     UINT16 scan = event & 0x7F;
     UINT8 vk = W32kVirtualKey(scan);
     if ((event & 0x200) && scan == 0x35) vk = 0x6F;
-    if (vk == 0x10) g_w32k_shift = !release;
-    else if (vk == 0x11) g_w32k_ctrl = !release;
-    else if (vk == 0x12) g_w32k_alt = !release;
     if (!vk)
         return;
+    UINT8 side = vk == 0x10 ? (scan == 0x36 ? 0xa1 : 0xa0) :
+                 vk == 0x11 ? ((event & 0x200) ? 0xa3 : 0xa2) :
+                 vk == 0x12 ? ((event & 0x200) ? 0xa5 : 0xa4) : vk;
+    BOOLEAN repeated = !release && !!(g_physical_keys[side] & 0x80);
+    W32kPhysicalKey(vk, side, release);
+    g_w32k_shift = !!(g_physical_keys[0x10] & 0x80);
+    g_w32k_ctrl = !!(g_physical_keys[0x11] & 0x80);
+    g_w32k_alt = !!(g_physical_keys[0x12] & 0x80);
+    if (W32kDispatchHotkey(vk, release, repeated)) return;
     UINT16 target = W32kFocusWindow();
     if (!target)
         return;
     UINT64 lparam = 1 | ((UINT64)(scan & 0xFF) << 16) |
                     ((event & 0x200) ? 1ULL << 24 : 0) |
                     (release ? 0xC0000000ULL : 0);
+    if (repeated) lparam |= 1ULL << 30;
     /* Carry layout translation privately with the key. TranslateMessage
      * posts it only if the application has not consumed an accelerator. */
     BOOLEAN system = g_w32k_alt || vk == 0x12;
@@ -1351,7 +1545,7 @@ static UINT64 NtUserSetFocus(UINT64 *a)
 {
     if (a[0] && !KiUserWindowValid(a[0], TRUE))
         return 0;
-    UINT64 previous = KiUserWindowHandle(W32kFocusWindow());
+    UINT64 previous = KiUserWindowHandle(W32kCurrentFocusWindow());
     W32kSetFocus(a[0]);
     return previous;
 }
@@ -1360,7 +1554,7 @@ static UINT64 NtUserGetFocus(UINT64 *a)
 {
     (void)a;
     PKTHREAD caller = KeGetCurrentThread();
-    UINT16 focus = W32kFocusWindow();
+    UINT16 focus = W32kCurrentFocusWindow();
     return caller && focus && g_window_owner[focus] == caller->ThreadId ? KiUserWindowHandle(focus) : 0;
 }
 
@@ -1377,6 +1571,11 @@ static void W32kSetStyle(UINT16 slot, UINT32 style)
     BOOLEAN was_visible=g_w32k[slot].Visible;
     g_w32k[slot].Style=style;
     if(was_visible!=((style&WS_VISIBLE_)!=0))W32kShowWindow(KiUserWindowHandle(slot),(style&WS_VISIBLE_)?5:0);
+}
+
+void W32kScreenSetExStyle(UINT16 slot, UINT32 exstyle)
+{
+    if (W32kWindowExists(slot)) g_w32k[slot].ExStyle = exstyle;
 }
 
 static UINT64 SvNtUserGetDesktopWindow(UINT64 *a)

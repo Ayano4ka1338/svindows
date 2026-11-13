@@ -17,6 +17,7 @@
 typedef struct _HANDLE_ENTRY {
     POBJECT     Object;
     ACCESS_MASK GrantedAccess;
+    ULONG       Attributes;
 } HANDLE_ENTRY;
 
 struct _OB_HANDLE_TABLE {
@@ -87,6 +88,7 @@ static void release_handle_entry(POB_HANDLE_TABLE table, HANDLE_ENTRY *entry)
     POBJECT_HEADER header = ObHeaderFromObject(object);
     entry->Object = NULL;
     entry->GrantedAccess = 0;
+    entry->Attributes = 0;
     __atomic_sub_fetch(&table->OpenCount, 1, __ATOMIC_RELAXED);
     LONG handles = InterlockedDecrement(&header->HandleCount);
     if (header->Type->TotalHandles)
@@ -139,6 +141,9 @@ NTSTATUS ObCreateHandleInTable(POB_HANDLE_TABLE table, POBJECT object,
 {
     if (!object || !out_handle || !table)
         return STATUS_INVALID_PARAMETER;
+    access = SeMapGenericAccess(access, &ObHeaderFromObject(object)->Type->GenericMapping);
+    if (access & ~ObHeaderFromObject(object)->Type->ValidAccessMask)
+        return STATUS_ACCESS_DENIED;
 
     UINT64 flags = KiIrqSave();
     for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
@@ -147,6 +152,7 @@ NTSTATUS ObCreateHandleInTable(POB_HANDLE_TABLE table, POBJECT object,
             POBJECT_HEADER header = ObHeaderFromObject(object);
             entry->Object = object;
             entry->GrantedAccess = access;
+            entry->Attributes = 0;
             __atomic_add_fetch(&table->OpenCount, 1, __ATOMIC_RELAXED);
             ObReferenceObject(object);
             InterlockedIncrement(&header->HandleCount);
@@ -213,6 +219,14 @@ NTSTATUS ObReferenceObjectByHandleInTable(POB_HANDLE_TABLE table,
         KiIrqRestore(flags);
         return STATUS_OBJECT_TYPE_MISMATCH;
     }
+    /* Handles store the type-specific mask produced at creation time.  Map a
+     * caller's generic request through the same type mapping before comparing
+     * it, otherwise GENERIC_READ/WRITE can never match a valid stored handle. */
+    desired = SeMapGenericAccess(desired, &header->Type->GenericMapping);
+    if (desired & ~header->Type->ValidAccessMask) {
+        KiIrqRestore(flags);
+        return STATUS_ACCESS_DENIED;
+    }
     ACCESS_MASK granted = entry->GrantedAccess;
     if (granted & GENERIC_ALL)
         granted = (ACCESS_MASK)~0u;
@@ -273,7 +287,84 @@ NTSTATUS ObCloseHandleForObject(POB_HANDLE_TABLE table, HANDLE handle,
         KiIrqRestore(flags);
         return STATUS_INVALID_HANDLE;
     }
+    if (!expected && (entry->Attributes & OB_HANDLE_PROTECT_FROM_CLOSE)) {
+        KiIrqRestore(flags);
+        return STATUS_HANDLE_NOT_CLOSABLE;
+    }
+    if (!expected && ObHeaderFromObject(entry->Object)->Type->CloseProcedure) {
+        NTSTATUS status = ObHeaderFromObject(entry->Object)->Type->CloseProcedure(entry->Object, handle);
+        if (!NT_SUCCESS(status)) { KiIrqRestore(flags); return status; }
+    }
     release_handle_entry(table, entry);
     KiIrqRestore(flags);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS ObSetHandleAttributesInTable(POB_HANDLE_TABLE table, HANDLE handle,
+                                      ULONG mask, ULONG attributes)
+{
+    UINT32 index;
+    if (!table || !handle_to_index(handle, &index)) return STATUS_INVALID_HANDLE;
+    if ((mask | attributes) & ~(OB_HANDLE_INHERIT | OB_HANDLE_PROTECT_FROM_CLOSE))
+        return STATUS_INVALID_PARAMETER;
+    UINT64 flags = KiIrqSave();
+    HANDLE_ENTRY *entry = &table->Entries[index];
+    NTSTATUS status = entry->Object ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+    if (NT_SUCCESS(status)) entry->Attributes = (entry->Attributes & ~mask) | (attributes & mask);
+    KiIrqRestore(flags); return status;
+}
+
+NTSTATUS ObQueryHandleAttributesInTable(POB_HANDLE_TABLE table, HANDLE handle,
+                                        ULONG *attributes)
+{
+    UINT32 index;
+    if (!attributes || !table || !handle_to_index(handle, &index)) return STATUS_INVALID_HANDLE;
+    UINT64 flags = KiIrqSave();
+    HANDLE_ENTRY *entry = &table->Entries[index];
+    NTSTATUS status = entry->Object ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+    if (NT_SUCCESS(status)) *attributes = entry->Attributes;
+    KiIrqRestore(flags); return status;
+}
+
+static void ObpInheritEntry(POB_HANDLE_TABLE destination, ULONG index,
+                           const HANDLE_ENTRY *source)
+{
+    destination->Entries[index] = *source;
+    POBJECT_HEADER header = ObHeaderFromObject(source->Object);
+    ObReferenceObject(source->Object);
+    InterlockedIncrement(&header->HandleCount);
+    header->Type->TotalHandles++;
+    __atomic_add_fetch(&destination->OpenCount, 1, __ATOMIC_RELAXED);
+}
+
+NTSTATUS ObInheritHandleInTable(POB_HANDLE_TABLE source, HANDLE handle,
+                                POB_HANDLE_TABLE destination)
+{
+    UINT32 index;
+    if (!source || !destination || source == destination || !handle_to_index(handle, &index))
+        return STATUS_INVALID_HANDLE;
+    UINT64 flags = KiIrqSave();
+    HANDLE_ENTRY *entry = &source->Entries[index];
+    NTSTATUS status = !entry->Object ? STATUS_INVALID_HANDLE :
+                      !(entry->Attributes & OB_HANDLE_INHERIT) ? STATUS_ACCESS_DENIED :
+                      destination->Entries[index].Object ? STATUS_OBJECT_NAME_COLLISION : STATUS_SUCCESS;
+    if (NT_SUCCESS(status)) ObpInheritEntry(destination, index, entry);
+    KiIrqRestore(flags); return status;
+}
+
+NTSTATUS ObInheritHandles(POB_HANDLE_TABLE source, POB_HANDLE_TABLE destination)
+{
+    if (!source || !destination || source == destination) return STATUS_INVALID_PARAMETER;
+    UINT64 flags = KiIrqSave();
+    /* Validate the complete destination first: a collision cannot leave a
+     * partially inherited table. The caller supplies an unpublished table. */
+    for (ULONG i = 0; i < OB_MAX_HANDLES; i++)
+        if (source->Entries[i].Object && (source->Entries[i].Attributes & OB_HANDLE_INHERIT) &&
+            destination->Entries[i].Object) {
+            KiIrqRestore(flags); return STATUS_OBJECT_NAME_COLLISION;
+        }
+    for (ULONG i = 0; i < OB_MAX_HANDLES; i++)
+        if (source->Entries[i].Object && (source->Entries[i].Attributes & OB_HANDLE_INHERIT))
+            ObpInheritEntry(destination, i, &source->Entries[i]);
+    KiIrqRestore(flags); return STATUS_SUCCESS;
 }

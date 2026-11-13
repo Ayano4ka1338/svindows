@@ -222,7 +222,7 @@ static void LdrpInitializeGuardPointers(UINT64 base)
         patched = TRUE;
     }
     if (patched)
-        KeLog("[ldr]  CFG thunks initialized for image %p (check %p, dispatch %p)\n",
+        KeTrace("[ldr]  CFG thunks initialized for image %p (check %p, dispatch %p)\n",
               (void *)base, (void *)check_slot, (void *)dispatch_slot);
 }
 
@@ -323,7 +323,7 @@ static NTSTATUS LdrResolveImports(UINT64 base)
             }
             iat[i] = addr;
         }
-        KeLog("[ldr]  linked imports from %s (base %p)\n", dll,
+        KeTrace("[ldr]  linked imports from %s (base %p)\n", dll,
               (void *)dll_base);
     }
     return STATUS_INVALID_IMAGE_FORMAT; /* directory lacks a terminator */
@@ -384,7 +384,7 @@ static NTSTATUS LdrValidateDelayImports(UINT64 base)
             if (tables[t] && ((tables[t] & 7) ||
                 !LdrpImageContains(base, tables[t], ((UINT64)imported + 1) * 8)))
                 return STATUS_INVALID_IMAGE_FORMAT;
-        KeLog("[ldr]  deferred imports from %s: %u preserved\n", dll, imported);
+        KeTrace("[ldr]  deferred imports from %s: %u preserved\n", dll, imported);
     }
     return STATUS_INVALID_IMAGE_FORMAT;
 }
@@ -594,6 +594,7 @@ static UINT64 LdrpLoadModuleWorker(const char *name)
     LdrpInitializeGuardPointers(base);
     LdrpProtectImage(base);
 
-    KeLog("[ldr]  loaded module %s at %p\n", name, (void *)base);
+    KeTrace("[ldr]  loaded module %s at %p\n", name, (void *)base);
+    KeYield();
     return base;
 }

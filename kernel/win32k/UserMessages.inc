@@ -150,6 +150,12 @@ static UINT32 KiUserWindowOwner(UINT64 hwnd)
     return g_window_owner[slot];
 }
 
+BOOLEAN W32kWindowBelongsToProcess(UINT64 hwnd, PKPROCESS process)
+{
+    return process && KiUserWindowValid(hwnd, FALSE) &&
+        g_window_process[(UINT16)hwnd] == process;
+}
+
 /*
  * Update regions and WM_PAINT.
  *
@@ -365,6 +371,9 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
              out->Message == 0x0104 || out->Message == 0x0105) && out->WParam < 256)
             queue->KeyState[out->WParam] = out->Message == 0x0100 || out->Message == 0x0104;
         if (out->Message >= 0x0200 && out->Message <= 0x020A) {
+            queue->KeyState[0x01] = !!(out->WParam & 1);
+            queue->KeyState[0x02] = !!(out->WParam & 2);
+            queue->KeyState[0x04] = !!(out->WParam & 16);
             queue->KeyState[0x10] = !!(out->WParam & 4);
             queue->KeyState[0x11] = !!(out->WParam & 8);
         }
@@ -388,7 +397,7 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
  * is what stopped the shell from creating its worker window.
  */
 #define USER_MAX_ATOMS   192
-#define USER_ATOM_CHARS  64
+#define USER_ATOM_CHARS  256
 #define USER_ATOM_FIRST  0xC000
 
 typedef struct _USER_ATOM_ENTRY {
@@ -510,6 +519,8 @@ static UINT64 NtUserRegisterWindowMessage(UINT64 *a)
 
 static UINT64 NtUserSystemParametersInfo(UINT64 *a)
 {
+    UINT64 shell_result = W32kShellSystemParametersInfo(a);
+    if (shell_result != (UINT64)-1) return shell_result;
     KeLog("[user] NtUserSystemParametersInfo(action=0x%lx, param=%lu, out=%p, flags=0x%lx)\n",
           (unsigned long)a[0], (unsigned long)a[1], (void *)a[2],
           (unsigned long)a[3]);
@@ -596,8 +607,9 @@ static UINT64 NtUserPostThreadMessage(UINT64 *a)
     UINT32 message = (UINT32)a[1];
     const char *mod = 0;
     UINT64 base = 0, ret = 0;
-    if (MmProbeForRead(g_service_user_rsp, sizeof(UINT64)))
-        ret = *(volatile UINT64 *)g_service_user_rsp;
+    UINT64 user_rsp = KiServiceUserRsp();
+    if (MmProbeForRead(user_rsp, sizeof(UINT64)))
+        ret = *(volatile UINT64 *)user_rsp;
     if (ret && LdrDescribeUserAddress(ret, &mod, &base))
         KeLog("[user] NtUserPostThreadMessage(tid=%u, msg=0x%x, wp=%p, lp=%p) from %s+0x%lx\n",
               thread_id, message, (void *)a[2], (void *)a[3], mod,
@@ -674,6 +686,8 @@ static BOOLEAN KiUserWaitForInput(void)
     USER_MSG_QUEUE *queue = KiUserQueueForThread(thread ? thread->ThreadId : 0);
     if (!queue || (!queue->InputEvent && !KiUserGetInputEvent())) return FALSE;
     KiUserSyncInputEvent(queue);
+    if(queue->Head==queue->Tail && !KiUserNextUpdateWindow(queue->ThreadId) &&
+       !KiUserDueTimer(queue,KeGetTickCount()))W32kMarkProcessInputIdle(thread->Process);
     return NT_SUCCESS(KeWaitForSingleObject(&queue->InputEvent->Header));
 }
 

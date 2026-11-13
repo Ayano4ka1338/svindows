@@ -133,12 +133,14 @@ __declspec(dllexport) BOOL GetNumaHighestNodeNumber(DWORD *highest_node)
 __declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit,
                                          DWORD process_id)
 {
-    if (inherit || !process_id) { SetLastError(87); return 0; }
+    if (!process_id) { SetLastError(87); return 0; }
     struct { HANDLE Process; HANDLE Thread; } id = {
         (HANDLE)(unsigned long long)process_id, 0
     };
     HANDLE process = 0;
-    long status = NtOpenProcess(&process, access, 0, &id);
+    struct { DWORD Length; HANDLE Root; void *Name; DWORD Flags; void *Descriptor,*Quality; } attributes = {0};
+    attributes.Length=sizeof(attributes);attributes.Flags=inherit?2u:0;
+    long status = NtOpenProcess(&process, access, &attributes, &id);
     if (status < 0) {
         SetLastError(status == (long)0xC000000D ||
                      status == (long)0xC0000225 ? 87 : 6);
@@ -153,8 +155,11 @@ __declspec(dllexport) BOOL ProcessIdToSessionId(DWORD process_id,
     if (!process_id || !session_id) { SetLastError(87); return 0; }
     HANDLE process = OpenProcess(0x1000u, 0, process_id);
     if (!process) return 0;
+    DWORD session=0;
+    long status=NtQueryInformationProcess(process,24,&session,sizeof(session),0);
     CloseHandle(process);
-    *session_id = 0; /* all processes use the single interactive session */
+    if(status<0){SetLastError(6);return 0;}
+    *session_id=session;
     SetLastError(0);
     return 1;
 }
@@ -380,119 +385,141 @@ __declspec(dllexport) BOOL QueryFullProcessImageNameW(HANDLE process,
     return 1;
 }
 
-__declspec(dllexport) BOOL CreateProcessA(
-    const char *application_name, char *command_line,
-    LPVOID process_attributes, LPVOID thread_attributes,
-    BOOL inherit_handles, DWORD creation_flags, LPVOID environment,
-    const char *current_directory, LPVOID startup_info,
-    PROCESS_INFORMATION *process_information)
+
+#include "../../../kernel/include/abi/ProcessCreate.h"
+extern long SvNtCreateUserProcessEx(const SV_PROCESS_CREATE_REQUEST *, SV_PROCESS_CREATE_RESULT *);
+extern DWORD RtlNtStatusToDosError(long status);
+extern HANDLE GetProcessHeap(void);
+extern LPVOID HeapAlloc(HANDLE, DWORD, SIZE_T);
+extern BOOL HeapFree(HANDLE, DWORD, LPVOID);
+extern int MultiByteToWideChar(unsigned int, DWORD, const char *, int, unsigned short *, int);
+extern DWORD SearchPathW(const unsigned short *, const unsigned short *, const unsigned short *, DWORD, unsigned short *, unsigned short **);
+extern DWORD GetFileAttributesW(const unsigned short *);
+
+static unsigned short *process_widen(const char *text, int bytes)
 {
-    (void)process_attributes; (void)thread_attributes;
-    (void)creation_flags;
-    if (!application_name || !process_information) {
-        SetLastError(87); /* ERROR_INVALID_PARAMETER */
-        return 0;
+    if (!text) return 0;
+    int count = MultiByteToWideChar(0, 0, text, bytes, 0, 0);
+    if (!count) return 0;
+    unsigned short *wide = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)count * 2);
+    if (!wide) { SetLastError(8); return 0; }
+    if (!MultiByteToWideChar(0, 0, text, bytes, wide, count)) {
+        HeapFree(GetProcessHeap(), 0, wide); return 0;
     }
-    HANDLE process = 0;
-    DWORD pid = 0;
-    const char *command = command_line ? command_line : application_name;
-    char inherited_directory[260];
-    if (!current_directory) {
-        unsigned short wide[260];
-        DWORD length = GetCurrentDirectoryW(260, wide);
-        if (!length || length >= 260) {
-            SetLastError(87);
-            return 0;
+    return wide;
+}
+
+static unsigned short *process_ansi_environment(const char *environment)
+{
+    SIZE_T bytes = 0;
+    do {
+        while (environment[bytes]) bytes++;
+        bytes++;
+    } while (environment[bytes]);
+    bytes++;
+    if (bytes > 0x7FFFFFFF) { SetLastError(8); return 0; }
+    return process_widen(environment, (int)bytes);
+}
+
+static BOOL create_process_wide(const unsigned short *application,
+    unsigned short *command, BOOL inherit, DWORD flags, LPVOID environment,
+    const unsigned short *directory, const STARTUPINFOA_LOCAL *startup,
+    const unsigned short *desktop, LPVOID process_attributes, LPVOID thread_attributes, PROCESS_INFORMATION *out)
+{
+    if (!out || !startup || startup->cb < sizeof(*startup) || (!application && !command)) {
+        SetLastError(87); return 0;
+    }
+    unsigned short first[260];
+    if (!application) {
+        const unsigned short *scan = command;
+        while (*scan == ' ' || *scan == '\t') scan++;
+        unsigned int count = 0; int quoted = 0;
+        while (*scan) {
+            if (*scan == '"') { quoted = !quoted; scan++; continue; }
+            if (!quoted && (*scan == ' ' || *scan == '\t')) break;
+            if (count + 1 == 260) { SetLastError(206); return 0; }
+            first[count++] = *scan++;
         }
-        for (DWORD i = 0; i <= length; i++)
-            inherited_directory[i] = wide[i] <= 0x7f ? (char)wide[i] : '?';
-        current_directory = inherited_directory;
+        first[count] = 0; application = first;
     }
-    HANDLE input = 0, output = 0, error = 0;
-    STARTUPINFOA_LOCAL *startup = (STARTUPINFOA_LOCAL *)startup_info;
-    if (inherit_handles && startup &&
-        (startup->flags & STARTF_USESTDHANDLES)) {
-        input = startup->standard_input;
-        output = startup->standard_output;
-        error = startup->standard_error;
+    if (!*application) { SetLastError(87); return 0; }
+    unsigned short resolved[260];
+    DWORD attributes = GetFileAttributesW(application);
+    if (attributes == (DWORD)-1 || (attributes & 0x10)) {
+        static const unsigned short extension[] = {'.','e','x','e',0};
+        DWORD length = SearchPathW(0, application, extension, 260, resolved, 0);
+        if (!length) return 0;
+        if (length >= 260) { SetLastError(206); return 0; }
+        application = resolved;
     }
-    long status = NtCreateUserProcessSimple(application_name, command,
-                                            &process, &pid,
-                                            input, output, error,
-                                            current_directory,
-                                            (const char *)environment);
-    if (status < 0) {
-        SetLastError(status == (long)0xC0000034 ? 2 :
-                     status == (long)0xC0000023 ? 122 :
-                     status == (long)0xC0000017 ? 8 :
-                     status == (long)0xC0000005 ? 998 : 193);
-        return 0;
+    SV_PROCESS_CREATE_REQUEST request = {0};
+    request.Size = sizeof(request); request.Flags = flags;
+    request.InheritHandles = inherit != 0;
+    request.Image = (unsigned long long)application;
+    request.CommandLine = (unsigned long long)(command ? command : application);
+    request.CurrentDirectory = (unsigned long long)directory;
+    request.Desktop = (unsigned long long)desktop;
+    request.Environment = (unsigned long long)environment;
+    request.ProcessAttributes = (unsigned long long)process_attributes;
+    request.ThreadAttributes = (unsigned long long)thread_attributes;
+    request.StartupFlags = startup->flags; request.ShowWindow = startup->show_window;
+    request.X = startup->x; request.Y = startup->y;
+    request.XSize = startup->x_size; request.YSize = startup->y_size;
+    request.XChars = startup->x_chars; request.YChars = startup->y_chars;
+    request.FillAttribute = startup->fill;
+    if (startup->flags & STARTF_USESTDHANDLES) {
+        request.StandardInput = (unsigned long long)startup->standard_input;
+        request.StandardOutput = (unsigned long long)startup->standard_output;
+        request.StandardError = (unsigned long long)startup->standard_error;
     }
-    process_information->hProcess = process;
-    process_information->hThread = 0;
-    process_information->dwProcessId = pid;
-    process_information->dwThreadId = 0;
+    SV_PROCESS_CREATE_RESULT result = {0};
+    long status = SvNtCreateUserProcessEx(&request, &result);
+    if (status < 0) { SetLastError(RtlNtStatusToDosError(status)); return 0; }
+    out->hProcess = (HANDLE)result.Process; out->hThread = (HANDLE)result.Thread;
+    out->dwProcessId = result.ProcessId; out->dwThreadId = result.ThreadId;
     return 1;
 }
 
-__declspec(dllexport) BOOL CreateProcessW(
-    const unsigned short *application_name, unsigned short *command_line,
-    LPVOID process_attributes, LPVOID thread_attributes,
-    BOOL inherit_handles, DWORD creation_flags, LPVOID environment,
-    const unsigned short *current_directory, LPVOID startup_info,
-    PROCESS_INFORMATION *process_information)
+__declspec(dllexport) BOOL CreateProcessW(const unsigned short *application,
+    unsigned short *command, LPVOID process_attributes, LPVOID thread_attributes,
+    BOOL inherit, DWORD flags, LPVOID environment, const unsigned short *directory,
+    LPVOID startup_info, PROCESS_INFORMATION *out)
 {
-    char app[260], cmd[260];
-    DWORD i = 0;
-    if (!application_name) { SetLastError(87); return 0; }
-    while (application_name[i] && i < 259) {
-        app[i] = application_name[i] <= 0x7f ? (char)application_name[i] : '?';
-        i++;
+    STARTUPINFOA_LOCAL *startup = startup_info;
+    unsigned short *wide_environment = 0;
+    if (environment && !(flags & 0x400u)) {
+        wide_environment = process_ansi_environment(environment);
+        if (!wide_environment) return 0;
+        environment = wide_environment;
     }
-    if (application_name[i]) { SetLastError(87); return 0; }
-    app[i] = 0;
-    i = 0;
-    if (command_line) {
-        while (command_line[i] && i < 259) {
-            cmd[i] = command_line[i] <= 0x7f ? (char)command_line[i] : '?';
-            i++;
-        }
-        if (command_line[i]) { SetLastError(87); return 0; }
-    }
-    cmd[i] = 0;
-    char cwd[260];
-    const char *ascii_cwd = 0;
-    if (current_directory) {
-        DWORD j = 0;
-        while (current_directory[j] && j < sizeof(cwd) - 1) {
-            cwd[j] = current_directory[j] <= 0x7f ?
-                     (char)current_directory[j] : '?';
-            j++;
-        }
-        if (current_directory[j]) { SetLastError(87); return 0; }
-        cwd[j] = 0;
-        ascii_cwd = cwd;
-    }
-    char ansi_environment[2048];
-    if (environment && (creation_flags & 0x400u)) {
-        const unsigned short *wide = (const unsigned short *)environment;
-        DWORD used = 0;
-        for (;;) {
-            if (used + 2 >= sizeof(ansi_environment)) {
-                SetLastError(87);
-                return 0;
-            }
-            unsigned short ch = *wide++;
-            ansi_environment[used++] = ch <= 0x7f ? (char)ch : '?';
-            if (!ch && !*wide) {
-                ansi_environment[used++] = 0;
-                break;
-            }
-        }
-        environment = ansi_environment;
-    }
-    return CreateProcessA(app, command_line ? cmd : app, process_attributes,
-                          thread_attributes, inherit_handles, creation_flags,
-                          environment, ascii_cwd, startup_info,
-                          process_information);
+    BOOL result = create_process_wide(application, command, inherit, flags,
+        environment, directory, startup, startup ? (const unsigned short *)startup->desktop : 0, process_attributes, thread_attributes, out);
+    if (wide_environment) HeapFree(GetProcessHeap(), 0, wide_environment);
+    return result;
+}
+
+__declspec(dllexport) BOOL CreateProcessA(const char *application, char *command,
+    LPVOID process_attributes, LPVOID thread_attributes, BOOL inherit, DWORD flags,
+    LPVOID environment, const char *directory, LPVOID startup_info,
+    PROCESS_INFORMATION *out)
+{
+    STARTUPINFOA_LOCAL *startup = startup_info;
+    unsigned short *image = process_widen(application, -1);
+    if (application && !image) return 0;
+    unsigned short *line = process_widen(command, -1);
+    unsigned short *cwd = process_widen(directory, -1);
+    unsigned short *desktop = startup && startup->desktop ? process_widen(startup->desktop, -1) : 0;
+    unsigned short *wide_environment = 0;
+    if (environment && !(flags & 0x400u)) wide_environment = process_ansi_environment(environment);
+    BOOL valid = (!command || line) && (!directory || cwd) &&
+        (!startup || !startup->desktop || desktop) &&
+        (!environment || (flags & 0x400u) || wide_environment);
+    BOOL result = valid ? create_process_wide(image, line, inherit, flags,
+        wide_environment ? wide_environment : environment, cwd, startup, desktop, process_attributes, thread_attributes, out) : 0;
+    if (wide_environment) HeapFree(GetProcessHeap(), 0, wide_environment);
+    if (desktop) HeapFree(GetProcessHeap(), 0, desktop);
+    if (cwd) HeapFree(GetProcessHeap(), 0, cwd);
+    if (line) HeapFree(GetProcessHeap(), 0, line);
+    if (image) HeapFree(GetProcessHeap(), 0, image);
+    return result;
 }

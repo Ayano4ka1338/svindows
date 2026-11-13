@@ -138,6 +138,48 @@ BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags)
     return TRUE;
 }
 
+/* Fast path for constructing a fresh address space. The range must be
+ * currently unmapped; no stale TLB entry can exist, so hundreds of per-page
+ * INVLPG instructions are unnecessary. */
+static BOOLEAN map_page_run(UINT64 virt, UINT64 phys, SIZE_T pages,
+                            UINT64 flags, BOOLEAN alias)
+{
+    if (!pages || virt >= MM_USER_MAX || (virt & PAGE_MASK) || (phys & PAGE_MASK) ||
+        pages > (MM_USER_MAX - virt) / PAGE_SIZE)
+        return FALSE;
+    UINT64 *pml4 = table_at(MmGetCurrentAddressSpace());
+    SIZE_T mapped = 0;
+    for (; mapped < pages; ++mapped) {
+        UINT64 va = virt + mapped * PAGE_SIZE;
+        UINT64 pdpt_phys = next_table(&pml4[PML4_INDEX(va)]);
+        UINT64 *pdpt = table_at(pdpt_phys);
+        UINT64 pd_phys = next_table(&pdpt[PDPT_INDEX(va)]);
+        UINT64 *pd = table_at(pd_phys);
+        if (pd[PD_INDEX(va)] & PTE_LARGE) break;
+        UINT64 pt_phys = next_table(&pd[PD_INDEX(va)]);
+        UINT64 *pt = table_at(pt_phys);
+        UINT64 *leaf = &pt[PT_INDEX(va)];
+        if (*leaf & PTE_PRESENT) break;
+        UINT64 pa = alias ? phys : phys + mapped * PAGE_SIZE;
+        *leaf = (pa & PTE_ADDR_MASK) | flags | PTE_PRESENT;
+    }
+    if (mapped == pages) return TRUE;
+    while (mapped) MmUnmapPage(virt + --mapped * PAGE_SIZE);
+    return FALSE;
+}
+
+BOOLEAN MmMapContiguousPages(UINT64 virt, UINT64 phys, SIZE_T pages,
+                             UINT64 flags)
+{
+    return map_page_run(virt, phys, pages, flags, FALSE);
+}
+
+BOOLEAN MmMapAliasedPages(UINT64 virt, UINT64 phys, SIZE_T pages,
+                          UINT64 flags)
+{
+    return map_page_run(virt, phys, pages, flags, TRUE);
+}
+
 BOOLEAN MmUnmapPage(UINT64 virt)
 {
     return MmUnmapPageInAddressSpace(MmGetCurrentAddressSpace(), virt);
@@ -168,12 +210,22 @@ void MmReleaseUserPagesInAddressSpace(UINT64 root, UINT64 base, SIZE_T pages)
     if (!root || !base || (base & PAGE_MASK) || base >= MM_USER_MAX ||
         pages > (MM_USER_MAX - base) / PAGE_SIZE)
         return;
+    UINT64 release[64];
+    SIZE_T release_count = 0;
     for (SIZE_T i = 0; i < pages; ++i) {
         UINT64 va = base + i * PAGE_SIZE;
         UINT64 pa = MmGetPhysicalAddressInAddressSpace(root, va);
-        if (pa != MM_INVALID_PHYS && MmUnmapPageInAddressSpace(root, va))
-            MmFreePages(PAGE_ALIGN(pa), 1);
+        UINT64 flags = MmGetPageFlagsInAddressSpace(root, va);
+        if (pa != MM_INVALID_PHYS && MmUnmapPageInAddressSpace(root, va) &&
+            !(flags & PTE_SHARED)) {
+            release[release_count++] = PAGE_ALIGN(pa);
+            if (release_count == sizeof(release) / sizeof(release[0])) {
+                MmFreePageList(release, release_count);
+                release_count = 0;
+            }
+        }
     }
+    if (release_count) MmFreePageList(release, release_count);
 }
 
 UINT64 MmGetPhysicalAddress(UINT64 virt)
@@ -205,9 +257,10 @@ UINT64 MmGetPhysicalAddressInAddressSpace(UINT64 root, UINT64 virt)
     return (pte & PTE_ADDR_MASK) | (virt & PAGE_MASK);
 }
 
-UINT64 MmGetPageFlags(UINT64 virt)
+UINT64 MmGetPageFlagsInAddressSpace(UINT64 root, UINT64 virt)
 {
-    UINT64 *pml4 = table_at(MmGetCurrentAddressSpace());
+    if (!root) return 0;
+    UINT64 *pml4 = table_at(root);
     UINT64 top = pml4[PML4_INDEX(virt)];
     if (!(top & PTE_PRESENT)) return 0;
     UINT64 *pdpt = table_at(top & PTE_ADDR_MASK);
@@ -228,6 +281,11 @@ UINT64 MmGetPageFlags(UINT64 virt)
     return (leaf & ~(PTE_WRITE | PTE_USER | PTE_NX)) |
            (allowed & (PTE_WRITE | PTE_USER)) |
            ((top | middle | pde | leaf) & PTE_NX);
+}
+
+UINT64 MmGetPageFlags(UINT64 virt)
+{
+    return MmGetPageFlagsInAddressSpace(MmGetCurrentAddressSpace(), virt);
 }
 
 /* ------------------------------------------------------------------ */

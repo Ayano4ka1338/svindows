@@ -21,6 +21,7 @@ UINT64 LinuxDup(PKPROCESS process, UINT64 source, UINT64 target,
     LINUX_FD_ENTRY *original = &process->LinuxContext->Files[source];
     /* Other descriptor kinds need their own shared lifetime and offset rules. */
     if (original->Kind != LINUX_FD_REGULAR &&
+        original->Kind != LINUX_FD_CONSOLE &&
         original->Kind != LINUX_FD_TTY &&
         original->Kind != LINUX_FD_PTY &&
         original->Kind != LINUX_FD_SOCKET &&
@@ -35,7 +36,8 @@ UINT64 LinuxDup(PKPROCESS process, UINT64 source, UINT64 target,
     }
 
     HANDLE handle = NULL;
-    if (original->Kind == LINUX_FD_REGULAR) {
+    if (original->Kind == LINUX_FD_REGULAR ||
+        original->Kind == LINUX_FD_CONSOLE) {
         NTSTATUS status = ObDuplicateHandleToTable(original->Handle,
                                                    process->HandleTable, &handle);
         if (!NT_SUCCESS(status))
@@ -52,7 +54,8 @@ UINT64 LinuxDup(PKPROCESS process, UINT64 source, UINT64 target,
     }
     LINUX_FD_ENTRY copy = *original;
     copy.Handle = handle;
-    copy.Owned = copy.Kind == LINUX_FD_REGULAR;
+    copy.Owned = copy.Kind == LINUX_FD_REGULAR ||
+                 copy.Kind == LINUX_FD_CONSOLE;
     copy.CloseOnExec = !!(flags & LINUX_O_CLOEXEC);
     if (exact && process->LinuxContext->Files[target].Used)
         LinuxClose(process, target);

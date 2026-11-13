@@ -60,7 +60,8 @@ static NTSTATUS KiConsumeSignal(PDISPATCHER_HEADER h)
         mutant->OwnerThread = current;
         mutant->RecursionCount = 1;
         InsertTailList(&current->OwnedMutantListHead, &mutant->OwnerEntry);
-        ObReferenceObject((POBJECT)mutant);
+        if (mutant->ReferenceObject)
+            ObReferenceObject(mutant->ReferenceObject);
         if (mutant->Abandoned) {
             mutant->Abandoned = FALSE;
             return STATUS_ABANDONED_WAIT_0;
@@ -124,6 +125,11 @@ void KiDeliverKernelApcs(void)
         return;
     PKTHREAD thread = KeGetCurrentThread();
     if (!thread || thread->State == ThreadStateTerminated)
+        return;
+    /* KeStackAttachProcess uses another process's user mappings.  APCs queued
+     * for the owning thread stay pending until detach, matching the separate
+     * APC-state contract of an NT process attachment. */
+    if (thread->AddressSpaceAttachState)
         return;
     for (UINT32 delivered = 0; delivered < KE_MAXIMUM_KERNEL_APCS; ++delivered) {
         UINT64 flags = KiAcquireSchedulerLock();
@@ -423,7 +429,8 @@ LONG KeReleaseSemaphore(PKSEMAPHORE sem, LONG count)
 /* Mutants (mutexes): owner, recursion, and abandonment are kernel state. */
 /* ------------------------------------------------------------------ */
 
-void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned)
+void KeInitializeMutantWithReference(PKMUTANT mutant, BOOLEAN initially_owned,
+                                     PVOID reference_object)
 {
     UINT64 flags = KiAcquireSchedulerLock();
     mutant->Header.Type = MutantObject;
@@ -433,12 +440,19 @@ void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned)
     mutant->OwnerThread = initially_owned ? KeGetCurrentThread() : NULL;
     mutant->RecursionCount = initially_owned ? 1 : 0;
     mutant->Abandoned = FALSE;
+    mutant->ReferenceObject = reference_object;
     if (initially_owned) {
         InsertTailList(&mutant->OwnerThread->OwnedMutantListHead,
                        &mutant->OwnerEntry);
-        ObReferenceObject((POBJECT)mutant);
+        if (mutant->ReferenceObject)
+            ObReferenceObject(mutant->ReferenceObject);
     }
     KiReleaseSchedulerLock(flags);
+}
+
+void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned)
+{
+    KeInitializeMutantWithReference(mutant, initially_owned, NULL);
 }
 
 BOOLEAN KeReleaseMutant(PKMUTANT mutant, LONG *previous_count)
@@ -456,7 +470,8 @@ BOOLEAN KeReleaseMutant(PKMUTANT mutant, LONG *previous_count)
         RemoveEntryList(&mutant->OwnerEntry);
         InitializeListHead(&mutant->OwnerEntry);
         KiSignalObjectWithSchedulerLock(&mutant->Header);
-        ObDereferenceObject((POBJECT)mutant);
+        if (mutant->ReferenceObject)
+            ObDereferenceObject(mutant->ReferenceObject);
     }
     KiReleaseSchedulerLock(flags);
     return TRUE;
@@ -474,7 +489,8 @@ void KeAbandonThreadMutants(PKTHREAD thread)
         mutant->Abandoned = TRUE;
         mutant->Header.SignalState = 1;
         KiSignalObjectWithSchedulerLock(&mutant->Header);
-        ObDereferenceObject((POBJECT)mutant);
+        if (mutant->ReferenceObject)
+            ObDereferenceObject(mutant->ReferenceObject);
     }
     KiReleaseSchedulerLock(flags);
 }

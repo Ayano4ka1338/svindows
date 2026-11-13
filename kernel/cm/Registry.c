@@ -539,6 +539,7 @@ UINT64 NtQueryValueKey(UINT64 *a)
 void CmInitialize(void)
 {
     g_key_type = ObCreateObjectType("Key", CmpKeyDelete);
+    SeConfigureType(g_key_type, 0x20019u, 0x20006u, 0x20019u, 0xF003Fu);
 
     /* Anonymous super-root whose child "Registry" anchors absolute paths. */
     g_cm_root = cm_alloc_key("", NULL);

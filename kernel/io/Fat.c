@@ -1511,7 +1511,7 @@ NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size,
         out_info->WriteTime = entry.WriteTime;
         from_83(entry.Name, out_info->ShortName);
     }
-    KeLog("[io]   loaded '%s' (%lu bytes) from disk\n", name, (unsigned long)size);
+    KeTrace("[io]   loaded '%s' (%lu bytes) from disk\n", name, (unsigned long)size);
     return STATUS_SUCCESS;
 }
 

@@ -1,6 +1,7 @@
 /* Per-process Linux file numbers and FAT path translation. */
 #include "Internal.h"
 #include <svindows/Io.h>
+#include <svindows/Console.h>
 #include <svindows/Ob.h>
 #include <svindows/Rtl.h>
 #include <svindows/Ex.h>
@@ -47,6 +48,18 @@ static void linux_install_std_handle(PKPROCESS process, UINT32 slot,
         LinuxPtyInherit(bridge->Pty, bridge->Master);
         return;
     }
+    if (tag == IO_CHAR_DEVICE_TAG_CONSOLE) {
+        entry->Kind = LINUX_FD_CONSOLE;
+        entry->Handle = handle;
+        if (slot != 0) {
+            UINT64 output_mode = 0;
+            if (NT_SUCCESS(IoConsoleControlHandleKernel(
+                    handle, ConsoleControlGetMode, 0, 0, 0, &output_mode)))
+                (void)IoConsoleControlHandleKernel(handle,
+                    ConsoleControlSetMode, output_mode | 4u, 0, 0, NULL);
+        }
+        return;
+    }
     if (NT_SUCCESS(IoIsConsoleFileInTable(process->HandleTable, handle))) {
         entry->Kind = LINUX_FD_TTY; /* console-backed VT stream */
         return;
@@ -81,7 +94,7 @@ NTSTATUS LinuxStdHandleFromFd(PKPROCESS process, UINT64 fd, BOOLEAN write,
     LINUX_FD_ENTRY *entry = &process->LinuxContext->Files[fd];
     if (write ? entry->Mode == 0 : entry->Mode == 1)
         return STATUS_INVALID_HANDLE;
-    if (entry->Kind == LINUX_FD_REGULAR)
+    if (entry->Kind == LINUX_FD_REGULAR || entry->Kind == LINUX_FD_CONSOLE)
         return entry->Handle ?
             ObDuplicateHandleToTable(entry->Handle, process->HandleTable, out) :
             STATUS_INVALID_HANDLE;
@@ -118,7 +131,8 @@ UINT64 LinuxSyncFile(PKPROCESS process, UINT64 fd)
         return LinuxError(LINUX_EBADF);
     LINUX_FD_ENTRY *entry = &process->LinuxContext->Files[fd];
     if (entry->Kind == LINUX_FD_SOCKET || entry->Kind == LINUX_FD_PTY ||
-        entry->Kind == LINUX_FD_TTY || entry->Kind == LINUX_FD_EVENT ||
+        entry->Kind == LINUX_FD_TTY || entry->Kind == LINUX_FD_CONSOLE ||
+        entry->Kind == LINUX_FD_EVENT ||
         entry->Kind == LINUX_FD_FRAMEBUFFER)
         return LinuxError(LINUX_EINVAL);
     return NT_SUCCESS(FatFlush()) ? 0 : LinuxError(LINUX_EIO);

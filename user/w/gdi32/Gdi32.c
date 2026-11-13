@@ -38,6 +38,8 @@ __declspec(dllimport) UINT64 NtGdiGetEntry(ULONG handle, void *cell);
 __declspec(dllimport) UINT64 NtGdiBlitUserBuffer(HDC dc, const UINT32 *pixels,
     UINT32 width, UINT32 height, UINT32 source_x, UINT32 source_y,
     UINT32 copy_width, UINT32 copy_height);
+__declspec(dllimport) UINT64 SvNtGdiQueryBitmap(HBITMAP bitmap, UINT32 *description);
+__declspec(dllimport) UINT64 SvNtGdiReadBitmap(HBITMAP bitmap, UINT32 *pixels, ULONG_PTR count);
 __declspec(dllimport) long NtAllocateVirtualMemory(HANDLE process,
     void **base, ULONG_PTR zero_bits, ULONGLONG *size, ULONG allocation_type,
     ULONG protect);
@@ -219,14 +221,8 @@ GDI32_API HBITMAP CreateCompatibleBitmap(HDC reference, int width, int height)
 GDI32_API HBITMAP CreateBitmap(int width, int height, UINT planes,
                                UINT bits_per_pixel, const void *bits)
 {
-    /* The kernel allocates a zeroed 32-bpp surface; the caller's bit pattern is
-     * not copied, so a CreateBitmap with initial bits would silently come back
-     * blank. Refuse that combination instead of returning a bitmap with the
-     * wrong content. */
-    if (bits)
-        return NULL;
     HBITMAP bitmap = (HBITMAP)(ULONG_PTR)NtGdiCreateBitmap(width, height,
-                                      planes, bits_per_pixel, NULL);
+                                      planes, bits_per_pixel, bits);
     remember_bitmap_dimensions(bitmap, width, height);
     return bitmap;
 }
@@ -235,15 +231,16 @@ GDI32_API int GetObjectW(HGDIOBJ object, int bytes, LPVOID out)
 {
     if (!object || bytes <= 0 || !out || object_type(object) != SV_GDI_TYPE_BITMAP)
         return 0;
+    UINT32 description[4];
+    if (!SvNtGdiQueryBitmap((HBITMAP)object,description)) return 0;
     const BITMAP_DIMENSIONS *entry = bitmap_dimensions((HBITMAP)object);
-    if (!entry) return 0;
     BITMAP bitmap = {0};
-    bitmap.bmWidth = entry->Width;
-    bitmap.bmHeight = entry->Height;
-    bitmap.bmWidthBytes = entry->Width * 4;
-    bitmap.bmPlanes = 1;
-    bitmap.bmBitsPixel = 32;
-    bitmap.bmBits = entry->Bits;
+    bitmap.bmWidth = description[0];
+    bitmap.bmHeight = description[1];
+    bitmap.bmWidthBytes = ((description[0] * description[3] + 15) / 16) * 2;
+    bitmap.bmPlanes = (WORD)description[2];
+    bitmap.bmBitsPixel = (WORD)description[3];
+    bitmap.bmBits = entry ? entry->Bits : NULL;
     int copied = bytes < (int)sizeof(bitmap) ? bytes : (int)sizeof(bitmap);
     memcpy(out, &bitmap, (unsigned long long)copied);
     return copied;
@@ -258,6 +255,68 @@ typedef struct {
     DWORD ClrUsed, ClrImportant;
 } SV_BITMAPINFOHEADER;
 typedef struct { SV_BITMAPINFOHEADER Header; DWORD Colors[1]; } SV_BITMAPINFO;
+
+GDI32_API int GetDIBits(HDC dc, HBITMAP bitmap, UINT start_scan, UINT scan_lines,
+                       void *bits, void *bitmap_info, UINT usage)
+{
+    (void)dc;
+    UINT32 description[4];
+    SV_BITMAPINFO *info=(SV_BITMAPINFO*)bitmap_info;
+    if(!info||info->Header.Size<40||usage||!SvNtGdiQueryBitmap(bitmap,description)) return 0;
+    UINT width=description[0],height=description[1],depth=info->Header.BitsPixel;
+    if(!depth) depth=description[3];
+    if(info->Header.Compression||(depth!=1&&depth!=4&&depth!=8&&depth!=16&&depth!=24&&depth!=32)||
+       (info->Header.Width&&info->Header.Width!=(LONG)width)) return 0;
+    info->Header.Width=width; info->Header.Height=info->Header.Height<0?-(LONG)height:(LONG)height;
+    info->Header.Planes=1; info->Header.BitsPixel=(WORD)depth;
+    UINT stride=((width*depth+31)/32)*4;
+    info->Header.SizeImage=stride*height;
+    info->Header.ClrUsed=depth<=8?1u<<depth:0;
+    if(!bits) return (int)height;
+    if(start_scan>=height) return 0;
+    UINT rows=scan_lines<height-start_scan?scan_lines:height-start_scan;
+    ULONG_PTR count=(ULONG_PTR)width*height;
+    ULONGLONG allocation=(count*4+4095)&~4095ULL;
+    void *memory=NULL;
+    if(NtAllocateVirtualMemory((HANDLE)(ULONG_PTR)-1,&memory,0,&allocation,0x3000,4)<0) return 0;
+    BITMAP_DIMENSIONS *entry=bitmap_dimensions(bitmap);
+    if(entry&&entry->Bits) memcpy(memory,entry->Bits,count*4);
+    else if(!SvNtGdiReadBitmap(bitmap,memory,count)) {
+        (void)NtFreeVirtualMemory((HANDLE)(ULONG_PTR)-1,&memory,&allocation,0x8000); return 0;
+    }
+    static const UINT32 palette[16]={0x000000,0x800000,0x008000,0x808000,
+        0x000080,0x800080,0x008080,0xc0c0c0,0x808080,0xff0000,0x00ff00,
+        0xffff00,0x0000ff,0xff00ff,0x00ffff,0xffffff};
+    if(depth<=8) for(UINT i=0;i<(1u<<depth);++i)
+        info->Colors[i]=depth==1?(i?0xffffffu:0):i<16?palette[i]:
+            (((i>>5)*255/7)<<16)|((((i>>2)&7)*255/7)<<8)|((i&3)*255/3);
+    for(UINT row=0;row<rows;++row) {
+        UINT source_row=info->Header.Height<0?start_scan+row:height-1-start_scan-row;
+        UINT8 *out=(UINT8*)bits+(ULONG_PTR)row*stride;
+        memset(out,0,stride);
+        for(UINT x=0;x<width;++x) {
+            UINT32 value=((const UINT32*)memory)[(ULONG_PTR)source_row*width+x];
+            UINT red=(value>>16)&255,green=(value>>8)&255,blue=value&255;
+            if(depth==32) memcpy(out+x*4,&value,4);
+            else if(depth==24) { out[x*3]=(UINT8)blue; out[x*3+1]=(UINT8)green; out[x*3+2]=(UINT8)red; }
+            else if(depth==16) { WORD packed=(WORD)((((red*31+127)/255)<<10)|(((green*31+127)/255)<<5)|((blue*31+127)/255)); memcpy(out+x*2,&packed,2); }
+            else {
+                UINT best=0,error=~0u;
+                for(UINT i=0;i<(1u<<depth);++i) {
+                    UINT32 candidate=info->Colors[i];
+                    int dr=(int)red-(int)((candidate>>16)&255),dg=(int)green-(int)((candidate>>8)&255),db=(int)blue-(int)(candidate&255);
+                    UINT distance=(UINT)(dr*dr+dg*dg+db*db);
+                    if(distance<error) { error=distance; best=i; if(!distance) break; }
+                }
+                if(depth==8) out[x]=(UINT8)best;
+                else if(depth==4) out[x/2]|=(UINT8)(best<<(x&1?0:4));
+                else out[x/8]|=(UINT8)(best<<(7-x%8));
+            }
+        }
+    }
+    (void)NtFreeVirtualMemory((HANDLE)(ULONG_PTR)-1,&memory,&allocation,0x8000);
+    return (int)rows;
+}
 
 GDI32_API int SetDIBits(HDC dc, HBITMAP bitmap, UINT start_scan,
                         UINT scan_lines, const void *bits,

@@ -19,6 +19,32 @@
 #include <svindows/Dos.h>
 #include <svindows/Linux.h>
 #include <nt/Peb.h>
+#include <nt/Pe.h>
+#include <svindows/Session.h>
+#include <svindows/Console.h>
+#include <abi/ProcessCreate.h>
+
+typedef struct _PS_CAPTURED_PROCESS_OPTIONS {
+    ULONG Flags;
+    BOOLEAN InheritHandles;
+    PKPROCESS ParentOverride;
+    const UINT16 *Desktop;
+    const char *EnvironmentBlock;
+    SIZE_T EnvironmentBytes;
+    SE_DESCRIPTOR *ProcessDescriptor, *ThreadDescriptor;
+    BOOLEAN InheritProcessHandle, InheritThreadHandle;
+    ULONG StartupFlags, ShowWindow, X, Y, XSize, YSize, XChars, YChars, FillAttribute;
+} PS_CAPTURED_PROCESS_OPTIONS;
+static PS_CONSOLE_PROCESS_INITIALIZER g_process_console_initialize;
+static void (*g_process_console_published)(PKPROCESS);
+void PsRegisterConsoleProcessInitializer(PS_CONSOLE_PROCESS_INITIALIZER initialize)
+{ g_process_console_initialize = initialize; }
+void PsRegisterConsoleProcessPublished(void (*published)(PKPROCESS))
+{ g_process_console_published = published; }
+
+/* Console teardown is provided by the hosted-console subsystem. */
+void ConDetachProcessConsole(PKPROCESS process);
+NTSTATUS ConWaitForProcessConsoleHost(PKPROCESS process);
 
 #define CHILD_STACK_TOP   0x0000000010010000ULL
 /* Match the 1 MiB default PE stack reserve. Large native programs such as
@@ -69,6 +95,10 @@ static void delete_process(POBJECT raw)
     PsJobProcessExited(&object->Process);
     W32kCleanupProcessUser(&object->Process);
     W32kCleanupProcessGdi(&object->Process);
+    W32kCleanupProcessInputIdle(&object->Process);
+    ConDetachProcessConsole(&object->Process);
+    W32kCleanupProcessSession(&object->Process);
+    PsCleanupProcessEnvironment(&object->Process);
     LdrDestroyProcessContext(object->Process.LoaderContext);
     object->Process.LoaderContext = NULL;
     MmCleanupProcessSections(&object->Process);
@@ -92,34 +122,15 @@ static NTSTATUS capture_ascii(UINT64 address, char *out, SIZE_T capacity)
     return STATUS_BUFFER_TOO_SMALL;
 }
 
-NTSTATUS PsSetProcessEnvironment(PKPROCESS process,
-                                 const char *const *entries, UINT32 count)
-{
-    if (!process || count > 64 || (count && !entries))
-        return STATUS_INVALID_PARAMETER;
-    char block[sizeof(process->Environment)] = {0};
-    SIZE_T used = 0;
-    for (UINT32 i = 0; i < count; i++) {
-        const char *entry = entries[i];
-        if (!entry) return STATUS_INVALID_PARAMETER;
-        SIZE_T length = strlen(entry) + 1;
-        if (length > sizeof(block) - used - 1)
-            return STATUS_BUFFER_TOO_SMALL;
-        memcpy(block + used, entry, length);
-        used += length;
-    }
-    memcpy(process->Environment, block, sizeof(block));
-    return STATUS_SUCCESS;
-}
-
 /* Keep a minimal POSIX user environment for ELF children even when the PE
  * parent was created without a complete Windows environment block. */
 static BOOLEAN process_environment_has(PKPROCESS process, const char *name)
 {
     SIZE_T name_length = strlen(name);
-    SIZE_T used = 0;
-    while (used < sizeof(process->Environment) && process->Environment[used]) {
-        const char *entry = process->Environment + used;
+    SIZE_T bytes, used = 0;
+    const char *data = PsProcessEnvironmentData(process, &bytes);
+    while (used < bytes && data[used]) {
+        const char *entry = data + used;
         if (strncmp(entry, name, name_length) == 0 &&
             entry[name_length] == '=')
             return TRUE;
@@ -148,11 +159,12 @@ static NTSTATUS ensure_elf_environment_defaults(PKPROCESS process,
 {
     const char *entries[64];
     UINT32 count = 0;
-    SIZE_T used = 0;
-    while (used < sizeof(process->Environment) &&
-           process->Environment[used] && count < 64) {
-        entries[count++] = process->Environment + used;
-        used += strlen(process->Environment + used) + 1;
+    SIZE_T bytes, used = 0;
+    const char *data = PsProcessEnvironmentData(process, &bytes);
+    while (used < bytes && data[used]) {
+        if (count == 64) return STATUS_BUFFER_TOO_SMALL;
+        entries[count++] = data + used;
+        used += strlen(data + used) + 1;
     }
 
     static const char *defaults[] = {
@@ -239,15 +251,15 @@ static UINT32 process_environment_vector(PKPROCESS process,
                                           const char *entries[64],
                                           char linux_path[512])
 {
-    SIZE_T used = 0;
+    SIZE_T bytes, used = 0;
     UINT32 count = 0;
-    while (used < sizeof(process->Environment) &&
-           process->Environment[used] && count < 64) {
-        const char *entry = process->Environment + used;
+    const char *data = PsProcessEnvironmentData(process, &bytes);
+    while (used < bytes && data[used] && count < 64) {
+        const char *entry = data + used;
         entries[count++] = entry;
         if (linux_convert_search_path(entry, linux_path))
             entries[count - 1] = linux_path;
-        used += strlen(process->Environment + used) + 1;
+        used += strlen(entry) + 1;
     }
     return count;
 }
@@ -263,6 +275,62 @@ static void *map_rw(UINT64 va)
     }
     memset((void *)va, 0, PAGE_SIZE);
     return (void *)va;
+}
+
+/* Unused portions of the ABI-sized USER/GDI handle tables all read as zero.
+ * Alias one global read-only frame there instead of allocating hundreds of
+ * private zero frames for every process. */
+static UINT64 g_process_zero_page = MM_INVALID_PHYS;
+
+static UINT64 process_zero_page(void)
+{
+    UINT64 page = __atomic_load_n(&g_process_zero_page, __ATOMIC_ACQUIRE);
+    if (page != MM_INVALID_PHYS) return page;
+    UINT64 fresh = MmAllocatePage();
+    if (fresh == MM_INVALID_PHYS) return fresh;
+    memset(MmPhysToVirt(fresh), 0, PAGE_SIZE);
+    UINT64 expected = MM_INVALID_PHYS;
+    if (!__atomic_compare_exchange_n(&g_process_zero_page, &expected, fresh,
+                                     FALSE, __ATOMIC_RELEASE,
+                                     __ATOMIC_ACQUIRE)) {
+        MmFreePages(fresh, 1);
+        fresh = expected;
+    }
+    return fresh;
+}
+
+static BOOLEAN map_rw_range(UINT64 base, UINT64 size)
+{
+    if (!size || (size & PAGE_MASK)) return FALSE;
+    SIZE_T pages = size / PAGE_SIZE;
+    UINT64 contiguous = MmAllocatePages(pages);
+    if (contiguous != MM_INVALID_PHYS) {
+        if (MmMapContiguousPages(base, contiguous, pages,
+                                 PTE_USER | PTE_WRITE)) {
+            memset((void *)base, 0, size);
+            if (pages >= 64) KeYield();
+            return TRUE;
+        }
+        MmFreePages(contiguous, pages);
+    }
+    for (UINT64 off = 0; off < size; off += PAGE_SIZE) {
+        if (!map_rw(base + off)) return FALSE;
+    }
+    if (pages >= 64) KeYield();
+    return TRUE;
+}
+
+static BOOLEAN map_sparse_table(UINT64 base, UINT64 size, UINT64 committed)
+{
+    UINT64 zero = process_zero_page();
+    if (zero == MM_INVALID_PHYS) return FALSE;
+    if (!map_rw_range(base, committed)) return FALSE;
+    SIZE_T aliases = (size - committed) / PAGE_SIZE;
+    if (aliases && !MmMapAliasedPages(base + committed, zero, aliases,
+                                      PTE_USER | PTE_SHARED))
+        return FALSE;
+    KeYield();
+    return TRUE;
 }
 
 typedef struct _PE_BOOT_INFO {
@@ -289,55 +357,78 @@ static NTSTATUS build_pe_user_environment(PKPROCESS process, const char *name,
 
     /* Map the process-owned USER/GDI tables before registering this process
      * with win32k. */
-    for (UINT64 off = 0; off < PROCESS_GDI_SHARED_TABLE_SIZE;
-         off += PAGE_SIZE) {
-        if (!map_rw(PROCESS_GDI_SHARED_TABLE_VA + off))
-            return STATUS_NO_MEMORY;
-    }
+    if (!map_sparse_table(PROCESS_GDI_SHARED_TABLE_VA,
+                          PROCESS_GDI_SHARED_TABLE_SIZE,
+                          PROCESS_GDI_SHARED_TABLE_COMMIT_SIZE))
+        return STATUS_NO_MEMORY;
     peb->GdiSharedHandleTable = (PVOID)PROCESS_GDI_SHARED_TABLE_VA;
-    for (UINT64 off = 0; off < PROCESS_GDI_ATTR_SIZE; off += PAGE_SIZE) {
-        if (!map_rw(PROCESS_GDI_ATTR_VA + off))
-            return STATUS_NO_MEMORY;
-    }
+    if (!map_rw_range(PROCESS_GDI_ATTR_VA, PROCESS_GDI_ATTR_SIZE))
+        return STATUS_NO_MEMORY;
     W32kInitializeGdi();
 
-    for (UINT64 off = 0; off < PROCESS_USER_SHARED_TABLE_SIZE;
-         off += PAGE_SIZE) {
-        if (!map_rw(PROCESS_USER_SHARED_TABLE_VA + off))
-            return STATUS_NO_MEMORY;
-    }
+    if (!map_sparse_table(PROCESS_USER_SHARED_TABLE_VA,
+                          PROCESS_USER_SHARED_TABLE_SIZE,
+                          PROCESS_USER_SHARED_TABLE_COMMIT_SIZE))
+        return STATUS_NO_MEMORY;
     /* win32k fills HANDLEENTRY cells transiently; user mode only observes
      * them, matching USER32's read-only shared table contract. */
     MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
-                   PROCESS_USER_SHARED_TABLE_SIZE, FALSE);
-    for (UINT64 off = 0; off < PROCESS_USER_OBJECT_ARENA_SIZE;
-         off += PAGE_SIZE) {
-        if (!map_rw(PROCESS_USER_OBJECT_ARENA_VA + off))
-            return STATUS_NO_MEMORY;
-    }
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE, FALSE);
+    if (!map_rw_range(PROCESS_USER_OBJECT_ARENA_VA,
+                      PROCESS_USER_OBJECT_ARENA_SIZE))
+        return STATUS_NO_MEMORY;
 
-    for (UINT64 off = 0; off < PROCESS_LDR_SIZE; off += PAGE_SIZE)
-        if (!map_rw(PROCESS_LDR_VA + off)) return STATUS_NO_MEMORY;
+    if (!map_rw_range(PROCESS_LDR_VA, PROCESS_LDR_SIZE))
+        return STATUS_NO_MEMORY;
     LdrBuildProcessModuleList(peb, PROCESS_LDR_VA, PROCESS_LDR_SIZE);
 
     UINT8 *params = map_rw(PROCESS_PARAMS_VA);
     if (!params) return STATUS_NO_MEMORY;
-    UINT16 *envw = map_rw(PROCESS_ENV_VA);
-    if (!envw) return STATUS_NO_MEMORY;
-    SIZE_T env_chars = 0;
-    for (SIZE_T i = 0; i < sizeof(process->Environment) &&
-         process->Environment[i];) {
-        do {
-            envw[env_chars++] = (UINT8)process->Environment[i++];
-        } while (i < sizeof(process->Environment) &&
-                 process->Environment[i]);
-        envw[env_chars++] = 0;
-        /* Advance past the separator; otherwise the outer loop sees the same
-         * NUL again and exposes only the first environment variable. */
-        i++;
+    SIZE_T environment_bytes, environment_chars;
+    const char *environment_data = PsProcessEnvironmentData(process, &environment_bytes);
+    NTSTATUS environment_status = PsEnvironmentToWide(environment_data, environment_bytes,
+                                                      NULL, 0, &environment_chars);
+    if (!NT_SUCCESS(environment_status)) return environment_status;
+    UINT64 environment_address = PROCESS_ENV_VA;
+    SIZE_T environment_pages = (environment_chars * 2 + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (environment_pages > 1) {
+        environment_address = PAGE_ALIGN_UP(process->UserAllocationNext);
+        if (environment_address > MM_USER_MAX - environment_pages * PAGE_SIZE)
+            return STATUS_NO_MEMORY;
+        process->UserAllocationNext = environment_address + environment_pages * PAGE_SIZE;
     }
-    envw[env_chars] = 0;
+    for (SIZE_T page = 0; page < environment_pages; page++)
+        if (!map_rw(environment_address + page * PAGE_SIZE)) return STATUS_NO_MEMORY;
+    UINT16 *envw = (UINT16 *)environment_address;
+    environment_status = PsEnvironmentToWide(environment_data, environment_bytes,
+                                              envw, environment_chars, &environment_chars);
+    if (!NT_SUCCESS(environment_status)) return environment_status;
     *(void **)(params + 0x80) = envw;
+    *(ULONG *)(params + 0x88) = process->StartupX;
+    *(ULONG *)(params + 0x8C) = process->StartupY;
+    *(ULONG *)(params + 0x90) = process->StartupXSize;
+    *(ULONG *)(params + 0x94) = process->StartupYSize;
+    *(ULONG *)(params + 0x98) = process->StartupXChars;
+    *(ULONG *)(params + 0x9C) = process->StartupYChars;
+    *(ULONG *)(params + 0xA0) = process->StartupFillAttribute;
+    *(ULONG *)(params + 0xA4) = process->StartupFlags;
+    *(ULONG *)(params + 0xA8) = process->StartupShowWindow;
+    ULONG desktop_chars = 0;
+    NTSTATUS desktop_status = W32kQueryProcessDesktopName(process, NULL, 0, &desktop_chars);
+    if (desktop_status != STATUS_BUFFER_TOO_SMALL || !desktop_chars) return desktop_status;
+    UINT64 desktop_address = (UINT64)(params + 0xC20);
+    if (desktop_chars > (PAGE_SIZE - 0xC20) / 2) {
+        desktop_address = PAGE_ALIGN_UP(process->UserAllocationNext);
+        SIZE_T pages = ((SIZE_T)desktop_chars * 2 + PAGE_SIZE - 1) / PAGE_SIZE;
+        process->UserAllocationNext = desktop_address + pages * PAGE_SIZE;
+        for (SIZE_T page = 0; page < pages; page++)
+            if (!map_rw(desktop_address + page * PAGE_SIZE)) return STATUS_NO_MEMORY;
+    }
+    desktop_status = W32kQueryProcessDesktopName(process, (UINT16 *)desktop_address, desktop_chars, &desktop_chars);
+    if (!NT_SUCCESS(desktop_status)) return desktop_status;
+    *(UINT16 *)(params + 0xC0) = (UINT16)((desktop_chars - 1) * 2);
+    *(UINT16 *)(params + 0xC2) = (UINT16)(desktop_chars * 2);
+    *(UINT64 *)(params + 0xC8) = desktop_address;
     UINT16 *imagew = (UINT16 *)(params + 0x200);
     UINT16 *cmdw = (UINT16 *)(params + 0x400);
     UINT16 *cwdw = (UINT16 *)(params + 0xa00);
@@ -374,8 +465,8 @@ static NTSTATUS build_pe_user_environment(PKPROCESS process, const char *name,
     for (UINT16 i = 0; i <= cmd_n; i++) cmda[i] = command[i];
     LdrSeedCrtCommandLine((UINT64)cmda, (UINT64)cmdw);
 
-    for (UINT64 off = 0; off < PROCESS_TEB_SIZE; off += PAGE_SIZE)
-        if (!map_rw(PROCESS_MAIN_TEB_VA + off)) return STATUS_NO_MEMORY;
+    if (!map_rw_range(PROCESS_MAIN_TEB_VA, PROCESS_TEB_SIZE))
+        return STATUS_NO_MEMORY;
     PTEB teb = (PTEB)PROCESS_MAIN_TEB_VA;
     teb->NtTib.Self = (struct _NT_TIB *)PROCESS_MAIN_TEB_VA;
     teb->ProcessEnvironmentBlock = (PVOID)PROCESS_PEB_VA;
@@ -386,8 +477,8 @@ static NTSTATUS build_pe_user_environment(PKPROCESS process, const char *name,
         (HANDLE)(ULONG_PTR)process->ProcessId;
 
     UINT64 stack_base = CHILD_STACK_TOP - CHILD_STACK_PAGES * PAGE_SIZE;
-    for (UINT64 off = 0; off < CHILD_STACK_PAGES * PAGE_SIZE; off += PAGE_SIZE)
-        if (!map_rw(stack_base + off)) return STATUS_NO_MEMORY;
+    if (!map_rw_range(stack_base, CHILD_STACK_PAGES * PAGE_SIZE))
+        return STATUS_NO_MEMORY;
     teb->NtTib.StackBase = (PVOID)CHILD_STACK_TOP;
     teb->NtTib.StackLimit = (PVOID)stack_base;
 
@@ -413,6 +504,23 @@ static NTSTATUS build_environment(PROCESS_OBJECT *object, const char *command,
                                                 object->Name, command,
                                                 image_base, &boot);
     if (!NT_SUCCESS(status)) return status;
+    /* Never publish a thread whose initial frame cannot be constructed in its
+     * own page tables.  Besides producing a useful process-creation failure,
+     * this catches any future address-space attachment regression before a
+     * supervisor write in KiEnterUserMode turns it into a kernel bugcheck. */
+    if (MmGetPhysicalAddressInAddressSpace(
+            object->Process.DirectoryTableBase, boot.StackTop - 0x28) ==
+            MM_INVALID_PHYS ||
+        MmGetPhysicalAddressInAddressSpace(
+            object->Process.DirectoryTableBase, PROCESS_MAIN_TEB_VA) ==
+            MM_INVALID_PHYS ||
+        MmGetPhysicalAddressInAddressSpace(
+            object->Process.DirectoryTableBase, boot.Entry) ==
+            MM_INVALID_PHYS) {
+        KeLog("[ps]   refusing process '%s': incomplete initial user mapping\n",
+              object->Name);
+        return STATUS_ACCESS_VIOLATION;
+    }
     PKTHREAD thread = KeCreateUserThreadForProcess(
         &object->Process, object->Name, boot.Entry, boot.StackTop,
         PROCESS_MAIN_TEB_VA, argument, object->Process.BasePriority);
@@ -662,7 +770,15 @@ UINT64 NtOpenProcess(UINT64 *a)
         !MmProbeForRead((UINT64)id, sizeof(*id)))
         return (UINT64)STATUS_ACCESS_VIOLATION;
     *output = NULL;
-    if (a[2]) return (UINT64)STATUS_NOT_SUPPORTED;
+    BOOLEAN inherit = FALSE;
+    if (a[2]) {
+        OBJECT_ATTRIBUTES attributes;
+        if (!MmProbeForRead(a[2], sizeof(attributes))) return (UINT64)STATUS_ACCESS_VIOLATION;
+        memcpy(&attributes, (void *)a[2], sizeof(attributes));
+        if (attributes.Length != sizeof(attributes) || attributes.ObjectName || attributes.RootDirectory ||
+            (attributes.Attributes & 0x200u)) return (UINT64)STATUS_INVALID_PARAMETER;
+        inherit = (attributes.Attributes & 2u) != 0;
+    }
     ULONG pid = (ULONG)(ULONG_PTR)id->Process;
     if (!pid || id->Thread) return (UINT64)STATUS_INVALID_PARAMETER;
     POBJECT found = NULL;
@@ -680,7 +796,15 @@ UINT64 NtOpenProcess(UINT64 *a)
     }
     KeReleaseSpinLock(&g_process_list_lock, old_irql);
     if (!found) return (UINT64)STATUS_NOT_FOUND;
-    NTSTATUS status = ObCreateHandle(found, (ACCESS_MASK)a[1], output);
+    PKTHREAD caller = KeGetCurrentThread();
+    SE_DESCRIPTOR *descriptor = SeReferenceObjectDescriptor(found);
+    ACCESS_MASK granted = 0;
+    NTSTATUS status = SeAccessCheck(descriptor, caller->Process->SecurityUserRid, (ACCESS_MASK)a[1],
+                                    &ObHeaderFromObject(found)->Type->GenericMapping, &granted);
+    SeDereferenceDescriptor(descriptor);
+    if (NT_SUCCESS(status)) status = ObCreateHandle(found, granted, output);
+    if (NT_SUCCESS(status) && inherit)
+        ObSetHandleAttributesInTable(caller->Process->HandleTable, *output, OB_HANDLE_INHERIT, OB_HANDLE_INHERIT);
     ObDereferenceObject(found);
     return (UINT64)status;
 }
@@ -734,17 +858,52 @@ UINT64 NtDuplicateObject(UINT64 *a)
     return (UINT64)status;
 }
 
-static NTSTATUS create_process_captured(const char *filename,
+static NTSTATUS PspCopyStandardHandle(PKPROCESS parent, PKPROCESS process,
+                                     HANDLE source, HANDLE *target)
+{
+    *target = NULL;
+    if (!source) return STATUS_SUCCESS;
+    if (!parent || !parent->HandleTable) return STATUS_INVALID_HANDLE;
+    POBJECT object, existing = NULL;
+    NTSTATUS status = ObReferenceObjectByHandleInTable(parent->HandleTable,
+                                      source, 0, NULL, &object, NULL);
+    if (!NT_SUCCESS(status)) return status;
+    status = ObReferenceObjectByHandleInTable(process->HandleTable,
+                                      source, 0, NULL, &existing, NULL);
+    if (NT_SUCCESS(status)) {
+        if (object == existing) *target = source;
+        ObDereferenceObject(existing);
+    }
+    if (!*target) status = ObDuplicateHandleBetweenTables(parent->HandleTable,
+                        source, process->HandleTable, 0, TRUE, FALSE, target);
+    else status = STATUS_SUCCESS;
+    ObDereferenceObject(object); return status;
+}
+
+static void PspCloseStandardHandle(PKPROCESS process, HANDLE handle)
+{
+    POBJECT object;
+    if (handle && NT_SUCCESS(ObReferenceObjectByHandleInTable(process->HandleTable,
+                                        handle, 0, NULL, &object, NULL))) {
+        ObCloseHandleForObject(process->HandleTable, handle, object);
+        ObDereferenceObject(object);
+    }
+}
+
+static NTSTATUS create_process_captured_extended(const char *filename,
                                         const char *command,
                                         const char *current_directory,
                                         HANDLE *out, ULONG *pid_out,
                                         HANDLE std_input, HANDLE std_output,
                                         HANDLE std_error,
                                         const char *const *environment,
-                                        UINT32 environment_count)
+                                        UINT32 environment_count,
+                                        const PS_CAPTURED_PROCESS_OPTIONS *options,
+                                        HANDLE *thread_out, ULONG *thread_id_out)
 {
     if (!g_process_type)
         g_process_type = ObCreateObjectType("Process", delete_process);
+    SeConfigureType(g_process_type, 0x21410u, 0x20BEBu, 0x120000u, 0x1FFFFFu);
     POBJECT raw;
     NTSTATUS status = ObCreateObject(g_process_type, sizeof(PROCESS_OBJECT),
                                      &raw);
@@ -756,22 +915,50 @@ static NTSTATUS create_process_captured(const char *filename,
     InitializeListHead(&object->Header.WaitListHead);
     object->Process.ProcessId = __sync_fetch_and_add(&g_next_process_id, 4);
     PKTHREAD creator = KeGetCurrentThread();
+    PKPROCESS parent = options && options->ParentOverride ? options->ParentOverride :
+                       creator ? creator->Process : NULL;
     object->Process.ParentProcessId =
-        creator && creator->Process ? creator->Process->ProcessId : 0;
+        parent ? parent->ProcessId : 0;
     object->Process.SecurityUserRid =
-        creator && creator->Process ? creator->Process->SecurityUserRid : 1000;
+        parent ? parent->SecurityUserRid : 1000;
+    if (options && options->ProcessDescriptor) SeAssignObjectDescriptor(raw, options->ProcessDescriptor);
+    else if (SeDescriptorOwnerRid(ObHeaderFromObject(raw)->SecurityDescriptor) != object->Process.SecurityUserRid) {
+        SE_DESCRIPTOR *descriptor = NULL;
+        status = SeCreateDefaultDescriptor(object->Process.SecurityUserRid, &descriptor);
+        if (!NT_SUCCESS(status)) { ObDereferenceObject(raw); return status; }
+        SeAssignObjectDescriptor(raw, descriptor); SeDereferenceDescriptor(descriptor);
+    }
     object->Process.PriorityClass =
-        creator && creator->Process ? creator->Process->PriorityClass : 2;
+        parent ? parent->PriorityClass : 2;
     object->Process.BasePriority =
-        creator && creator->Process ? creator->Process->BasePriority : 8;
+        parent ? parent->BasePriority : 8;
     object->Process.ExitStatus = STATUS_PENDING;
     object->Process.ShutdownLevel = 0x280;
     object->Process.ErrorMode =
-        creator && creator->Process ? creator->Process->ErrorMode : 0;
-    if (creator && creator->Process)
-        memcpy(object->Process.Environment, creator->Process->Environment,
-               sizeof(object->Process.Environment));
-    if (environment) {
+        parent ? parent->ErrorMode : 0;
+    if (options) {
+        object->Process.CreationFlags = options->Flags;
+        object->Process.StartupFlags = options->StartupFlags;
+        object->Process.StartupShowWindow = options->ShowWindow;
+        object->Process.StartupX = options->X; object->Process.StartupY = options->Y;
+        object->Process.StartupXSize = options->XSize; object->Process.StartupYSize = options->YSize;
+        object->Process.StartupXChars = options->XChars; object->Process.StartupYChars = options->YChars;
+        object->Process.StartupFillAttribute = options->FillAttribute;
+        ULONG priority = options->Flags & 0xC1E0u;
+        if (priority) {
+            object->Process.PriorityClass = priority == 0x40 ? 1 : priority == 0x80 ? 3 :
+                priority == 0x100 ? 4 : priority == 0x4000 ? 5 : priority == 0x8000 ? 6 : 2;
+            object->Process.BasePriority = priority == 0x40 ? 4 : priority == 0x80 ? 13 :
+                priority == 0x100 ? 24 : priority == 0x4000 ? 6 : priority == 0x8000 ? 10 : 8;
+        }
+        if (options->Flags & 0x04000000u) object->Process.ErrorMode = 0;
+    } else if (std_input || std_output || std_error) object->Process.StartupFlags = 0x100u;
+    if (parent) PsCloneProcessEnvironment(&object->Process, parent);
+    if (options && options->EnvironmentBlock) {
+        status = PsSetProcessEnvironmentBlock(&object->Process,
+            options->EnvironmentBlock, options->EnvironmentBytes);
+        if (!NT_SUCCESS(status)) { ObDereferenceObject(raw); return status; }
+    } else if (environment) {
         status = PsSetProcessEnvironment(&object->Process, environment,
                                          environment_count);
         if (!NT_SUCCESS(status)) {
@@ -785,9 +972,8 @@ static NTSTATUS create_process_captured(const char *filename,
     object->Process.ThreadAllocationNext = 0x0000000030000000ULL;
     const char *cwd = current_directory && current_directory[0]
                           ? current_directory :
-                      creator && creator->Process &&
-                      creator->Process->CurrentDirectory[0]
-                          ? creator->Process->CurrentDirectory : "C:\\";
+                      parent && parent->CurrentDirectory[0]
+                          ? parent->CurrentDirectory : "C:\\";
     UINT32 cwd_n = 0;
     while (cwd[cwd_n] && cwd_n + 1 < sizeof(object->Process.CurrentDirectory)) {
         object->Process.CurrentDirectory[cwd_n] = cwd[cwd_n];
@@ -821,6 +1007,15 @@ static NTSTATUS create_process_captured(const char *filename,
         ObDereferenceObject(raw);
         return STATUS_NO_MEMORY;
     }
+    if (options && options->InheritHandles && parent) {
+        status = W32kInheritSessionHandles(&object->Process, parent);
+        if (!NT_SUCCESS(status)) { ObDereferenceObject(raw); return status; }
+    }
+    status = W32kInitializeProcessSession(&object->Process, parent,
+                    options && options->ParentOverride ? NULL : creator);
+    if (NT_SUCCESS(status)) status = W32kAssignProcessStartupDesktop(&object->Process,
+                                                   options ? options->Desktop : NULL);
+    if (!NT_SUCCESS(status)) { ObDereferenceObject(raw); return status; }
     object->Process.LoaderContext = LdrCreateProcessContext();
     if (!object->Process.LoaderContext) {
         ObDestroyHandleTable(object->Process.HandleTable);
@@ -828,28 +1023,53 @@ static NTSTATUS create_process_captured(const char *filename,
         ObDereferenceObject(raw);
         return STATUS_NO_MEMORY;
     }
-    KeLog("[ps]   process object %p owns loader context %p\n", raw,
+    KeTrace("[ps]   process object %p owns loader context %p\n", raw,
           object->Process.LoaderContext);
-    if (std_input &&
-        !NT_SUCCESS(ObDuplicateHandleToTable(std_input,
-                     object->Process.HandleTable,
-                     &object->Process.StandardInput))) {
-        ObDereferenceObject(raw);
-        return STATUS_INVALID_HANDLE;
+    void *image_data = NULL;
+    SIZE_T image_size = 0;
+    status = FatLoadFile(object->Process.ImagePath, &image_data, &image_size, NULL);
+    if (!NT_SUCCESS(status)) { ObDereferenceObject(raw); return status; }
+    if (image_size >= sizeof(IMAGE_DOS_HEADER)) {
+        const IMAGE_DOS_HEADER *dos = image_data;
+        SIZE_T offset = dos->e_lfanew;
+        if (dos->e_magic == IMAGE_DOS_SIGNATURE && offset <= image_size &&
+            sizeof(IMAGE_NT_HEADERS64) <= image_size - offset) {
+            const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)((UINT8 *)image_data + offset);
+            if (nt->Signature == IMAGE_NT_SIGNATURE)
+                object->Process.ImageSubsystem = nt->OptionalHeader.Subsystem;
+        }
     }
-    if (std_output &&
-        !NT_SUCCESS(ObDuplicateHandleToTable(std_output,
-                     object->Process.HandleTable,
-                     &object->Process.StandardOutput))) {
-        ObDereferenceObject(raw);
-        return STATUS_INVALID_HANDLE;
+    if (g_process_console_initialize) {
+        status = g_process_console_initialize(&object->Process, parent,
+            object->Process.CreationFlags, object->Process.ImageSubsystem,
+            std_input, std_output, std_error);
+        if (!NT_SUCCESS(status)) { ExFreePool(image_data); ObDereferenceObject(raw); return status; }
     }
-    if (std_error &&
-        !NT_SUCCESS(ObDuplicateHandleToTable(std_error,
-                     object->Process.HandleTable,
-                     &object->Process.StandardError))) {
-        ObDereferenceObject(raw);
-        return STATUS_INVALID_HANDLE;
+    BOOLEAN explicit_standard = (object->Process.StartupFlags & 0x100u) != 0;
+    BOOLEAN inherit_console_standard = parent &&
+        ((parent->NativeConsole && object->Process.NativeConsole) ||
+         (parent->LegacyConsole && object->Process.LegacyConsole)) &&
+        !object->Process.StandardInput && !object->Process.StandardOutput &&
+        !object->Process.StandardError;
+    if (explicit_standard || inherit_console_standard) {
+        HANDLE source[3] = {explicit_standard ? std_input : parent->StandardInput,
+            explicit_standard ? std_output : parent->StandardOutput,
+            explicit_standard ? std_error : parent->StandardError};
+        HANDLE old[3] = {object->Process.StandardInput, object->Process.StandardOutput,
+                         object->Process.StandardError};
+        HANDLE copied[3] = {0};
+        for (ULONG i = 0; i < 3; i++) {
+            status = PspCopyStandardHandle(parent, &object->Process, source[i], &copied[i]);
+            if (!NT_SUCCESS(status)) { ExFreePool(image_data); ObDereferenceObject(raw); return status; }
+        }
+        object->Process.StandardInput = copied[0]; object->Process.StandardOutput = copied[1];
+        object->Process.StandardError = copied[2];
+        for (ULONG i = 0; i < 3; i++) {
+            BOOLEAN keep = !old[i];
+            for (ULONG j = 0; j < 3; j++) if (old[i] == copied[j]) keep = TRUE;
+            for (ULONG j = 0; j < i; j++) if (old[i] == old[j]) keep = TRUE;
+            if (!keep) PspCloseStandardHandle(&object->Process, old[i]);
+        }
     }
     object->Process.DirectoryTableBase = MmCreateAddressSpace();
     if (object->Process.DirectoryTableBase == MM_INVALID_PHYS) {
@@ -858,6 +1078,7 @@ static NTSTATUS create_process_captured(const char *filename,
         ObDestroyHandleTable(object->Process.HandleTable);
         object->Process.HandleTable = NULL;
         ObDereferenceObject(raw);
+        ExFreePool(image_data);
         return STATUS_NO_MEMORY;
     }
 
@@ -866,21 +1087,41 @@ static NTSTATUS create_process_captured(const char *filename,
         status = ObCreateHandle(raw, GENERIC_ALL, &handle);
         if (!NT_SUCCESS(status)) {
             ObDereferenceObject(raw);
+            ExFreePool(image_data);
             return status;
         }
     }
 
+    PVOID main_thread_object = NULL;
+    HANDLE main_thread_handle = NULL;
+    status = PsCreateThreadObject(&main_thread_object, thread_out ? &main_thread_handle : NULL);
+    if (!NT_SUCCESS(status)) {
+        if (handle) ObCloseHandle(handle);
+        ExFreePool(image_data); ObDereferenceObject(raw); return status;
+    }
+    if (options && options->ThreadDescriptor) SeAssignObjectDescriptor(main_thread_object, options->ThreadDescriptor);
+    else if (SeDescriptorOwnerRid(ObHeaderFromObject(main_thread_object)->SecurityDescriptor) != object->Process.SecurityUserRid) {
+        SE_DESCRIPTOR *descriptor = NULL;
+        status = SeCreateDefaultDescriptor(object->Process.SecurityUserRid, &descriptor);
+        if (!NT_SUCCESS(status)) {
+            if (main_thread_handle) ObCloseHandle(main_thread_handle);
+            ObDereferenceObject(main_thread_object);
+            if (handle) ObCloseHandle(handle);
+            ExFreePool(image_data); ObDereferenceObject(raw); return status;
+        }
+        SeAssignObjectDescriptor(main_thread_object, descriptor); SeDereferenceDescriptor(descriptor);
+    }
+    if (options && options->InheritProcessHandle && handle)
+        ObSetHandleAttributesInTable(parent->HandleTable, handle, OB_HANDLE_INHERIT, OB_HANDLE_INHERIT);
+    if (options && options->InheritThreadHandle && main_thread_handle)
+        ObSetHandleAttributesInTable(parent->HandleTable, main_thread_handle, OB_HANDLE_INHERIT, OB_HANDLE_INHERIT);
     PKTHREAD thread = NULL;
-    void *image_data = NULL;
-    SIZE_T image_size = 0;
-    status = FatLoadFile(object->Process.ImagePath, &image_data, &image_size,
-                         NULL);
     if (NT_SUCCESS(status) && LinuxIsElfImage(image_data, image_size)) {
         status = ensure_elf_environment_defaults(&object->Process,
                                                   object->Process.ImagePath);
         if (NT_SUCCESS(status)) {
             if (process_image_is_feh(object->Process.ImagePath)) {
-                KeLog("[ps]   feh environment: HOME=%u FEH_SKIP_MAGIC=%u IMLIB2_LOADER_PATH=%u\n",
+                KeTrace("[ps]   feh environment: HOME=%u FEH_SKIP_MAGIC=%u IMLIB2_LOADER_PATH=%u\n",
                       process_environment_has(&object->Process, "HOME"),
                       process_environment_has(&object->Process, "FEH_SKIP_MAGIC"),
                       process_environment_has(&object->Process, "IMLIB2_LOADER_PATH"));
@@ -889,14 +1130,14 @@ static NTSTATUS create_process_captured(const char *filename,
             char linux_path[512];
             UINT32 linux_environment_count = process_environment_vector(
                 &object->Process, linux_environment, linux_path);
-            UINT64 parent_space = MmGetCurrentAddressSpace();
-            MmSwitchAddressSpace(object->Process.DirectoryTableBase);
+            KAPC_STATE attach_state;
+            KeStackAttachProcess(&object->Process, &attach_state);
             status = LinuxCreateInitialThread(&object->Process, object->Name,
                                               command, image_data, image_size,
                                               linux_environment,
                                               linux_environment_count,
                                               &thread);
-            MmSwitchAddressSpace(parent_space);
+            KeUnstackDetachProcess(&attach_state);
         }
         ExFreePool(image_data);
     } else if (NT_SUCCESS(status) &&
@@ -914,26 +1155,35 @@ static NTSTATUS create_process_captured(const char *filename,
             }
         }
     } else {
-        if (image_data) ExFreePool(image_data);
-        UINT64 parent_space = MmGetCurrentAddressSpace();
         PLDR_PROCESS_CONTEXT previous_loader = LdrSetThreadProcessContext(
             object->Process.LoaderContext);
-        MmSwitchAddressSpace(object->Process.DirectoryTableBase);
+        KAPC_STATE attach_state;
+        KeStackAttachProcess(&object->Process, &attach_state);
         LdrResetProcessContext();
         UINT64 entry, base, argument;
-        status = LdrLoadExecutable(filename, &entry, &base, &argument);
+        status = LdrLoadExecutableImage(filename, image_data, image_size,
+                                        &entry, &base, &argument);
+        if (image_data) {
+            ExFreePool(image_data);
+            image_data = NULL;
+        }
         if (NT_SUCCESS(status))
             status = build_environment(object, command, base, entry, argument,
                                        &thread);
-        MmSwitchAddressSpace(parent_space);
+        KeUnstackDetachProcess(&attach_state);
         LdrSetThreadProcessContext(previous_loader);
     }
-    if (NT_SUCCESS(status) && !thread->ProcessMainThread) {
-        ObReferenceObject(raw); /* held until the main thread signals exit */
-        thread->TerminationObject = &object->Header;
+    if (NT_SUCCESS(status)) {
+        PsAttachThreadObject(main_thread_object, thread);
         thread->ProcessMainThread = TRUE;
+        status = W32kInitializeThreadSession(thread);
+        if (NT_SUCCESS(status) && options && (options->Flags & 4u))
+            status = KeSuspendThread(thread, NULL);
+        if (!NT_SUCCESS(status)) KeTerminateProcess(&object->Process, status);
     }
+    ObDereferenceObject(main_thread_object);
     if (!NT_SUCCESS(status)) {
+        if (main_thread_handle) ObCloseHandle(main_thread_handle);
         if (handle)
             ObCloseHandle(handle);
         ObDereferenceObject(raw);
@@ -941,15 +1191,29 @@ static NTSTATUS create_process_captured(const char *filename,
     }
     if (out) *out = handle;
     if (pid_out) *pid_out = object->Process.ProcessId;
+    if (thread_out) *thread_out = main_thread_handle;
+    if (thread_id_out) *thread_id_out = thread->ThreadId;
     KIRQL old_irql;
     KeAcquireSpinLock(&g_process_list_lock, &old_irql);
     InsertTailList(&g_process_list, &object->GlobalEntry);
     KeReleaseSpinLock(&g_process_list_lock, old_irql);
-    ObDereferenceObject(raw); /* handle + running thread retain it */
+    if (g_process_console_published) g_process_console_published(&object->Process);
+    /* Console presentation is asynchronous. The child thread waits for its
+     * host in KiThreadBootstrap, but CreateProcess must return immediately so
+     * the shell and desktop do not freeze while CONHOST loads its GUI stack. */
     KeLog("[ps]   process '%s' pid %u -> handle %p, CR3 0x%lx\n",
           filename, object->Process.ProcessId, handle,
           (unsigned long)object->Process.DirectoryTableBase);
+    ObDereferenceObject(raw); /* handle + running thread retain it */
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS create_process_captured(const char *filename, const char *command,
+    const char *directory, HANDLE *out, ULONG *pid, HANDLE input, HANDLE output,
+    HANDLE error, const char *const *environment, UINT32 count)
+{
+    return create_process_captured_extended(filename, command, directory, out, pid,
+        input, output, error, environment, count, NULL, NULL, NULL);
 }
 
 NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
@@ -961,6 +1225,7 @@ NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
     PKPROCESS source = parent->Process;
     if (!g_process_type)
         g_process_type = ObCreateObjectType("Process", delete_process);
+    SeConfigureType(g_process_type, 0x21410u, 0x20BEBu, 0x120000u, 0x1FFFFFu);
     POBJECT raw = NULL;
     NTSTATUS status = ObCreateObject(g_process_type, sizeof(PROCESS_OBJECT),
                                      &raw);
@@ -983,8 +1248,7 @@ NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
     memcpy(target->CurrentDirectory, source->CurrentDirectory,
            sizeof(target->CurrentDirectory));
     memcpy(target->ImagePath, source->ImagePath, sizeof(target->ImagePath));
-    memcpy(target->Environment, source->Environment,
-           sizeof(target->Environment));
+    PsCloneProcessEnvironment(target, source);
     SIZE_T name_length = strlen(source->Name);
     if (name_length >= sizeof(object->Name))
         name_length = sizeof(object->Name) - 1;
@@ -1088,8 +1352,14 @@ NTSTATUS PsSwitchThreadToWindows(PKTHREAD thread, PKPROCESS process,
 NTSTATUS PsCreateInitialProcess(const char *application,
                                 const char *command_line)
 {
-    return create_process_captured(application, command_line, NULL, NULL,
-                                   NULL, NULL, NULL, NULL, NULL, 0);
+    /* The early console is a real File device. Explicit handles preserve
+     * serial/headless boot and let system startup log before a desktop exists. */
+    HANDLE console = NULL;
+    NTSTATUS status = IoOpenConsoleKernel(&console);
+    if (!NT_SUCCESS(status)) return status;
+    status = create_process_captured(application, command_line, NULL, NULL,
+                         NULL, console, console, console, NULL, 0);
+    ObCloseHandle(console); return status;
 }
 
 NTSTATUS PsCreateLinuxSpawn(PKPROCESS creator, const char *image,
@@ -1119,7 +1389,7 @@ UINT64 NtCreateUserProcessSimple(UINT64 *a)
     UINT32 environment_count = 0;
     PHANDLE out = (PHANDLE)a[2];
     ULONG *pid_out = (ULONG *)a[3];
-    KeLog("[ps]   NtCreateUserProcessSimple request image=%p command=%p\n",
+    KeTrace("[ps]   NtCreateUserProcessSimple request image=%p command=%p\n",
           (void *)a[0], (void *)a[1]);
     if (!MmProbeForWrite((UINT64)out, sizeof(*out)) ||
         (pid_out && !MmProbeForWrite((UINT64)pid_out, sizeof(*pid_out)))) {
@@ -1163,4 +1433,180 @@ UINT64 NtCreateUserProcessSimple(UINT64 *a)
                                            (HANDLE)a[6],
                                            a[8] ? environment : NULL,
                                            environment_count);
+}
+
+
+
+NTSTATUS PsCreateConsoleHost(PKPROCESS owner, const char *command, HANDLE *host)
+{
+    if (!owner || owner->Exiting || !command || !host) return STATUS_INVALID_PARAMETER;
+    PS_CAPTURED_PROCESS_OPTIONS options = {.ParentOverride = owner};
+    return create_process_captured_extended("C:\\WINDOWS\\SYSTEM32\\CONHOST.EXE",
+        command, owner->CurrentDirectory, host, NULL, NULL, NULL, NULL,
+        NULL, 0, &options, NULL, NULL);
+}
+
+static NTSTATUS PspGrowCapturedBytes(char **data, SIZE_T *capacity,
+                                     SIZE_T used, SIZE_T extra)
+{
+    if (extra > ~(SIZE_T)0 - used) return STATUS_NO_MEMORY;
+    if (used + extra <= *capacity) return STATUS_SUCCESS;
+    SIZE_T wanted = *capacity ? *capacity : 128;
+    while (wanted < used + extra) {
+        if (wanted > ~(SIZE_T)0 / 2) { wanted = used + extra; break; }
+        wanted *= 2;
+    }
+    char *replacement = ExAllocatePoolWithTag(NonPagedPool, wanted, 'txCP');
+    if (!replacement) return STATUS_NO_MEMORY;
+    if (used) memcpy(replacement, *data, used);
+    if (*data) ExFreePool(*data);
+    *data = replacement; *capacity = wanted; return STATUS_SUCCESS;
+}
+
+static NTSTATUS PspCaptureWideBytes(UINT64 address, SIZE_T limit,
+    BOOLEAN environment, char **result, SIZE_T *bytes)
+{
+    if (!address) return STATUS_INVALID_PARAMETER;
+    char *data = NULL; SIZE_T capacity = 0, used = 0, units = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+    for (;;) {
+        if (units >= limit || address + units * 2 < address ||
+            !MmProbeForRead(address + units * 2, 2)) { status = STATUS_ACCESS_VIOLATION; break; }
+        UINT32 cp = *(const UINT16 *)(address + units++ * 2);
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (units >= limit || !MmProbeForRead(address + units * 2, 2)) { status = STATUS_ACCESS_VIOLATION; break; }
+            UINT16 low = *(const UINT16 *)(address + units * 2);
+            if (low >= 0xDC00 && low <= 0xDFFF) { units++; cp = 0x10000 + ((cp - 0xD800) << 10) + low - 0xDC00; }
+            else if (!environment) { status = STATUS_INVALID_PARAMETER; break; }
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF && !environment) { status = STATUS_INVALID_PARAMETER; break; }
+        SIZE_T extra = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+        status = PspGrowCapturedBytes(&data, &capacity, used, extra + 1);
+        if (!NT_SUCCESS(status)) break;
+        if (cp < 0x80) data[used++] = (char)cp;
+        else if (cp < 0x800) { data[used++] = (char)(0xC0 | (cp >> 6)); data[used++] = (char)(0x80 | (cp & 63)); }
+        else if (cp < 0x10000) {
+            data[used++] = (char)(0xE0 | (cp >> 12)); data[used++] = (char)(0x80 | ((cp >> 6) & 63)); data[used++] = (char)(0x80 | (cp & 63));
+        } else {
+            data[used++] = (char)(0xF0 | (cp >> 18)); data[used++] = (char)(0x80 | ((cp >> 12) & 63));
+            data[used++] = (char)(0x80 | ((cp >> 6) & 63)); data[used++] = (char)(0x80 | (cp & 63));
+        }
+        if (!cp) {
+            if (!environment) break;
+            if (units >= limit || !MmProbeForRead(address + units * 2, 2)) { status = STATUS_ACCESS_VIOLATION; break; }
+            if (!*(const UINT16 *)(address + units * 2)) { data[used++] = 0; break; }
+        }
+    }
+    if (!NT_SUCCESS(status)) { if (data) ExFreePool(data); return status; }
+    *result = data; *bytes = used; return STATUS_SUCCESS;
+}
+
+UINT64 SvNtSetProcessEnvironment(UINT64 *args)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || !thread->Process || !thread->UserGsBase || (ULONG)args[1] < 2)
+        return (UINT64)STATUS_INVALID_PARAMETER;
+    char *block = NULL; SIZE_T bytes = 0;
+    NTSTATUS status = PspCaptureWideBytes(args[0], (ULONG)args[1], TRUE, &block, &bytes);
+    if (!NT_SUCCESS(status)) return (UINT64)status;
+    UINT64 peb_address = 0, parameters = 0;
+    if (!MmProbeForRead(thread->UserGsBase + 0x60, 8)) status = STATUS_ACCESS_VIOLATION;
+    else memcpy(&peb_address, (void *)(thread->UserGsBase + 0x60), 8);
+    if (NT_SUCCESS(status) && !MmProbeForRead(peb_address + 0x20, 8)) status = STATUS_ACCESS_VIOLATION;
+    else if (NT_SUCCESS(status)) memcpy(&parameters, (void *)(peb_address + 0x20), 8);
+    if (NT_SUCCESS(status) && !MmProbeForWrite(parameters + 0x80, 8)) status = STATUS_ACCESS_VIOLATION;
+    if (NT_SUCCESS(status)) status = PsSetProcessEnvironmentBlock(thread->Process, block, bytes);
+    if (NT_SUCCESS(status)) __atomic_store_n((UINT64 *)(parameters + 0x80), args[0], __ATOMIC_RELEASE);
+    ExFreePool(block); return (UINT64)status;
+}
+
+UINT64 SvNtHandleInformation(UINT64 *args)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || !thread->Process) return (UINT64)STATUS_INVALID_PARAMETER;
+    if ((ULONG)args[1] == 1)
+        return (UINT64)ObSetHandleAttributesInTable(thread->Process->HandleTable,
+                    (HANDLE)args[0], (ULONG)args[2], (ULONG)args[3]);
+    if (args[1]) return (UINT64)STATUS_INVALID_PARAMETER;
+    ULONG value;
+    if (!MmProbeForWrite(args[4], sizeof(value))) return (UINT64)STATUS_ACCESS_VIOLATION;
+    NTSTATUS status = ObQueryHandleAttributesInTable(thread->Process->HandleTable, (HANDLE)args[0], &value);
+    if (NT_SUCCESS(status)) *(ULONG *)args[4] = value;
+    return (UINT64)status;
+}
+
+UINT64 SvNtCreateUserProcessEx(UINT64 *args)
+{
+    SV_PROCESS_CREATE_REQUEST request;
+    SV_PROCESS_CREATE_RESULT result = {0};
+    if (!MmProbeForRead(args[0], sizeof(request)) || !MmProbeForWrite(args[1], sizeof(result)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    memcpy(&request, (void *)args[0], sizeof(request));
+    if (request.Size != sizeof(request) || request.Reserved || request.Padding || request.InheritHandles > 1)
+        return (UINT64)STATUS_INVALID_PARAMETER;
+    ULONG priority = request.Flags & 0xC1E0u;
+    if (priority && (priority & (priority - 1))) return (UINT64)STATUS_INVALID_PARAMETER;
+    const ULONG supported_flags = 0x08000000u | 0x04000000u | 0x0000C1E0u | 0x00000400u | 0x00000200u | 0x10u | 0x8u | 0x4u;
+    if (request.Flags & ~supported_flags) return (UINT64)STATUS_NOT_SUPPORTED;
+    PKTHREAD caller = KeGetCurrentThread();
+    if (!caller || !caller->Process) return (UINT64)STATUS_INVALID_PARAMETER;
+    SE_DESCRIPTOR *process_descriptor = NULL, *thread_descriptor = NULL;
+    BOOLEAN inherit_process_handle = FALSE, inherit_thread_handle = FALSE;
+    NTSTATUS security_status = SeCaptureAttributes(request.ProcessAttributes, caller->Process->SecurityUserRid,
+                                          &process_descriptor, &inherit_process_handle);
+    if (NT_SUCCESS(security_status)) security_status = SeCaptureAttributes(request.ThreadAttributes,
+                   caller->Process->SecurityUserRid, &thread_descriptor, &inherit_thread_handle);
+    if (!NT_SUCCESS(security_status)) {
+        SeDereferenceDescriptor(process_descriptor); SeDereferenceDescriptor(thread_descriptor);
+        return (UINT64)security_status;
+    }
+    char *image = NULL, *command = NULL, *directory = NULL, *environment = NULL;
+    SIZE_T image_bytes = 0, command_bytes = 0, directory_bytes = 0, environment_bytes = 0;
+    UINT16 *desktop = NULL;
+    NTSTATUS status = PspCaptureWideBytes(request.Image, 32768, FALSE, &image, &image_bytes);
+    if (NT_SUCCESS(status) && request.CommandLine)
+        status = PspCaptureWideBytes(request.CommandLine, 32768, FALSE, &command, &command_bytes);
+    if (NT_SUCCESS(status) && request.CurrentDirectory)
+        status = PspCaptureWideBytes(request.CurrentDirectory, 32768, FALSE, &directory, &directory_bytes);
+    if (NT_SUCCESS(status) && request.Environment)
+        status = PspCaptureWideBytes(request.Environment, ~(SIZE_T)0 / 2, TRUE, &environment, &environment_bytes);
+    if (NT_SUCCESS(status) && request.Desktop) {
+        SIZE_T units = 0;
+        while (units < 32768 && MmProbeForRead(request.Desktop + units * 2, 2) &&
+               *(const UINT16 *)(request.Desktop + units * 2)) units++;
+        if (units == 32768 || !MmProbeForRead(request.Desktop + units * 2, 2)) status = STATUS_ACCESS_VIOLATION;
+        else {
+            desktop = ExAllocatePoolWithTag(NonPagedPool, (units + 1) * 2, 'txCP');
+            if (!desktop) status = STATUS_NO_MEMORY;
+            else memcpy(desktop, (void *)request.Desktop, (units + 1) * 2);
+        }
+    }
+    if (NT_SUCCESS(status) && (!image[0] || image_bytes > 260 || directory_bytes > 260 ||
+        (command && command_bytes > PE_COMMAND_MAX))) status = STATUS_BUFFER_TOO_SMALL;
+    if (NT_SUCCESS(status)) {
+        PS_CAPTURED_PROCESS_OPTIONS options = {.Flags = request.Flags,
+            .InheritHandles = request.InheritHandles != 0, .Desktop = desktop,
+            .EnvironmentBlock = environment, .EnvironmentBytes = environment_bytes,
+            .ProcessDescriptor = process_descriptor, .ThreadDescriptor = thread_descriptor,
+            .InheritProcessHandle = inherit_process_handle, .InheritThreadHandle = inherit_thread_handle,
+            .StartupFlags = request.StartupFlags, .ShowWindow = request.ShowWindow,
+            .X = request.X, .Y = request.Y, .XSize = request.XSize, .YSize = request.YSize,
+            .XChars = request.XChars, .YChars = request.YChars, .FillAttribute = request.FillAttribute};
+        HANDLE process = NULL, thread = NULL; ULONG pid = 0, tid = 0;
+        status = create_process_captured_extended(image, command ? command : image,
+            directory, &process, &pid, (HANDLE)request.StandardInput,
+            (HANDLE)request.StandardOutput, (HANDLE)request.StandardError,
+            NULL, 0, &options, &thread, &tid);
+        if (NT_SUCCESS(status)) {
+            result.Process = (UINT64)process; result.Thread = (UINT64)thread;
+            result.ProcessId = pid; result.ThreadId = tid;
+            memcpy((void *)args[1], &result, sizeof(result));
+        }
+    }
+    if (desktop) ExFreePool(desktop);
+    if (environment) ExFreePool(environment);
+    if (directory) ExFreePool(directory);
+    if (command) ExFreePool(command);
+    if (image) ExFreePool(image);
+    SeDereferenceDescriptor(process_descriptor); SeDereferenceDescriptor(thread_descriptor);
+    return (UINT64)status;
 }

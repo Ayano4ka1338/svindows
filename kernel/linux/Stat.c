@@ -179,6 +179,12 @@ UINT64 LinuxFstat(PKPROCESS process, UINT64 fd, UINT64 destination)
             0x500u : 0x600u + process->LinuxContext->Files[fd].Terminal;
         return linux_emit_stat(destination, &terminal);
     }
+    if (process->LinuxContext->Files[fd].Kind == LINUX_FD_CONSOLE) {
+        IO_KERNEL_FILE_STAT terminal = {0};
+        terminal.Kind = 1;
+        terminal.FileId = 0x501u;
+        return linux_emit_stat(destination, &terminal);
+    }
     if (process->LinuxContext->Files[fd].Kind == LINUX_FD_FRAMEBUFFER) {
         IO_KERNEL_FILE_STAT framebuffer = {0};
         framebuffer.Kind = 4;

@@ -68,7 +68,8 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
      * enabled transiently around kernel-side fills (see NtUserCreateWindowEx),
      * which also turns any client that misbehaves into a named trap instead
      * of silent corruption. */
-    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE,
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
+                   PROCESS_USER_SHARED_TABLE_COMMIT_SIZE,
                    FALSE);
     for (UINT64 off = 0; off < PROCESS_USER_OBJECT_ARENA_SIZE;
          off += PAGE_SIZE) {

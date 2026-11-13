@@ -37,6 +37,7 @@ static void IopDeleteCompletionPort(POBJECT object)
 void IoInitializeCompletionObjects(void)
 {
     g_completion_type = ObCreateObjectType("IoCompletion", IopDeleteCompletionPort);
+    SeConfigureType(g_completion_type, 0x20001u, 0x20002u, 0x120000u, 0x1F0003u);
     if (!g_completion_type)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
                    "cannot register IoCompletion type");

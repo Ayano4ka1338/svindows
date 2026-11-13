@@ -61,7 +61,7 @@ static void LdrpRegisterTls(UINT64 base)
         MmProbeForWrite(module->AddressOfIndex, sizeof(UINT32)))
         *(UINT32 *)module->AddressOfIndex = module->Index;
 
-    KeLog("[ldr]  tls[%lu] base=%p template %p..%p zerofill 0x%x\n",
+    KeTrace("[ldr]  tls[%lu] base=%p template %p..%p zerofill 0x%x\n",
           (unsigned long)module->Index, (void *)base,
           (void *)module->TemplateStart, (void *)module->TemplateEnd,
           (unsigned)module->SizeOfZeroFill);

@@ -157,16 +157,25 @@ typedef struct _IO_CHAR_DEVICE_OPS {
                                UINT64 argument1, UINT64 argument2,
                                UINT64 argument3, UINT64 *result);
     void (*Close)(void *context);
+    /* Status-bearing variants support cancellation and invalidated device
+     * attachments without turning errors into successful zero-byte I/O. */
+    NTSTATUS (*ReadResult)(void *context, void *buffer, SIZE_T length,
+                           BOOLEAN wait, SIZE_T *read);
+    NTSTATUS (*WriteResult)(void *context, const void *buffer, SIZE_T length,
+                            SIZE_T *written);
 } IO_CHAR_DEVICE_OPS;
 
 #define IO_CHAR_DEVICE_TAG_PTY 0x53595450ULL /* "PTYS": pseudo terminal */
 #define IO_CHAR_DEVICE_TAG_TTY 0x59545454ULL /* "TTTY": VT console      */
+#define IO_CHAR_DEVICE_TAG_CONSOLE 0x534e4f43ULL /* "CONS": native console */
 
 /* Create a File object backed by a personality device and open a handle to
  * it in the current process's table. The context stays owned by the caller
  * until Close reports the final reference is gone. */
 NTSTATUS IoCreateCharDeviceFile(UINT64 tag, void *context,
                                 const IO_CHAR_DEVICE_OPS *ops, HANDLE *out);
+NTSTATUS IoCreateCharDeviceFileInTable(POB_HANDLE_TABLE table, UINT64 tag,
+    void *context, const IO_CHAR_DEVICE_OPS *ops, ACCESS_MASK access, HANDLE *out);
 /* Returns STATUS_SUCCESS for a char-device handle and fills the device tag
  * and context; any other file kind gives STATUS_INVALID_HANDLE. The InTable
  * variant inspects a specific process's handle table, for callers that probe
@@ -190,6 +199,9 @@ NTSTATUS IoHandleInputAvailableKernel(HANDLE handle, BOOLEAN *available);
 NTSTATUS IoFlushInputHandleKernel(HANDLE handle);
 NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
                              SIZE_T *written_out);
+NTSTATUS IoConsoleControlHandleKernel(HANDLE handle, UINT32 operation,
+                                      UINT64 argument1, UINT64 argument2,
+                                      UINT64 argument3, UINT64 *result);
 NTSTATUS IoOpenFileKernel(const char *path, ULONG access, BOOLEAN create,
                           BOOLEAN exclusive, BOOLEAN truncate,
                           HANDLE *handle_out);
@@ -251,5 +263,9 @@ UINT64 NtFileSystemControlSimple(UINT64 *args);
 UINT64 NtSetFileSizeSimple(UINT64 *args);
 UINT64 NtCreatePipeSimple(UINT64 *args);
 UINT64 NtConsoleControlSimple(UINT64 *args);
+struct _KTHREAD;
+void IoCleanupThreadConsoleReads(struct _KTHREAD *thread);
+PVOID IoPinThreadConsoleObject(PVOID referenced_object);
+void IoUnpinThreadConsoleObject(PVOID pin);
 
 #endif /* _SVINDOWS_IO_H_ */

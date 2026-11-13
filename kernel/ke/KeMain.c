@@ -19,6 +19,7 @@
 #include <svindows/Cm.h>
 #include <svindows/Gfx.h>
 #include <svindows/Win32k.h>
+#include <svindows/Session.h>
 #include <svindows/Input.h>
 #include <svindows/Linux.h>
 #include <svindows/Net.h>
@@ -61,7 +62,7 @@ static void InputWorker(PVOID context)
         UINT16 pending_key = 0;
         BOOLEAN have_key = FALSE;
         while (KbdReadInputEvent(&event)) {
-            if (!window_owns_keyboard) continue;
+            if (xorg_owns_win32_input) continue;
             if (event & KBD_INPUT_CHARACTER) {
                 if (have_key) {
                     W32kInputKey(pending_key, (UINT16)event);
@@ -271,6 +272,13 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     KiBootStepOk("Object manager / namespace");
     PsInitialize();
     KiBootStepOk("Process / dispatcher objects");
+    NTSTATUS session_status = W32kInitializeSessions();
+    if (!NT_SUCCESS(session_status)) {
+        KiBootStepFailed("Windows session objects", session_status);
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "cannot initialize Windows sessions");
+    }
+    W32kInitializeWindowEnvironment();
+    KiBootStepOk("Windows stations / desktops");
 
     /* Configuration manager (registry). */
     CmInitialize();

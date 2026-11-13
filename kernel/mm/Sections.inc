@@ -95,6 +95,7 @@ static UINT64 NtCreateSection(UINT64 *a)
     UINT64 page_count = BYTES_TO_PAGES((UINT64)requested);
     if (!g_section_type)
         g_section_type = ObCreateObjectType("Section", MiDeleteSection);
+    SeConfigureType(g_section_type, 0x20005u, 0x20002u, 0x20008u, 0xF001Fu);
     if (!g_section_type) {
         if (file) ObDereferenceObject(file);
         return (UINT64)STATUS_NO_MEMORY;

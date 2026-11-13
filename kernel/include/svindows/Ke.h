@@ -98,6 +98,7 @@ NORETURN void KeBugCheck(ULONG code, const char *message);
 #define KE_UNEXPECTED_KERNEL_MODE_TRAP  0x0000007Fu
 #define KE_IRQL_NOT_LESS_OR_EQUAL        0x0000000Au
 #define KE_IRQL_NOT_GREATER_OR_EQUAL     0x00000009u
+#define KE_INVALID_PROCESS_ATTACH_ATTEMPT 0x00000005u
 
 /* UP/PIC execution contract. DISPATCH_LEVEL and above mask all local IRQs;
  * DIRQL nesting and SMP synchronization are not implemented yet. */
@@ -107,6 +108,7 @@ typedef UINT8 KIRQL;
 #define DISPATCH_LEVEL 2
 #define HIGH_LEVEL     31
 struct _KTHREAD;
+struct _KAPC_STATE;
 typedef struct _KSPIN_LOCK {
     volatile UINT32 Held;
     volatile UINT64 OwnerThread;
@@ -267,6 +269,10 @@ typedef struct _KMUTANT {
     BOOLEAN           Abandoned;
     UINT8             Padding[3];
     LIST_ENTRY        OwnerEntry;
+    /* Optional Object Manager body whose lifetime follows ownership. A
+     * standalone executive mutant points here at itself; an embedded mutant
+     * may point at its containing object or leave this NULL. */
+    PVOID             ReferenceObject;
 } KMUTANT, *PKMUTANT;
 
 /*
@@ -403,7 +409,30 @@ typedef struct _KTHREAD {
     UINT64          UserDesktop; /* explicit desktop association, or inherited */
     UINT64          KernelTime, UserTime; /* scheduler samples, 100 ns */
     ULONG           ContextSwitches;
+    PVOID           Win32Desktop; /* referenced USER desktop attachment */
+    LONG            CursorDisplayCount; /* ShowCursor count belongs to this thread */
+    /* The owning process never changes.  A stack attach only overrides the
+     * address space used while this thread runs; the scheduler restores that
+     * override after every preemption.  AddressSpaceAttachState is the top of
+     * the caller-owned, strictly LIFO attach-state chain. */
+    struct _KPROCESS *AttachedProcess;
+    struct _KAPC_STATE *AddressSpaceAttachState;
+    /* Active syscall diagnostics are per-thread because process creation may
+     * cooperatively yield while its service remains on this kernel stack. */
+    UINT64          ServiceUserRsp;
+    UINT64          ServiceNumber;
 } KTHREAD, *PKTHREAD;
+
+/* Saved state for KeStackAttachProcess.  This is deliberately caller-owned:
+ * nested attaches need independent records and must unwind in reverse order.
+ * The referenced object keeps the target process/address space alive until
+ * KeUnstackDetachProcess has switched away from it. */
+typedef struct _KAPC_STATE {
+    PKTHREAD Thread;
+    struct _KPROCESS *PreviousAttachedProcess;
+    struct _KAPC_STATE *PreviousState;
+    PVOID AttachedProcessObject;
+} KAPC_STATE, *PKAPC_STATE;
 
 /* Per-processor state reached through GS after swapgs. Keep the first three
  * qwords stable: syscall entry assembly reads the scratch RSP, kernel RSP and
@@ -494,6 +523,17 @@ typedef struct _KPROCESS {
     struct _LINUX_PROCESS_CONTEXT *LinuxContext;
     UINT64 KernelTime, UserTime; /* includes threads which have exited */
     UINT64 PeakWorkingSetBytes;
+    PVOID Win32Session; /* process window-station/default-desktop context */
+    ULONG CreationFlags, ImageSubsystem;
+    ULONG StartupFlags, StartupShowWindow;
+    ULONG StartupX, StartupY, StartupXSize, StartupYSize;
+    ULONG StartupXChars, StartupYChars, StartupFillAttribute;
+    PVOID EnvironmentStorage; /* immutable, referenced UTF-8 environment block */
+    ULONG WindowsSessionId; /* USER session owning the selected station */
+    PVOID NativeConsole; /* referenced console attachment and control state */
+    BOOLEAN LegacyConsole; /* boot console inherited without a hosted window */
+    PVOID Win32InputIdleEvent; /* retained notification event for first GUI idle */
+    volatile ULONG Win32InputIdleReached;
 } KPROCESS, *PKPROCESS;
 
 typedef struct _KE_PROCESS_THREAD_INFO {
@@ -524,6 +564,7 @@ PKTHREAD  KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
                                        UINT64 user_gs_base, UINT64 user_arg,
                                        LONG priority);
 PKTHREAD  KeGetCurrentThread(void);
+PKPROCESS KeGetCurrentProcess(void);
 PKPRCB    KeGetCurrentProcessorBlock(void);
 PKPRCB    KeGetProcessorBlock(ULONG processor_number);
 /* Current-thread access is CPU-local; the fast inline accessor keeps the
@@ -541,6 +582,12 @@ NTSTATUS  KeTerminateThreadByPointer(PKTHREAD thread, NTSTATUS exit_status);
 NTSTATUS  KeTerminateProcess(PKPROCESS process, NTSTATUS exit_status);
 void      KeYield(void);
 NORETURN void KeTerminateThread(void);
+
+/* Temporarily execute in another process's address space.  Unlike a raw CR3
+ * switch, the attachment is part of KTHREAD state, so it survives scheduling.
+ * Calls may nest but must detach in strict LIFO order at IRQL <= APC_LEVEL. */
+void      KeStackAttachProcess(PKPROCESS process, PKAPC_STATE state);
+void      KeUnstackDetachProcess(PKAPC_STATE state);
 
 /* Called from the timer interrupt to drive preemption. */
 void      KeClockTick(void);
@@ -585,6 +632,8 @@ void KeInitializeSemaphore(PKSEMAPHORE sem, LONG initial, LONG limit);
 LONG KeReleaseSemaphore(PKSEMAPHORE sem, LONG count);
 
 void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned);
+void KeInitializeMutantWithReference(PKMUTANT mutant, BOOLEAN initially_owned,
+                                     PVOID reference_object);
 BOOLEAN KeReleaseMutant(PKMUTANT mutant, LONG *previous_count);
 void KeAbandonThreadMutants(PKTHREAD thread);
 

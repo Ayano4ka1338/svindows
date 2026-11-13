@@ -24,6 +24,8 @@
 #include <svindows/Dos.h>
 #include <svindows/Linux.h>
 #include <svindows/Hal.h>
+#include <svindows/Io.h>
+#include <svindows/Console.h>
 
 #define DEFAULT_QUANTUM 2   /* timer ticks per scheduling slice */
 #define THREAD_STACK_SIZE 0x4000 /* 16 KiB kernel stack per thread */
@@ -88,6 +90,7 @@ static BOOLEAN KepThreadCurrentOnAnyProcessor(PKTHREAD thread)
 static void KepSignalProcessTermination(PKPROCESS process)
 {
     if (!process || !process->Object) return;
+    ConDetachProcessConsole(process);
     PDISPATCHER_HEADER header = (PDISPATCHER_HEADER)process->Object;
     UINT64 flags = KiAcquireSchedulerLock();
     header->SignalState = 1;
@@ -105,6 +108,7 @@ static void KepReapTerminatedThreads(void)
             thread->State != ThreadStateTerminated)
             continue;
         W32kCleanupThreadUser(thread);
+        IoCleanupThreadConsoleReads(thread);
         if (thread->DosContext) {
             DosDestroyVm(thread->DosContext);
             thread->DosContext = NULL;
@@ -131,6 +135,80 @@ static void KepReapTerminatedThreads(void)
 }
 
 PKTHREAD KeGetCurrentThread(void) { return KeGetCurrentProcessorBlock()->CurrentThread; }
+
+static PKPROCESS KepThreadAddressSpaceProcess(PKTHREAD thread)
+{
+    if (!thread) return NULL;
+    return thread->AttachedProcess ? thread->AttachedProcess : thread->Process;
+}
+
+PKPROCESS KeGetCurrentProcess(void)
+{
+    return KepThreadAddressSpaceProcess(KeGetCurrentThread());
+}
+
+void KeStackAttachProcess(PKPROCESS process, PKAPC_STATE state)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || !thread->Process || !process || !state ||
+        !process->DirectoryTableBase || KeGetCurrentIrql() > APC_LEVEL)
+        KeBugCheck(KE_INVALID_PROCESS_ATTACH_ATTEMPT,
+                   "invalid process address-space attach");
+
+    /* Keep the target alive even when the caller's only other reference is a
+     * handle which another thread can close while this thread is preempted. */
+    PVOID process_object = process->Object;
+    if (process_object) ObReferenceObject(process_object);
+
+    UINT64 interrupt_state = KiIrqSave();
+    for (PKAPC_STATE active = thread->AddressSpaceAttachState;
+         active; active = active->PreviousState) {
+        if (active == state)
+            KeBugCheck(KE_INVALID_PROCESS_ATTACH_ATTEMPT,
+                       "process attach state reused while active");
+    }
+
+    state->Thread = thread;
+    state->PreviousAttachedProcess = thread->AttachedProcess;
+    state->PreviousState = thread->AddressSpaceAttachState;
+    state->AttachedProcessObject = process_object;
+    thread->AttachedProcess = process;
+    thread->AddressSpaceAttachState = state;
+    MmSwitchAddressSpace(process->DirectoryTableBase);
+    KiIrqRestore(interrupt_state);
+}
+
+void KeUnstackDetachProcess(PKAPC_STATE state)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || !state || KeGetCurrentIrql() > APC_LEVEL)
+        KeBugCheck(KE_INVALID_PROCESS_ATTACH_ATTEMPT,
+                   "invalid process address-space detach");
+
+    UINT64 interrupt_state = KiIrqSave();
+    if (thread->AddressSpaceAttachState != state || state->Thread != thread)
+        KeBugCheck(KE_INVALID_PROCESS_ATTACH_ATTEMPT,
+                   "process address spaces detached out of order");
+
+    PVOID process_object = state->AttachedProcessObject;
+    thread->AttachedProcess = state->PreviousAttachedProcess;
+    thread->AddressSpaceAttachState = state->PreviousState;
+    PKPROCESS restored = KepThreadAddressSpaceProcess(thread);
+    if (!restored || !restored->DirectoryTableBase)
+        KeBugCheck(KE_INVALID_PROCESS_ATTACH_ATTEMPT,
+                   "process detach has no address space to restore");
+    MmSwitchAddressSpace(restored->DirectoryTableBase);
+
+    state->Thread = NULL;
+    state->PreviousAttachedProcess = NULL;
+    state->PreviousState = NULL;
+    state->AttachedProcessObject = NULL;
+    KiIrqRestore(interrupt_state);
+
+    /* Dereferencing may tear the target process down, so do it only after CR3
+     * has been restored and local preemption is safe again. */
+    if (process_object) ObDereferenceObject(process_object);
+}
 
 /* Called by native thread services while the syscall has interrupts masked. */
 PKTHREAD KeLookupThreadById(ULONG thread_id)
@@ -519,8 +597,13 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
     KeSetCurrentThread(next);
 
     /* Kernel mappings are shared, so it is safe to change CR3 while running
-     * on the outgoing kernel stack. User mappings become those of `next`. */
-    MmSwitchAddressSpace(next->Process->DirectoryTableBase);
+     * on the outgoing kernel stack.  A stack-attached thread resumes in the
+     * attached process rather than silently falling back to its owner. */
+    PKPROCESS address_process = KepThreadAddressSpaceProcess(next);
+    if (!address_process || !address_process->DirectoryTableBase)
+        KeBugCheck(KE_INVALID_PROCESS_ATTACH_ATTEMPT,
+                   "scheduled thread has no active address space");
+    MmSwitchAddressSpace(address_process->DirectoryTableBase);
 
     /* Point the CPU's ring-0 entry stack at the incoming thread's kernel stack,
      * so a syscall or interrupt taken from ring 3 lands on the right stack, and
@@ -625,6 +708,11 @@ void KiThreadBootstrap(void)
     KiDeliverKernelApcs();
 
     if (t->UserMode) {
+        NTSTATUS console_status = ConWaitForProcessConsoleHost(t->Process);
+        if (!NT_SUCCESS(console_status)) {
+            t->ExitStatus = console_status;
+            KeTerminateThread();
+        }
         /* Drop to ring 3; the thread lives in user mode from here and only
          * re-enters the kernel via syscalls and interrupts. Never returns. */
         if (t->LinuxThread && LinuxIsCloneThread(t))
@@ -645,6 +733,9 @@ NORETURN void KeTerminateThread(void)
 {
     if (KeGetCurrentIrql() > APC_LEVEL)
         KeBugCheck(KE_IRQL_NOT_LESS_OR_EQUAL, "thread termination above APC_LEVEL");
+    if (KeGetCurrentThread()->AddressSpaceAttachState)
+        KeBugCheck(KE_INVALID_PROCESS_ATTACH_ATTEMPT,
+                   "thread terminated while attached to a process");
     (void)KiIrqSave(); /* disable preemption for good on this thread */
 
     PKTHREAD t = KeGetCurrentProcessorBlock()->CurrentThread;

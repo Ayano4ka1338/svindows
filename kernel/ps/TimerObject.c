@@ -11,6 +11,7 @@ static void PspDeleteTimer(POBJECT object) { KeCancelTimer((PKTIMER)object); }
 void PsInitializeTimerObjects(void)
 {
     g_timer_type = ObCreateObjectType("Timer", PspDeleteTimer);
+    SeConfigureType(g_timer_type, 0x20001u, 0x20002u, 0x120000u, 0x1F0003u);
     if (!g_timer_type)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "cannot register Timer type");
 }

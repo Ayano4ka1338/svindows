@@ -499,6 +499,7 @@ static HANDLE nt_open_w(const WCHAR *name, DWORD access, DWORD share,
 #include "Completion.inc"
 #include "SList.inc"
 #include "HeapTime.inc"
+#include "GlobalMemory.inc"
 #include "Toolhelp.inc"
 #include "LocalMemory.inc"
 #include "EnvironmentStrings.inc"

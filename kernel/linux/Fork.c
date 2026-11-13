@@ -41,7 +41,8 @@ NTSTATUS LinuxCloneProcessContext(PKPROCESS parent, PKPROCESS child)
         LINUX_FD_ENTRY *copy = &target->Files[i];
         *copy = *entry;
         copy->Used = FALSE; /* Cleanup sees only fully acquired entries. */
-        if (entry->Kind == LINUX_FD_REGULAR) {
+        if (entry->Kind == LINUX_FD_REGULAR ||
+            entry->Kind == LINUX_FD_CONSOLE) {
             NTSTATUS status = ObDuplicateHandleBetweenTables(
                 parent->HandleTable, entry->Handle, child->HandleTable,
                 0, TRUE, FALSE, &copy->Handle);
