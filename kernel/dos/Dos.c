@@ -282,6 +282,9 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
   if (!vm)
     return STATUS_NO_MEMORY;
   memset(vm, 0, sizeof(*vm));
+  BOOLEAN windows31 = dos_command_is_windows31(command) ||
+      (KeGetCurrentThread()->Process && dos_command_is_windows31(
+          KeGetCurrentThread()->Process->CurrentDirectory));
   vm->CountryCode = 1; /* DOS default country: United States */
   vm->CurrentPsp = PSP;
   vm->ImageSize = (U32)size;
@@ -290,9 +293,7 @@ NTSTATUS DosCreateVm(const UINT8 *image, SIZE_T size, const char *command,
    * path follows the DOS 3.30 compatibility version used by 16helloos.
    * Other DOS programs continue to see 5.00; AX=3306h reports true 5.00. */
   vm->DosVersion = dos_command_is_win100_bin(command) ? 0x2203u :
-                   (dos_command_is_windows31(command) ||
-                    (KeGetCurrentThread()->Process && dos_command_is_windows31(
-                      KeGetCurrentThread()->Process->CurrentDirectory))) ? 0x1e03u : 0x0005u;
+                   windows31 ? 0x1e03u : 0x0005u;
   vm->Dos4gImage = DosImageIsDos4g(image, (U32)size);
   vm->FpuControl = 0x037f; /* reset x87 control word */
   vm->VideoMode = 3; /* 80x25 color text mode */

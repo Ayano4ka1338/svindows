@@ -73,6 +73,30 @@ UINT8 HalMouseWarp(INT32 *x, INT32 *y)
     return buttons;
 }
 
+static void mouse_apply(INT32 dx, INT32 dy, UINT8 buttons)
+{
+    INT32 x = MouseState.X + dx;
+    INT32 y = MouseState.Y - dy;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > mouse_max_x) x = mouse_max_x;
+    if (y > mouse_max_y) y = mouse_max_y;
+    MouseState.X = x;
+    MouseState.Y = y;
+    MouseState.Buttons = buttons & 0x07u;
+    MouseState.Seq++;
+    mouse_rel_push(dx, dy, MouseState.Buttons);
+}
+
+void HalMouseInjectRelative(INT32 dx, INT32 dy, UINT8 buttons)
+{
+    UINT64 flags = KiIrqSave();
+    /* The shared packet path uses PS/2's positive-up convention. Convert the
+       public HID convention (positive-down) before updating state/evdev. */
+    mouse_apply(dx, -dy, buttons);
+    KiIrqRestore(flags);
+}
+
 static void mouse_decode(UINT8 byte)
 {
 
@@ -95,21 +119,8 @@ static void mouse_decode(UINT8 byte)
     INT32 dx = (INT32)pkt[1] - ((flags & 0x10) ? 256 : 0);
     INT32 dy = (INT32)pkt[2] - ((flags & 0x20) ? 256 : 0);
 
-    INT32 x = MouseState.X + dx;
-    INT32 y = MouseState.Y - dy; /* PS/2 Y is positive-up; screen is positive-down */
-
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x > mouse_max_x) x = mouse_max_x;
-    if (y > mouse_max_y) y = mouse_max_y;
-
-    MouseState.X = x;
-    MouseState.Y = y;
-    MouseState.Buttons = flags & 0x07;
-    MouseState.Seq++;
-
-    /* evdev consumers want the unclamped relative delta of this packet. */
-    mouse_rel_push(dx, dy, MouseState.Buttons);
+    /* PS/2 Y is positive-up; the shared HID-style delta is positive-down. */
+    mouse_apply(dx, dy, flags & 0x07u);
 }
 
 static void mouse_deferred(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)

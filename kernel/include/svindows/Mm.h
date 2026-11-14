@@ -37,7 +37,7 @@ void MmCleanupProcessSections(struct _KPROCESS *process);
 /*
  * Physical <-> virtual translation for the direct map.
  *
- * During early boot the first 1 GiB of physical memory is identity-mapped, so a
+ * During early boot the first 4 GiB of physical memory is identity-mapped, so a
  * physical address equals its virtual address; MmDirectMapBase is 0. Once Mm
  * installs the high-half direct map and drops identity, MmDirectMapBase becomes
  * MM_DIRECT_MAP_BASE and every caller keeps working unchanged.

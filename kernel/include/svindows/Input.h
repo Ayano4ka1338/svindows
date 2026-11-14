@@ -16,6 +16,8 @@
 /* ------------------------------------------------------------------ */
 
 void    HalInitializeKeyboard(void);
+/* Inject a set-1 make/break byte from another keyboard transport. */
+void    HalKeyboardInjectSet1Byte(UINT8 byte);
 
 /* Non-blocking: return the next typed character, or 0 if none is queued. */
 char    KbdReadChar(void);
@@ -48,6 +50,8 @@ typedef struct _MOUSE_STATE {
 extern MOUSE_STATE MouseState;
 
 void HalInitializeMouse(void);
+/* Feed a relative HID-style mouse report into the shared pointer state. */
+void HalMouseInjectRelative(INT32 dx, INT32 dy, UINT8 buttons);
 
 /* Called once the framebuffer geometry is known, to seat the cursor and set
  * the clamp bounds. */

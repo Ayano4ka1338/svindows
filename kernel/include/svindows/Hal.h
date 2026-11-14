@@ -157,6 +157,10 @@ BOOLEAN HalSendIpi(UINT32 apic_id, UINT8 vector);
 BOOLEAN HalSendInitIpi(UINT32 apic_id, BOOLEAN assert_init);
 BOOLEAN HalSendStartupIpi(UINT32 apic_id, UINT8 startup_page);
 
+/* USB host-controller and HID input initialization/polling. */
+BOOLEAN UsbInitialize(void);
+void UsbPollInput(void);
+
 /* ------------------------------------------------------------------ */
 /* Programmable Interval Timer (8254 PIT), channel 0 -> IRQ0          */
 /* ------------------------------------------------------------------ */

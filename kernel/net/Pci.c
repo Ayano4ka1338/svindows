@@ -48,6 +48,52 @@ void PciWriteConfig32(UINT8 bus, UINT8 device, UINT8 function,
     KiIrqRestore(irq);
 }
 
+BOOLEAN PciFindDeviceByClass(UINT8 class_code, UINT8 subclass,
+                             UINT8 programming_interface,
+                             PCI_DEVICE *device)
+{
+    if (!device) return FALSE;
+    memset(device, 0, sizeof(*device));
+
+    for (UINT32 bus = 0; bus < 256; ++bus) {
+        for (UINT32 dev = 0; dev < 32; ++dev) {
+            UINT32 id0 = PciReadConfig32((UINT8)bus, (UINT8)dev, 0, 0x00);
+            if ((UINT16)id0 == 0xffffu) continue;
+            UINT32 header = PciReadConfig32((UINT8)bus, (UINT8)dev, 0, 0x0c);
+            UINT8 functions = ((header >> 16) & 0x80u) ? 8u : 1u;
+            for (UINT8 fn = 0; fn < functions; ++fn) {
+                UINT32 id = fn ? PciReadConfig32((UINT8)bus, (UINT8)dev,
+                                                  fn, 0x00) : id0;
+                if ((UINT16)id == 0xffffu) continue;
+                UINT32 class_reg = PciReadConfig32((UINT8)bus, (UINT8)dev,
+                                                    fn, 0x08);
+                if ((UINT8)(class_reg >> 24) != class_code ||
+                    (UINT8)(class_reg >> 16) != subclass ||
+                    (UINT8)(class_reg >> 8) != programming_interface)
+                    continue;
+
+                device->Bus = (UINT8)bus;
+                device->Device = (UINT8)dev;
+                device->Function = fn;
+                device->VendorId = (UINT16)id;
+                device->DeviceId = (UINT16)(id >> 16);
+                device->ClassCode = class_code;
+                device->SubClass = subclass;
+                device->ProgrammingInterface = programming_interface;
+                device->HeaderType = (UINT8)(header >> 16);
+                device->InterruptLine = (UINT8)PciReadConfig32(
+                    (UINT8)bus, (UINT8)dev, fn, 0x3c);
+                for (UINT8 bar = 0; bar < 6; ++bar)
+                    device->Bar[bar] = PciReadConfig32(
+                        (UINT8)bus, (UINT8)dev, fn,
+                        (UINT8)(0x10u + bar * 4u));
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
 BOOLEAN PciFindVirtioNet(PCI_DEVICE *device)
 {
     BOOLEAN saw_virtio = FALSE;

@@ -51,6 +51,7 @@ static void InputWorker(PVOID context)
     KeInitializeTimerEx(&poll_timer, FALSE);
 
     for (;;) {
+        UsbPollInput();
         /* One ordered hardware stream: make, translated character, break.
          * Win32 receives it when a window owns focus; Linux evdev gets its
          * independent mirror and suppresses the native-console fallback. */
@@ -210,6 +211,8 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     /* Console first, so everything after this is observable. */
     KeLogInit();
     print_banner();
+    KeLog("[boot]  Multiboot2 information block at 0x%08x\n",
+          (unsigned)mbi_phys);
 
     if (magic != MULTIBOOT2_BOOTLOADER_MAGIC) {
         KiBootStepFailed("Validating Multiboot2 hand-off", STATUS_INVALID_PARAMETER);
@@ -350,6 +353,7 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     /* Input: PS/2 keyboard + mouse, feeding the USER message queues. */
     HalInitializeKeyboard();
     HalInitializeMouse();
+    (void)UsbInitialize();
     /* Expose the same sources as evdev character devices so Linux binaries
      * (Xorg, libinput) can open /dev/input/eventN. */
     LinuxInputInitialize();

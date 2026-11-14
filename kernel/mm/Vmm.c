@@ -1,7 +1,7 @@
 /*
  * mm/Vmm.c - the virtual memory manager: real 4-level page tables.
  *
- * Boot left us on the trampoline's tables (low 1 GiB identity + a 1 GiB
+ * Boot left us on the trampoline's tables (low 4 GiB identity + a 1 GiB
  * higher-half window). Here we build the kernel's own PML4 from scratch:
  *
  *   - the kernel image window at -2 GiB (0xFFFFFFFF80000000), and

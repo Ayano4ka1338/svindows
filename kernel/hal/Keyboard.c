@@ -163,6 +163,14 @@ static void kbd_irq(void)
     KeInsertQueueDpc(&kbd_dpc, NULL, NULL);
 }
 
+void HalKeyboardInjectSet1Byte(UINT8 byte)
+{
+    UINT64 flags = KiIrqSave();
+    HalQueueInputByte(&kbd_bytes, byte);
+    KiIrqRestore(flags);
+    KeInsertQueueDpc(&kbd_dpc, NULL, NULL);
+}
+
 void HalInitializeKeyboard(void)
 {
     Ps2ControllerInit();

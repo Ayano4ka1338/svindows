@@ -14,7 +14,7 @@ typedef UINT32 U32;
 typedef UINT64 U64;
 
 #define DOS_REAL_MEMORY_SIZE 0x100000u
-#define MEM_SIZE 0x08000000u /* 128 MiB flat-memory space for DOS extenders */
+#define MEM_SIZE 0x02000000u /* 32 MiB flat-memory space per DOS VM */
 #define DOS_DPMI_MAX_BLOCKS 128u
 #define DOS_XMS_CAPACITY (16u * 1024u * 1024u)
 #define DOS_XMS_BASE 0x00110000u /* Above the HMA reserved by XMS. */

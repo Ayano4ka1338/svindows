@@ -1,7 +1,7 @@
 /*
  * mm/Multiboot.c - turn the Multiboot2 information block into an MM_MEMORY_MAP.
  *
- * The memory-map parser runs while the low 1 GiB is still identity-mapped.
+ * The memory-map parser runs while the low 4 GiB is still identity-mapped.
  * Limine modules are found later through the direct map after VMM startup.
  */
 #include <svindows/Mm.h>

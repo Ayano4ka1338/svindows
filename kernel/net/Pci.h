@@ -8,12 +8,18 @@ typedef struct _PCI_DEVICE {
     UINT8 Function;
     UINT16 VendorId;
     UINT16 DeviceId;
+    UINT8 ClassCode;
+    UINT8 SubClass;
+    UINT8 ProgrammingInterface;
     UINT8 InterruptLine;
     UINT8 HeaderType;
     UINT32 Bar[6];
 } PCI_DEVICE;
 
 BOOLEAN PciFindVirtioNet(PCI_DEVICE *device);
+BOOLEAN PciFindDeviceByClass(UINT8 class_code, UINT8 subclass,
+                             UINT8 programming_interface,
+                             PCI_DEVICE *device);
 const char *PciGetDiagnostic(void);
 UINT32 PciReadConfig32(UINT8 bus, UINT8 device, UINT8 function,
                        UINT8 offset);

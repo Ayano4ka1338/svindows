@@ -11,9 +11,10 @@ paths, streams, and directory search. `Internal.h` holds their shared VM
 state and low-level memory helpers.
 
 The DOS process has a private 1 MiB real-mode memory arena. The kernel
-backs a 128 MiB flat-memory address space per DOS VM and reports bounds from
-that same limit to DPMI clients. Windows 3 standard mode
-and DOS/4GW games use separate VM instances; allocations are released on exit.
+backs a 32 MiB flat-memory address space per DOS VM and reports bounds from
+that same limit to DPMI clients. This covers Windows 3 standard mode and
+DOS/4GW games such as Doom while leaving room for the boot initrd in RAM.
+Separate VM instances are released on exit.
 The interpreter models 16-bit registers and segment:offset addressing, a PSP, the
 COM load address (`PSP:0100`), and DOS MZ image layout and relocation records. It
 handles common 8086 arithmetic, data movement, branches, stack, string and
