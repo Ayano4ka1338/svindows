@@ -164,6 +164,12 @@ BOOLEAN PsIsProcessObjectType(struct _OBJECT_TYPE *type);
 UINT64 NtOpenProcess(UINT64 *args);
 UINT64 NtTerminateProcess(UINT64 *args);
 PKPROCESS PsGetProcessFromObject(PVOID object);
+/* Opt-in physical-machine launch tracing; normal builds do not paint it. */
+#ifndef SVINDOWS_EXEC_TRACE
+#define SVINDOWS_EXEC_TRACE 0
+#endif
+void PsTraceProcessLaunch(const char *stage, const char *image);
+void PsTraceChildService(const char *phase, UINT64 number, UINT64 result);
 void *PsReferenceNextProcess(ULONG after_process_id, ULONG *process_id);
 
 /* Create a notification (manual-reset) Event object and a handle to it in the

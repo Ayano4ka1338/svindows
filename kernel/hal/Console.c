@@ -9,8 +9,6 @@
 #include <svindows/Ke.h>
 
 static UINT8 g_serial_attribute = 0xff;
-static UINT32 g_user_column;
-static UINT32 g_user_row;
 static BOOLEAN g_graphics_mode;
 static UINT32 g_framebuffer_users;
 
@@ -58,15 +56,14 @@ void HalConsoleRenderCell(UINT32 x, UINT32 y, char character, UINT8 attribute)
 void HalConsoleSetUserCursor(UINT32 x, UINT32 y, BOOLEAN visible, UINT32 size,
                              UINT8 attribute)
 {
-    g_user_column = x;
-    g_user_row = y;
     if (g_graphics_mode || g_framebuffer_users || !visible || !GfxAvailable()) return;
-    (void)size; /* Keep the public cursor-size value; use a thin insertion caret. */
-    /* Use the font's own vertical stroke and coverage levels. A solid filled
-     * rectangle looks brighter than antialiased text even with the same RGB.
-     * Zero-coverage pixels leave any character under the caret untouched. */
-    GfxDrawCharOverlay(x * GFX_FONT_W, y * GFX_FONT_H, '|',
-                       fb_color(attribute), fb_color(attribute >> 4));
+    (void)size; /* Keep the public cursor-size value; render a slim text caret. */
+    /* The insertion point is the left edge of the next cell. The centered
+     * stroke in the '|' glyph made the caret look several pixels to the right
+     * of the prompt on real displays, despite the logical console column being
+     * correct. */
+    GfxFillRect(x * GFX_FONT_W, y * GFX_FONT_H, 1, GFX_FONT_H,
+                fb_color(attribute));
 }
 
 static void serial_number(UINT32 number)
@@ -96,50 +93,12 @@ void HalConsolePutUserStreamChar(char character, UINT8 attribute)
     }
 }
 
-static void user_scroll(UINT8 attribute)
-{
-    UINT32 stride = GfxFramebuffer.Pitch / 4;
-    UINT32 rows = GfxFramebuffer.Height / GFX_FONT_H;
-    for (UINT32 y = GFX_FONT_H; y < GfxFramebuffer.Height; y++) {
-        UINT32 *destination = GfxFramebuffer.Base +
-                              (y - GFX_FONT_H) * stride;
-        UINT32 *source = GfxFramebuffer.Base + y * stride;
-        for (UINT32 x = 0; x < GfxFramebuffer.Width; x++)
-            destination[x] = source[x];
-    }
-    GfxFillRect(0, (rows - 1) * GFX_FONT_H, GfxFramebuffer.Width,
-                GFX_FONT_H, fb_color(attribute >> 4));
-    g_user_row = rows - 1;
-}
-
 void HalConsolePutUserChar(char character, UINT8 attribute)
 {
+    /* Console.c owns the screen buffer and cursor. Mirroring output through a
+     * second HAL cursor caused divergence after ANSI movement, tabs and scrolls
+     * (visible as prompt/typed-text offset on real framebuffers). */
     HalConsolePutUserStreamChar(character, attribute);
-    if (g_graphics_mode || g_framebuffer_users || !GfxAvailable()) return;
-    UINT32 columns = GfxFramebuffer.Width / GFX_FONT_W;
-    UINT32 rows = GfxFramebuffer.Height / GFX_FONT_H;
-    switch (character) {
-    case '\r': g_user_column = 0; break;
-    case '\n': g_user_column = 0; g_user_row++; break;
-    case '\b':
-        if (g_user_column) g_user_column--;
-        HalConsoleRenderCell(g_user_column, g_user_row, ' ', attribute);
-        break;
-    case '\t': g_user_column = (g_user_column + 8) & ~7u; break;
-    case '\f':
-        GfxClear(fb_color(attribute >> 4));
-        g_user_column = g_user_row = 0;
-        break;
-    default:
-        if ((UINT8)character >= 32) {
-            HalConsoleRenderCell(g_user_column, g_user_row, character,
-                                 attribute);
-            g_user_column++;
-        }
-        break;
-    }
-    if (g_user_column >= columns) { g_user_column = 0; g_user_row++; }
-    if (g_user_row >= rows) user_scroll(attribute);
 }
 
 void HalConsoleUpdateCursor(UINT64 tick)
@@ -156,7 +115,12 @@ void HalInitializeConsole(void)
 void HalConsolePutChar(char c)
 {
     HalSerialPutChar(c);
-    HalVgaPutChar(c);
+    /* GOP/linear graphics mode has no active VGA text console. In particular,
+     * scrolling the hidden B8000 aperture performs thousands of legacy device
+     * reads while KeLog holds its lock with interrupts masked. Do not access
+     * that aperture or the CRTC ports after the framebuffer takes over. */
+    if (!GfxAvailable())
+        HalVgaPutChar(c);
 }
 
 void HalConsoleWrite(const char *s)

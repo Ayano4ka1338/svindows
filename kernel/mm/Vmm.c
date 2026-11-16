@@ -18,6 +18,7 @@
 #include <svindows/AddressSpace.h>
 
 static UINT64 g_kernel_pml4_phys;
+extern char __kernel_phys_end[];
 
 UINT64 MmGetKernelAddressSpace(void)
 {
@@ -47,7 +48,9 @@ static ALWAYS_INLINE void load_cr3(UINT64 pml4_phys)
 
 static UINT64 alloc_zeroed_table(void)
 {
-    UINT64 phys = MmAllocatePage();
+    /* Before the CR3 switch MmPhysToVirt is an identity address and only
+     * the low 4 GiB exists in the bootstrap tables. */
+    UINT64 phys = MmDirectMapBase ? MmAllocatePage() : MmAllocatePageBelow4G();
     if (phys == MM_INVALID_PHYS)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
                    "out of physical memory building page tables");
@@ -73,6 +76,29 @@ static UINT64 next_table(UINT64 *entry)
     return *entry & PTE_ADDR_MASK;
 }
 
+/* Convert an existing 2 MiB direct-map entry into a normal page table. This
+ * is needed when a device range (notably the firmware framebuffer) must get
+ * uncached 4 KiB mappings inside the otherwise write-back direct map. */
+static UINT64 split_large_page(UINT64 *pde)
+{
+    UINT64 old = *pde;
+    if (!(old & PTE_LARGE))
+        return old & PTE_ADDR_MASK;
+
+    UINT64 pt_phys = alloc_zeroed_table();
+    UINT64 *pt = table_at(pt_phys);
+    UINT64 base = old & PTE_ADDR_MASK & ~(LARGE_PAGE_SIZE - 1);
+    UINT64 leaf_flags = old & ~PTE_ADDR_MASK;
+    leaf_flags &= ~PTE_LARGE;
+    for (UINT32 i = 0; i < ENTRIES_PER_TABLE; ++i)
+        pt[i] = (base + (UINT64)i * PAGE_SIZE) | leaf_flags;
+
+    /* Preserve effective permissions while moving the large-page mapping to
+     * 4 KiB leaves. The PAT bit is not used by current large mappings. */
+    *pde = pt_phys | PTE_PRESENT | PTE_WRITE | PTE_USER;
+    return pt_phys;
+}
+
 /* Map a single 2 MiB page. Used only while building the initial address space. */
 static void map_large(UINT64 pml4_phys, UINT64 va, UINT64 pa, UINT64 flags)
 {
@@ -85,22 +111,108 @@ static void map_large(UINT64 pml4_phys, UINT64 va, UINT64 pa, UINT64 flags)
     pd[PD_INDEX(va)] = (pa & ~(LARGE_PAGE_SIZE - 1)) | flags | PTE_LARGE;
 }
 
+static BOOLEAN direct_map_ram_page(const MM_MEMORY_MAP *map, UINT64 phys,
+                                   UINT64 *covered)
+{
+    for (UINT32 i = 0; i < map->count; ++i) {
+        const MM_MEMORY_REGION *region = &map->regions[i];
+        if (!region->length || region->base > ~(UINT64)0 - region->length)
+            continue;
+        UINT64 end = region->base + region->length;
+        if (phys >= region->base && phys < end) {
+            if (covered) *covered = end - phys;
+            return region->type == MmRegionAvailable ||
+                   region->type == MmRegionAcpiReclaimable ||
+                   region->type == MmRegionAcpiNvs;
+        }
+    }
+    if (covered) *covered = 0;
+    return FALSE;
+}
+
+static void map_direct_chunk(UINT64 pml4_phys, const MM_MEMORY_MAP *map,
+                             UINT64 phys)
+{
+    UINT64 covered = 0;
+    BOOLEAN ram = direct_map_ram_page(map, phys, &covered);
+    UINT64 cache_flags = ram ? 0 : PTE_PCD | PTE_PWT;
+    UINT64 kernel_end = (UINT64)(ULONG_PTR)__kernel_phys_end;
+    BOOLEAN kernel_overlap = phys < kernel_end &&
+                             KERNEL_PHYS_BASE < phys + LARGE_PAGE_SIZE;
+    if (covered >= LARGE_PAGE_SIZE && !(kernel_overlap && !ram)) {
+        map_large(pml4_phys, MM_DIRECT_MAP_BASE + phys, phys,
+                  PTE_PRESENT | PTE_WRITE | PTE_GLOBAL | cache_flags);
+        return;
+    }
+
+    /* A 2 MiB chunk straddles firmware memory types. Keep RAM write-back and
+     * device/reserved pages uncached instead of applying one cache policy to
+     * the whole mixed region. */
+    UINT64 *pml4 = table_at(pml4_phys);
+    UINT64 pdpt_phys = next_table(&pml4[PML4_INDEX(MM_DIRECT_MAP_BASE + phys)]);
+    UINT64 *pdpt = table_at(pdpt_phys);
+    UINT64 pd_phys = next_table(&pdpt[PDPT_INDEX(MM_DIRECT_MAP_BASE + phys)]);
+    UINT64 *pd = table_at(pd_phys);
+    UINT64 pt_phys = alloc_zeroed_table();
+    UINT64 *pt = table_at(pt_phys);
+    for (UINT32 i = 0; i < ENTRIES_PER_TABLE; ++i) {
+        UINT64 page = phys + (UINT64)i * PAGE_SIZE;
+        UINT64 page_covered = 0;
+        BOOLEAN page_ram = direct_map_ram_page(map, page, &page_covered) &&
+                           page_covered >= PAGE_SIZE;
+        /* The kernel's high-half image is already mapped write-back. Keep its
+         * direct-map alias consistent even if firmware labels those pages
+         * reserved. */
+        if (page >= KERNEL_PHYS_BASE && page < (UINT64)(ULONG_PTR)__kernel_phys_end)
+            page_ram = TRUE;
+        UINT64 flags = PTE_PRESENT | PTE_WRITE | PTE_GLOBAL |
+                       (page_ram ? 0 : PTE_PCD | PTE_PWT);
+        pt[i] = page | flags;
+    }
+    pd[PD_INDEX(MM_DIRECT_MAP_BASE + phys)] =
+        pt_phys | PTE_PRESENT | PTE_WRITE | PTE_USER;
+}
+
+static void map_kernel_page(UINT64 pml4_phys, UINT64 virt, UINT64 phys)
+{
+    UINT64 *pml4 = table_at(pml4_phys);
+    UINT64 pdpt_phys = next_table(&pml4[PML4_INDEX(virt)]);
+    UINT64 *pdpt = table_at(pdpt_phys);
+    UINT64 pd_phys = next_table(&pdpt[PDPT_INDEX(virt)]);
+    UINT64 *pd = table_at(pd_phys);
+    UINT64 pt_phys = next_table(&pd[PD_INDEX(virt)]);
+    UINT64 *pt = table_at(pt_phys);
+    pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) |
+                         PTE_PRESENT | PTE_WRITE | PTE_GLOBAL;
+}
+
 void MmInitializeVirtualMemory(const MM_MEMORY_MAP *map)
 {
     g_kernel_pml4_phys = alloc_zeroed_table();
 
-    /* Kernel image window: virtual -2 GiB..-1 GiB -> physical 0..1 GiB. */
-    for (UINT64 off = 0; off < 0x40000000ULL; off += LARGE_PAGE_SIZE)
-        map_large(g_kernel_pml4_phys, KERNEL_VIRT_BASE + off, off,
-                  PTE_PRESENT | PTE_WRITE | PTE_GLOBAL);
+    /* Map only the loaded kernel image in the -2 GiB window. Mapping the
+     * entire first GiB write-back creates cache-type aliases for legacy
+     * devices such as VGA and PCI MMIO. */
+    UINT64 kernel_end = (UINT64)(ULONG_PTR)__kernel_phys_end;
+    for (UINT64 phys = KERNEL_PHYS_BASE; phys < kernel_end;) {
+        UINT64 remaining = kernel_end - phys;
+        UINT64 virt = KERNEL_VIRT_BASE + phys;
+        if (!(phys & (LARGE_PAGE_SIZE - 1)) && remaining >= LARGE_PAGE_SIZE) {
+            map_large(g_kernel_pml4_phys, virt, phys,
+                      PTE_PRESENT | PTE_WRITE | PTE_GLOBAL);
+            phys += LARGE_PAGE_SIZE;
+        } else {
+            map_kernel_page(g_kernel_pml4_phys, virt, phys);
+            phys += PAGE_SIZE;
+        }
+    }
 
     /* Direct map: cover all physical RAM at MM_DIRECT_MAP_BASE with 2 MiB pages. */
     UINT64 top = (map->highest_address + LARGE_PAGE_SIZE - 1) & ~(LARGE_PAGE_SIZE - 1);
     if (top < 0x40000000ULL)
         top = 0x40000000ULL; /* always map at least the low 1 GiB */
     for (UINT64 pa = 0; pa < top; pa += LARGE_PAGE_SIZE)
-        map_large(g_kernel_pml4_phys, MM_DIRECT_MAP_BASE + pa, pa,
-                  PTE_PRESENT | PTE_WRITE | PTE_GLOBAL);
+        map_direct_chunk(g_kernel_pml4_phys, map, pa);
 
     /* Commit: switch to the new tables and start resolving physical addresses
      * through the direct map. These two lines must stay adjacent - after the
@@ -127,10 +239,11 @@ BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags)
     UINT64 pd_phys = next_table(&pdpt[PDPT_INDEX(virt)]);
     UINT64 *pd = table_at(pd_phys);
 
+    UINT64 pt_phys;
     if (pd[PD_INDEX(virt)] & PTE_LARGE)
-        return FALSE; /* would have to split a 2 MiB page; unsupported */
-
-    UINT64 pt_phys = next_table(&pd[PD_INDEX(virt)]);
+        pt_phys = split_large_page(&pd[PD_INDEX(virt)]);
+    else
+        pt_phys = next_table(&pd[PD_INDEX(virt)]);
     UINT64 *pt = table_at(pt_phys);
 
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | flags | PTE_PRESENT;

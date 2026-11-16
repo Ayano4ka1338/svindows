@@ -343,10 +343,46 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
     UINT64 fault_address = frame && frame->vector == 14 ? read_cr2() : 0;
     if(frame&&frame->vector==14)
         __atomic_add_fetch(&KeGetCurrentProcessorBlock()->PageFaults,1,__ATOMIC_RELAXED);
-    /* Private SMP wake/IPI vector. The parked AP will recheck its release
-     * state after iret; no scheduler work is done on this early path. */
-    if (frame->vector == HAL_SMP_WAKE_VECTOR) {
+    /* F1 is a non-periodic wake/termination IPI. F2 is the BSP clock's
+     * periodic scheduling tick for APs. Keeping them separate prevents a
+     * queue wake from consuming a full quantum or inflating CPU time. */
+    if (frame->vector == HAL_SMP_WAKE_VECTOR ||
+        frame->vector == HAL_SMP_TICK_VECTOR) {
+        PKPRCB processor = KeGetCurrentProcessorBlock();
+        PKTHREAD current = processor->CurrentThread;
+        BOOLEAN is_tick = frame->vector == HAL_SMP_TICK_VECTOR;
+        BOOLEAN reschedule = FALSE;
+        __atomic_add_fetch(&processor->InterruptCount, 1, __ATOMIC_RELAXED);
+
+        if (is_tick) {
+            KeAccountClockTick((frame->cs & 3) == 3);
+            if (current && current != processor->IdleThread &&
+                current->State == ThreadStateRunning && current->Quantum > 0)
+                current->Quantum--;
+        }
+
+        if (!current || current == processor->IdleThread ||
+            current->State != ThreadStateRunning ||
+            __atomic_load_n(&processor->ReschedulePending, __ATOMIC_ACQUIRE) ||
+            (is_tick && current->Quantum <= 0)) {
+            reschedule = TRUE;
+            __atomic_store_n(&processor->ReschedulePending, 1, __ATOMIC_RELEASE);
+        }
         HalLocalApicEoi();
+        if (reschedule)
+            KiScheduleAfterInterrupt();
+        return;
+    }
+    if (frame->vector == HAL_LOCAL_TIMER_VECTOR) {
+        KIRQL old_irql;
+        KeRaiseIrql(HIGH_LEVEL, &old_irql);
+        __atomic_add_fetch(&KeGetCurrentProcessorBlock()->InterruptCount, 1,
+                           __ATOMIC_RELAXED);
+        KeAccountClockTick((frame->cs & 3) == 3);
+        KeClockTick();
+        HalLocalApicEoi();
+        KeLowerIrql(old_irql);
+        KiScheduleAfterInterrupt();
         return;
     }
     /* Hardware IRQs (remapped to vectors 32..47) go to the HAL, which EOIs the
@@ -379,8 +415,12 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
                   thread ? thread->ThreadId : 0);
             KeTerminateThread();
         }
-        KeBugCheck(KE_UNEXPECTED_KERNEL_MODE_TRAP,
-                   "Unhandled CPU exception in kernel mode");
+        char reason[144];
+        RtlFormat(reason, sizeof(reason),
+                  "Kernel exception %lu RIP=%p CR2=%p",
+                  (unsigned long)frame->vector, (void *)frame->rip,
+                  (void *)fault_address);
+        KeBugCheck(KE_UNEXPECTED_KERNEL_MODE_TRAP, reason);
     }
 
     /* Any other vector is unexpected. */

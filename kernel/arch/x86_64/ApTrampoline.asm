@@ -22,13 +22,17 @@ ap_trampoline_start:
 
     mov     eax, [dword 0x8000 + ap_trampoline_cr3 - ap_trampoline_start]
     mov     cr3, eax
+    mov     eax, cr0
+    and     eax, ~((1 << 2) | (1 << 3)) ; clear EM/TS before FXSAVE/SSE
+    or      eax, 1 << 1                 ; set MP: monitor co-processor
+    mov     cr0, eax
     mov     eax, cr4
-    or      eax, 1 << 5                 ; PAE
+    or      eax, (1 << 5) | (1 << 9) | (1 << 10) ; PAE | OSFXSR | OSXMMEXCPT
     mov     cr4, eax
 
     mov     ecx, 0xC0000080             ; IA32_EFER
     rdmsr
-    or      eax, 1 << 8                 ; LME
+    or      eax, (1 << 8) | (1 << 11)  ; LME | NXE (runtime page tables use NX)
     wrmsr
 
     mov     eax, cr0

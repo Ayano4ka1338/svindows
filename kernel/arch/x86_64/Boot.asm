@@ -199,7 +199,7 @@ long_mode_start:
     ; Enable SSE. SSE2 is guaranteed on x86-64, and user code (and any real
     ; Windows binary) uses XMM registers; without this those instructions #UD.
     mov     rax, cr0
-    and     ax, 0xFFFB                ; clear CR0.EM (no x87 emulation)
+    and     ax, 0xFFF3                ; clear EM and inherited TS before FXSAVE/SSE
     or      ax, 0x0002                ; set   CR0.MP (monitor coprocessor)
     mov     cr0, rax
     mov     rax, cr4
@@ -222,7 +222,7 @@ gdt64:
 GDT64_CODE equ 0x08
     dq  0x00AF9A000000FFFF             ; 64-bit code: P,S,exec,read, L=1
 GDT64_DATA equ 0x10
-    dq  0x00AF92000000FFFF             ; data: P,S,read/write
+    dq  0x00CF92000000FFFF             ; data: P,S,read/write, L=0
 gdt64_ptr:
     dw  gdt64_ptr - gdt64 - 1
     dq  gdt64
@@ -235,6 +235,7 @@ saved_mbi:   dd 0
 ; ---------------------------------------------------------------------------
 section .boot.bss nobits alloc write align=4096
 global boot_pml4
+global boot_pdpt
 boot_pml4:  resb 4096
 boot_pdpt:  resb 4096
 boot_pd:    resb 4 * 4096

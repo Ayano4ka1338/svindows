@@ -30,8 +30,9 @@ isr%1:
 
 %assign i 0
 %rep 256
-    ; Vectors 8, 10-14, 17, 21 push a hardware error code.
-    %if i == 8 || i == 10 || i == 11 || i == 12 || i == 13 || i == 14 || i == 17 || i == 21
+    ; Architectural exception vectors with a hardware error code, including
+    ; AMD #VC (29) and #SX (30).
+    %if i == 8 || i == 10 || i == 11 || i == 12 || i == 13 || i == 14 || i == 17 || i == 21 || i == 29 || i == 30
         ISR_ERR i
     %else
         ISR_NOERR i
@@ -41,6 +42,10 @@ isr%1:
 
 ; ---- common trap path -----------------------------------------------------
 isr_common:
+    ; An interrupt does not clear DF. The interrupted user may be in a STD /
+    ; backwards-copy sequence; every kernel C entry requires DF=0. IRETQ
+    ; restores the interrupted DF from the untouched hardware frame.
+    cld
     ; If we came from ring 3, swap to the kernel GS base so the invariant
     ; "GS = KPCR while in the kernel" holds regardless of entry path. The saved
     ; CS is at [rsp+24] here: vector(0) error(8) rip(16) cs(24).

@@ -29,6 +29,21 @@ void HalInitializeTimer(UINT32 hz)
         divisor = 0xFFFF;
     g_timer_divisor = divisor;
 
+    /* Prefer the BSP local-APIC periodic timer when the APIC was initialized.
+     * It is independent of the firmware's legacy PIC/IMCR wiring, which has
+     * stopped delivering repeat IRQ0s on several physical boards. */
+    if (HalInitializeLocalApicTimer(hz)) {
+        HalMaskIrq(0);
+        return;
+    }
+
+    HalUseLegacyTimer();
+}
+
+void HalUseLegacyTimer(void)
+{
+    HalStopLocalApicTimer();
+    UINT32 divisor = g_timer_divisor;
     /* Command: channel 0, access lo+hi byte, mode 2 (rate generator), binary. */
     __outbyte(PIT_COMMAND, 0x34);
     __outbyte(PIT_CHANNEL0, (UINT8)(divisor & 0xFF));

@@ -7,9 +7,10 @@
  * kernel stacks; a brand-new thread's stack is fabricated so its first switch
  * lands in KiThreadStartup -> KiThreadBootstrap -> the thread body.
  *
- * Single-CPU only for now, so short critical sections just disable interrupts
- * (KiIrqSave/KiIrqRestore); thread publication uses a UP spin lock. Scheduling
- * is below DISPATCH_LEVEL, including preemption at the tail of a timer IRQ.
+ * The scheduler uses one globally locked run queue shared by all online CPUs.
+ * Each CPU owns an idle context and quantum; APs are woken/preempted by local
+ * APIC IPIs. Until remote TLB shootdowns exist, one process is admitted to one
+ * CPU at a time, while different processes may execute concurrently.
  */
 #include <svindows/Ke.h>
 #include <svindows/Ps.h>
@@ -59,6 +60,27 @@ static void KepClockDpc(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2);
 static void KiSchedule(void);
 static void KiScheduleWithLock(UINT64 interrupt_state);
 
+/* Called with the scheduler lock held after a thread becomes Ready. Wake only
+ * idle APs; busy processors will observe the shared queue on their next
+ * quantum IPI. A wake handler may block on the scheduler lock until this
+ * critical section publishes the complete queue update. */
+static void KepWakeIdleProcessors(void)
+{
+    PKPRCB current = KeGetCurrentProcessorBlock();
+    UINT32 count = HalGetProcessorCount();
+    if (count > KE_MAXIMUM_PROCESSORS) count = KE_MAXIMUM_PROCESSORS;
+    for (UINT32 i = 1; i < count; ++i) {
+        PKPRCB processor = KeGetProcessorBlock(i);
+        if (!processor || processor == current ||
+            processor->StartupState != 2 ||
+            !__atomic_load_n(&processor->StartupRelease, __ATOMIC_ACQUIRE) ||
+            processor->CurrentThread != processor->IdleThread)
+            continue;
+        __atomic_store_n(&processor->ReschedulePending, 1, __ATOMIC_RELEASE);
+        (void)HalSendIpi(processor->ApicId, HAL_SMP_WAKE_VECTOR);
+    }
+}
+
 UINT64 KiAcquireSchedulerLock(void)
 {
     return KiAcquireRawSpinLock(&g_scheduler_lock);
@@ -81,6 +103,44 @@ static BOOLEAN KepThreadCurrentOnAnyProcessor(PKTHREAD thread)
     return FALSE;
 }
 
+/* A terminating thread must stop executing on every CPU before teardown can
+ * release its user stack, TEB, DOS state, or other per-thread resources. The
+ * global scheduler lock is also the context-switch completion barrier: the
+ * incoming stack releases it only after the outgoing RSP has been saved. */
+static void KepWaitForThreadOffProcessors(PKTHREAD thread)
+{
+    BOOLEAN reschedule_sent = FALSE;
+    for (;;) {
+        PKPRCB owner = NULL;
+        UINT64 flags = KiAcquireSchedulerLock();
+        UINT32 count = HalGetProcessorCount();
+        if (!count || count > KE_MAXIMUM_PROCESSORS)
+            count = 1;
+        for (UINT32 i = 0; i < count; ++i) {
+            PKPRCB cpu = KeGetProcessorBlock(i);
+            if (cpu && cpu->CurrentThread == thread) {
+                owner = cpu;
+                if (!reschedule_sent && cpu != KeGetCurrentProcessorBlock() &&
+                    cpu->StartupState == 2 &&
+                    __atomic_load_n(&cpu->StartupRelease, __ATOMIC_ACQUIRE)) {
+                    __atomic_store_n(&cpu->ReschedulePending, 1,
+                                     __ATOMIC_RELEASE);
+                    if (!HalSendIpi(cpu->ApicId, HAL_SMP_WAKE_VECTOR))
+                        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                                   "cannot deliver remote thread reschedule IPI");
+                    reschedule_sent = TRUE;
+                }
+                break;
+            }
+        }
+        KiReleaseSchedulerLock(flags);
+        if (!owner)
+            return;
+        /* Do not hold the run-queue lock while the remote CPU handles its IPI. */
+        __asm__ volatile("pause" ::: "memory");
+    }
+}
+
 #include "ThreadTermination.inc"
 
 /* Process handles are waitable too. Wake their waiters only after the exit
@@ -101,8 +161,16 @@ static void KepReapTerminatedThreads(void)
     for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
         PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
         entry = entry->Flink;
+        PKPRCB current_processor = KeGetCurrentProcessorBlock();
+        PKTHREAD current_thread = current_processor->CurrentThread;
+        BOOLEAN same_address_space_active = current_thread &&
+            current_thread != current_processor->IdleThread &&
+            current_thread->Process == thread->Process;
         if (KepThreadCurrentOnAnyProcessor(thread) ||
-            thread->State != ThreadStateTerminated)
+            thread->State != ThreadStateTerminated ||
+            (!same_address_space_active && thread->Process &&
+             __atomic_load_n(&thread->Process->ActiveProcessorCount,
+                             __ATOMIC_ACQUIRE) != 0))
             continue;
         W32kCleanupThreadUser(thread);
         if (thread->DosContext) {
@@ -231,13 +299,16 @@ NTSTATUS KeResumeThread(PKTHREAD thread, ULONG *previous_count)
         KiReleaseRawSpinLock(&g_scheduler_lock, flags);
         return STATUS_INVALID_HANDLE;
     }
+    BOOLEAN became_ready = FALSE;
     ULONG count = thread->SuspendCount;
     if (previous_count) *previous_count = count;
     if (count && !--thread->SuspendCount &&
         thread->State == ThreadStateSuspended) {
         thread->State = ThreadStateReady;
         InsertTailList(&g_ready_queue, &thread->ReadyEntry);
+        became_ready = TRUE;
     }
+    if (became_ready) KepWakeIdleProcessors();
     KiReleaseRawSpinLock(&g_scheduler_lock, flags);
     return STATUS_SUCCESS;
 }
@@ -297,6 +368,8 @@ void KeInitializeScheduler(void)
         processor->IdleThread = idle;
         if (i == 0) {
             processor->CurrentThread = idle;
+            processor->StartupState = 2;
+            processor->StartupRelease = 1;
             KeSetCurrentThread(idle);
         }
         KiSaveFpuState(idle->FpuState);
@@ -364,6 +437,7 @@ static BOOLEAN KepEnqueueThread(PKTHREAD t)
     InsertTailList(&g_ready_queue, &t->ReadyEntry);
     InsertTailList(&t->Process->ThreadListHead, &t->ProcessEntry);
     InsertTailList(&g_all_threads, &t->SchedulerEntry);
+    KepWakeIdleProcessors();
     KiReleaseRawSpinLock(&g_scheduler_lock, interrupt_state);
     return TRUE;
 }
@@ -478,24 +552,47 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
     if (!idle)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
                    "processor has no idle thread");
-    if (IsListEmpty(&g_ready_queue)) {
-        next = idle;
-    } else {
-        PLIST_ENTRY e = g_ready_queue.Flink;
-        PLIST_ENTRY best = e;
-        PKTHREAD first = CONTAINING_RECORD(e, KTHREAD, ReadyEntry);
-        LONG highest = KepDispatchPriority(first);
-        for (e = e->Flink; e != &g_ready_queue; e = e->Flink) {
-            PKTHREAD candidate = CONTAINING_RECORD(e, KTHREAD, ReadyEntry);
-            LONG score = KepDispatchPriority(candidate);
-            if (score > highest) {
-                highest = score;
-                best = e;
-            }
+
+    /* Release this CPU's address-space execution slot before choosing the
+     * next thread. This prevents two CPUs from mutating/running one process
+     * address space concurrently while the VM lacks remote TLB shootdowns. */
+    if (prev && prev != idle && prev->Process) {
+        ULONG active = __atomic_load_n(&prev->Process->ActiveProcessorCount,
+                                       __ATOMIC_RELAXED);
+        if (!active)
+            KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                       "process active-CPU accounting underflow");
+        __atomic_sub_fetch(&prev->Process->ActiveProcessorCount, 1,
+                           __ATOMIC_RELEASE);
+    }
+
+    /* A single global run queue allows migration across CPUs. Skip threads
+     * whose process is already executing elsewhere; keep them queued for the
+     * processor that currently owns that address space. */
+    PLIST_ENTRY best = NULL;
+    LONG highest = (-2147483647 - 1);
+    for (PLIST_ENTRY e = g_ready_queue.Flink;
+         e != &g_ready_queue; e = e->Flink) {
+        PKTHREAD candidate = CONTAINING_RECORD(e, KTHREAD, ReadyEntry);
+        if (candidate->Process &&
+            __atomic_load_n(&candidate->Process->ActiveProcessorCount,
+                            __ATOMIC_ACQUIRE) != 0)
+            continue;
+        LONG score = KepDispatchPriority(candidate);
+        if (!best || score > highest) {
+            highest = score;
+            best = e;
         }
-        e = best;
-        RemoveEntryList(e);
-        next = CONTAINING_RECORD(e, KTHREAD, ReadyEntry);
+    }
+    if (best) {
+        RemoveEntryList(best);
+        next = CONTAINING_RECORD(best, KTHREAD, ReadyEntry);
+    } else if (prev && prev != idle && prev->State == ThreadStateRunning) {
+        /* No other eligible work: keep the current thread running rather
+         * than bouncing through idle for a full timer tick. */
+        next = prev;
+    } else {
+        next = idle;
     }
 
     /* Return the outgoing thread to the ready queue if it can still run. The
@@ -505,12 +602,22 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
     }
 
     if (prev == next) {
+        if (prev != idle && prev->Process)
+            __atomic_add_fetch(&prev->Process->ActiveProcessorCount, 1,
+                               __ATOMIC_RELEASE);
         prev->State = ThreadStateRunning;
         KiReleaseRawSpinLock(&g_scheduler_lock, scheduler_interrupt_state);
         return;
     }
 
+    if (next != idle && next->Process)
+        __atomic_add_fetch(&next->Process->ActiveProcessorCount, 1,
+                           __ATOMIC_RELEASE);
+
     next->ContextSwitches++;
+    BOOLEAN trace_child_switch = SVINDOWS_EXEC_TRACE && next->ContextSwitches == 1 &&
+        next->ProcessMainThread && next->Process && next->Process->ParentProcessId > 4;
+    if (trace_child_switch) PsTraceProcessLaunch("6s.1 child selected", next->Name);
     KeGetCurrentProcessorBlock()->ContextSwitches++;
     next->State = ThreadStateRunning;
     next->Quantum = DEFAULT_QUANTUM;
@@ -521,20 +628,25 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
     /* Kernel mappings are shared, so it is safe to change CR3 while running
      * on the outgoing kernel stack. User mappings become those of `next`. */
     MmSwitchAddressSpace(next->Process->DirectoryTableBase);
+    if (trace_child_switch) PsTraceProcessLaunch("6s.2 child CR3 active", NULL);
 
     /* Point the CPU's ring-0 entry stack at the incoming thread's kernel stack,
      * so a syscall or interrupt taken from ring 3 lands on the right stack, and
      * set the GS base it will see in ring 3 (its TEB). */
     if (next->KernelStackBase)
         KeSetKernelStack(next->KernelStackBase + next->KernelStackSize);
+    else if (next == idle)
+        KeSetKernelStack(KeGetProcessorBootstrapStackTop(processor->ProcessorNumber));
     KeSetUserGsBase(next->UserGsBase);
     KeSetUserFsBase(next->UserFsBase);
+    if (trace_child_switch) PsTraceProcessLaunch("6s.3 child TLS active", NULL);
 
     /* Preserve SSE/x87 state across the switch: save ours, load the incoming
      * thread's. Done here (not in the asm) because the incoming thread's area
      * must be restored with a pointer that survives the stack swap. */
     KiSaveFpuState(prev->FpuState);
     KiRestoreFpuState(next->FpuState);
+    if (trace_child_switch) PsTraceProcessLaunch("6s.4 child FPU restored", NULL);
 
     prev->SavedIrql = KiSwitchThreadIrql(next->SavedIrql);
 
@@ -571,6 +683,7 @@ void KiFinishContextSwitch(PKTHREAD outgoing)
         } else {
             outgoing->State = ThreadStateReady;
             InsertTailList(&g_ready_queue, &outgoing->ReadyEntry);
+            KepWakeIdleProcessors();
         }
     }
     KiReleaseRawSpinLock(&g_scheduler_lock, 0);
@@ -608,6 +721,7 @@ void KiReadyThreadWithSchedulerLock(PKTHREAD thread)
                 thread->SchedulerBoost < 1)
                 thread->SchedulerBoost = 1;
             InsertTailList(&g_ready_queue, &thread->ReadyEntry);
+            KepWakeIdleProcessors();
         }
     }
 }
@@ -625,6 +739,8 @@ void KiThreadBootstrap(void)
     KiDeliverKernelApcs();
 
     if (t->UserMode) {
+        if (SVINDOWS_EXEC_TRACE && t->ProcessMainThread && t->Process && t->Process->ParentProcessId > 4)
+            PsTraceProcessLaunch("7 enter child user mode", t->Name);
         /* Drop to ring 3; the thread lives in user mode from here and only
          * re-enters the kernel via syscalls and interrupts. Never returns. */
         if (t->LinuxThread && LinuxIsCloneThread(t))
@@ -648,6 +764,8 @@ NORETURN void KeTerminateThread(void)
     (void)KiIrqSave(); /* disable preemption for good on this thread */
 
     PKTHREAD t = KeGetCurrentProcessorBlock()->CurrentThread;
+    if (SVINDOWS_EXEC_TRACE && t->ProcessMainThread && t->Process && t->Process->ParentProcessId > 4)
+        PsTraceProcessLaunch("8 child exit", t->Name);
     UINT64 scheduler_flags = KiAcquireSchedulerLock();
     t->State = ThreadStateTerminating;
     KiReleaseSchedulerLock(scheduler_flags);
@@ -738,6 +856,7 @@ static void KepFinishClaimedTermination(PKTHREAD target, NTSTATUS exit_status)
             other->ExitStatus = exit_status;
             other->State = ThreadStateTerminating;
             KiReleaseSchedulerLock(flags);
+            KepWaitForThreadOffProcessors(other);
             LinuxThreadExited(other);
             KeAbandonThreadMutants(other);
             flags = KiAcquireSchedulerLock();
@@ -771,6 +890,12 @@ static BOOLEAN KepClaimThreadTerminationWithSchedulerLock(PKTHREAD target,
         KiCancelThreadWaitWithSchedulerLock(target, exit_status);
     target->ExitStatus = exit_status;
     target->State = ThreadStateTerminating;
+    if (target->ProcessMainThread && target->Process) {
+        target->Process->Exiting = TRUE;
+        target->Process->ExitStatus = exit_status;
+    }
+    /* The caller sends one wake IPI after releasing the run-queue lock and
+     * waits for the remote stack switch before reclaiming target resources. */
     return TRUE;
 }
 
@@ -787,6 +912,7 @@ NTSTATUS KeTerminateThreadByPointer(PKTHREAD target, NTSTATUS exit_status)
                                                                  exit_status);
     KiReleaseSchedulerLock(flags);
     if (!claimed) return STATUS_INVALID_HANDLE;
+    KepWaitForThreadOffProcessors(target);
     KepFinishClaimedTermination(target, exit_status);
     return STATUS_SUCCESS;
 }
@@ -812,6 +938,7 @@ NTSTATUS KeTerminateProcess(PKPROCESS process, NTSTATUS exit_status)
     if (target == KeGetCurrentProcessorBlock()->CurrentThread) {
         KeTerminateThread();
     }
+    KepWaitForThreadOffProcessors(target);
     KepFinishClaimedTermination(target, exit_status);
     return STATUS_SUCCESS;
 }
@@ -851,6 +978,21 @@ void KeClockTick(void)
 
     if (t->Quantum <= 0)
         processor->ReschedulePending = TRUE;
+
+    /* The 8254/PIC clock is routed only to the BSP. Use its tick as the
+     * system-wide scheduling clock and send a local-APIC IPI to each online
+     * AP so CPU-local quanta expire and CPU-local idle threads wake. */
+    if (processor->ProcessorNumber == 0) {
+        UINT32 count = HalGetProcessorCount();
+        if (count > KE_MAXIMUM_PROCESSORS) count = KE_MAXIMUM_PROCESSORS;
+        for (UINT32 i = 1; i < count; ++i) {
+            PKPRCB ap = KeGetProcessorBlock(i);
+            if (!ap || ap->StartupState != 2 ||
+                !__atomic_load_n(&ap->StartupRelease, __ATOMIC_ACQUIRE))
+                continue;
+            (void)HalSendIpi(ap->ApicId, HAL_SMP_TICK_VECTOR);
+        }
+    }
 }
 
 /* Called after the IRQ's execution level is restored, with IF still clear.

@@ -103,8 +103,10 @@ void KeInitializeGdtForProcessor(ULONG processor_number)
     TSS64 *tss = &g_tss[processor_number];
     gdt[0] = 0;                       /* null */
     gdt[1] = 0x00AF9A000000FFFFULL;   /* kernel code: P, S, exec/read, L=1 */
-    gdt[2] = 0x00AF92000000FFFFULL;   /* kernel data: P, S, read/write     */
-    gdt[3] = 0x00AFF2000000FFFFULL;   /* user data:   DPL 3, read/write    */
+    /* L is reserved for data descriptors and must be zero. Use conventional
+     * flat data attributes (G=1, D/B=1, L=0) for SS/DS/ES. */
+    gdt[2] = 0x00CF92000000FFFFULL;   /* kernel data: P, S, read/write     */
+    gdt[3] = 0x00CFF2000000FFFFULL;   /* user data:   DPL 3, read/write    */
     gdt[4] = 0x00AFFA000000FFFFULL;   /* user code:   DPL 3, exec/read, L=1 */
 
     /* Point the TSS's stacks at the top of their (downward-growing) buffers. */

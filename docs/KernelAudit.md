@@ -45,14 +45,16 @@ Windows-программами. Для Clang отключён только `core
   DPC, wait-all, blocking delay, closing during wait, 1000 armed-close cycles,
   query/access/error/OOM и stack-owner cleanup. QEMU smoke проверяет boot/shell/
   PS2, а не весь native timer ABI в ring 3. Guest test exe не добавлены.
-- Добавлена resident UP FIFO-очередь DPC: duplicate insert не заменяет args,
+- Добавлена resident FIFO-очередь DPC с общей spin-lock синхронизацией: duplicate insert не заменяет args,
   pending вызов можно удалить, callback может поставить себя повторно. Queue
   membership снимается до вызова; после callback объект не разыменовывается
   (проверено освобождением внутри routine под ASan). При lowering ниже DISPATCH
   выполняется до 64 callbacks, остаток обслуживается на следующем IRQ/lowering;
   постановка с PASSIVE не означает синхронный вызов. На работающей ОС очередь
-  обслуживается, в частности, IRQ таймера 100 Hz. PIC по-прежнему маскирует IRQ
-  на время DPC; нет software interrupt, threaded DPC, SMP или binary KDPC ABI.
+  обслуживается, в частности, IRQ таймера 100 Hz. Общая DPC-очередь и drain
+  сериализованы spin locks; AP получает отдельные APIC tick IPIs для учёта CPU
+  и preemption. Отдельных per-CPU DPC queues/software interrupt и threaded DPC
+  пока нет; binary KDPC ABI также не реализован.
   Таймерный ISR только считает ticks/quantum и ставит DPC: shared time и wait
   deadlines обрабатываются в DPC с актуальным tick count, до reschedule.
   Keyboard/mouse ISR сохраняют сырые bytes в bounded queues; decoding перенесён
@@ -63,17 +65,18 @@ Windows-программами. Для Clang отключён только `core
   NULL member access. Host checks теперь завершаются ошибкой при UBSan report.
   Проверены FIFO/cancel/requeue/budget/IF/lifetime и реальные input decoders;
   QEMU smoke дополнен командой, набранной через эмулируемую PS/2 клавиатуру.
-- Добавлен UP execution contract: PASSIVE/APC/DISPATCH/HIGH IRQL, spin locks,
-  восстановление исходного IF, проверки неверных raise/lower, recursive lock,
-  release без acquire и блокирующего wait выше APC. Poll-only wait допускается
-  до DISPATCH. Публикация потоков использует spin lock; прочие старые короткие
-  sections пока остаются под CLI. Таймер запрашивает reschedule, а переключение
-  выполняется после восстановления IRQL на выходе из IRQ; IRQL сохраняется
-  отдельно для каждого suspended thread context. На PIC все IRQ выполняются
-  на HIGH и DISPATCH+ блокирует все IRQ: это консервативная UP модель, не APIC
-  priority threshold и не SMP. Полный executive IRQL contract ещё не реализован.
-  Host checks проверяют настоящий Irql.c/Dispatcher.c с эмуляцией IF; QEMU —
-  реальный boot, timer preemption и shell/process smoke, не все scheduler paths.
+- Добавлен ограниченный SMP scheduler: общая ready queue под spin lock,
+  per-CPU idle contexts/quanta, AP startup, APIC wake/termination и periodic
+  tick IPIs. BSP остаётся источником 100-Hz системного тика. Пока MM не умеет
+  remote TLB shootdowns, один process address space исполняется максимум на
+  одном CPU; разные процессы могут исполняться параллельно. Это не означает,
+  что всё ядро уже SMP-safe: публикация потоков и scheduler используют spin
+  locks, но часть старых коротких sections других подсистем по-прежнему только
+  под CLI и защищена лишь локально. Полный executive IRQL/APIC priority-threshold
+  contract и remote TLB shootdowns ещё не реализованы. Timer reschedule выполняется
+  после восстановления IRQL на выходе из IRQ; suspended thread сохраняет свой
+  IRQL. Host checks покрывают отдельные ABI/counter contracts; реальный SMP boot
+  требует QEMU/железа и пока не подтверждён этой host-сборкой.
 - USER callbacks больше не расходуют новый global stack/thunk на каждый вызов.
   Поток переиспользует private slot своего процесса: unmapped lower guard,
   RW/NX stack и RX thunk, обновляемый через direct map с сериализацией fetch.
@@ -161,8 +164,8 @@ Windows-программами. Для Clang отключён только `core
 | Подсистема и код | Рабочая основа | Недоработки / следующий контракт |
 | --- | --- | --- |
 | Architecture: `arch/x86_64` | Long mode, GDT/TSS, IDT, syscall, FXSAVE, user exception dispatch | Audit SYSRET canonical return и SWAPGS/NMI paths; guard pages kernel stacks; полноценные XSAVE/CPU feature negotiation |
-| HAL: `hal` | Legacy PIC/PIT, COM1, PS/2, framebuffer | ACPI, APIC/IOAPIC, SMP, PCI enumeration, power/shutdown, реальные hardware error/timeout results |
-| Ke: `ke/Thread.c`, `Dispatcher.c`, `Irql.c`, `Dpc.c`, `Timer.c` | UP scheduler, basic IRQL/spin locks, FIFO DPC, deferred input/timeouts, dispatcher timers, IRQ-tail preemption, events, semaphores, mutants, waits/timeouts | APC queues, alertable waits, UTC clock/high-resolution/coalescable timers, full executive IRQL contract; APIC/SMP locking. Большинство коротких sections ещё под CLI |
+| HAL: `hal` | Legacy PIC/PIT, COM1, PS/2, framebuffer, ACPI MADT discovery, local APIC (xAPIC/x2APIC) IPI and AP startup | IOAPIC routing, PCI enumeration, power/shutdown, robust APIC delivery timeouts and hardware error reporting |
+| Ke: `ke/Thread.c`, `Dispatcher.c`, `Irql.c`, `Dpc.c`, `Timer.c` | Process-aware shared run queue, per-CPU idle/quantum, AP wake/preemption/tick IPIs, basic IRQL/spin locks, FIFO DPC, deferred input/timeouts, dispatcher objects | Remote TLB shootdowns; concurrent execution of one process on multiple CPUs; full SMP audit of legacy CLI-only sections; APC queues, alertable waits, high-resolution timers and full executive IRQL contract |
 | Mm: `mm`, VM services в `ke/Syscall.c` | PMM, page tables, per-process CR3, eager reserve/commit/decommit/protect/query | VAD для всех mappings, page-granular protection/state, atomic rollback failed commit, demand faults, guard one-shot semantics, PFN refs, Sections, COW, working sets, pagefile. WRITECOPY пока writable, не COW |
 | Ex: `ex/Pool.c` | Tagged pool, guard bytes, coalescing | Полный synchronization contract, paged pool, quota/accounting, безопасная обработка повреждений; нет NT executive worker/related infrastructure |
 | Ob: `ob` | Types, lifetime, directory namespace, local handles/access masks | Generic access mapping по типам, security descriptors, symbolic links, handle attributes/inheritance/protection и полная namespace locking |

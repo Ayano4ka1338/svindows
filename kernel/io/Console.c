@@ -45,6 +45,10 @@ typedef struct _CONSOLE_STATE {
 } CONSOLE_STATE;
 
 static CONSOLE_STATE g_console;
+/* Cursor blinking runs on the input worker while user output can be drawing a
+ * slow uncached framebuffer. Keep the blink pass out of an in-progress console
+ * update so it cannot paint a stale caret at an intermediate column. */
+static volatile UINT32 g_console_output_active;
 static KEVENT g_console_input_ready;
 static void con_fill(UINT32 first, UINT32 count, UINT8 character,
                      UINT8 attribute, BOOLEAN fill_character,
@@ -199,14 +203,13 @@ static void con_put_character(char character, BOOLEAN write_stream)
             UINT32 index = g_console.CursorY * g_console.Width + g_console.CursorX;
             g_console.Cells[index].Character = ' ';
             g_console.Cells[index].Attribute = g_console.Attribute;
-            if (!write_stream)
-                HalConsoleRenderCell(g_console.CursorX, g_console.CursorY,
-                                     ' ', g_console.Attribute);
+            HalConsoleRenderCell(g_console.CursorX, g_console.CursorY,
+                                 ' ', g_console.Attribute);
             return;
         }
         if (character == '\t') {
             UINT32 spaces = 8 - (g_console.CursorX & 7);
-            while (spaces--) con_put_character(' ', write_stream);
+            while (spaces--) con_put_character(' ', FALSE);
             return;
         }
         if (character == '\f') {
@@ -221,9 +224,8 @@ static void con_put_character(char character, BOOLEAN write_stream)
     UINT32 index = g_console.CursorY * g_console.Width + g_console.CursorX;
     g_console.Cells[index].Character = (UINT8)character;
     g_console.Cells[index].Attribute = g_console.Attribute;
-    if (!write_stream)
-        HalConsoleRenderCell(g_console.CursorX, g_console.CursorY,
-                             character, g_console.Attribute);
+    HalConsoleRenderCell(g_console.CursorX, g_console.CursorY,
+                         character, g_console.Attribute);
     g_console.CursorX++;
     if (g_console.CursorX >= g_console.Width) {
         if (g_console.OutputMode & CON_OUTPUT_WRAP) {
@@ -256,7 +258,9 @@ void ConInitialize(void)
         g_console.Cells[i].Character = ' ';
         g_console.Cells[i].Attribute = g_console.Attribute;
     }
-    con_render_all();
+    /* GfxClear already cleared the boot framebuffer before IoInitialize.
+     * Redrawing every blank cell here is redundant and can take seconds on a
+     * real machine when the framebuffer is mapped as uncached device memory. */
 }
 
 void ConQueueInputCharacter(char character)
@@ -370,6 +374,7 @@ BOOLEAN ConInputAvailable(void)
 
 SIZE_T ConWrite(const void *buffer, SIZE_T length)
 {
+    __atomic_add_fetch(&g_console_output_active, 1, __ATOMIC_ACQUIRE);
     const char *characters = (const char *)buffer;
     /* Remove the cursor by restoring the actual buffered cell.  Painting a
      * blank here corrupts column zero for the common "\r\n" sequence: after
@@ -421,6 +426,7 @@ SIZE_T ConWrite(const void *buffer, SIZE_T length)
         con_put_character((char)ch, TRUE);
     }
     con_restart_cursor_blink();
+    __atomic_sub_fetch(&g_console_output_active, 1, __ATOMIC_RELEASE);
     return length;
 }
 
@@ -455,6 +461,7 @@ void ConAppendKernelText(const char *text, SIZE_T length)
 NTSTATUS ConControl(UINT32 operation, UINT64 argument1, UINT64 argument2,
                     UINT64 argument3, UINT64 *result)
 {
+    __atomic_add_fetch(&g_console_output_active, 1, __ATOMIC_ACQUIRE);
     NTSTATUS status = STATUS_SUCCESS;
     if (result) *result = 0;
     switch (operation) {
@@ -591,19 +598,32 @@ NTSTATUS ConControl(UINT32 operation, UINT64 argument1, UINT64 argument2,
         status = STATUS_INVALID_PARAMETER;
         break;
     }
+    __atomic_sub_fetch(&g_console_output_active, 1, __ATOMIC_RELEASE);
     return status;
 }
 
 void ConUpdateCursor(UINT64 tick)
 {
-    if (!g_console.Cells || !g_console.CursorVisible) return;
+    UINT64 irq = KiIrqSave();
+    if (__atomic_load_n(&g_console_output_active, __ATOMIC_ACQUIRE) ||
+        !g_console.Cells || !g_console.CursorVisible) {
+        KiIrqRestore(irq);
+        return;
+    }
     UINT64 phases = (tick - g_console.CursorBlinkTick) / CONSOLE_CURSOR_BLINK_TICKS;
-    if (!phases) return;
+    if (!phases) {
+        KiIrqRestore(irq);
+        return;
+    }
     g_console.CursorBlinkTick += phases * CONSOLE_CURSOR_BLINK_TICKS;
-    if (!(phases & 1)) return;
+    if (!(phases & 1)) {
+        KiIrqRestore(irq);
+        return;
+    }
     con_restore_cursor_cell();
     g_console.CursorBlinkShown = !g_console.CursorBlinkShown;
     HalConsoleSetUserCursor(g_console.CursorX, g_console.CursorY,
                             g_console.CursorBlinkShown, g_console.CursorSize,
                             g_console.Attribute);
+    KiIrqRestore(irq);
 }

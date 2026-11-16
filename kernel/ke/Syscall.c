@@ -103,6 +103,13 @@ void KeSetUserFsBase(UINT64 base)
 
 void KiInitializeSystemCallsForProcessor(ULONG processor_number)
 {
+    /* Never seed thread FXSAVE images from firmware's floating-point state.
+     * Restore a clean x87/SSE image on each CPU before the scheduler starts. */
+    static const UINT8 initial_fpu_state[512] ALIGNED(16) = {
+        [0] = 0x7f, [1] = 0x03,       /* x87 FCW = 0x037f */
+        [24] = 0x80, [25] = 0x1f     /* MXCSR = 0x1f80 */
+    };
+    KiRestoreFpuState(initial_fpu_state);
     if (processor_number >= KE_MAXIMUM_PROCESSORS)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
                    "invalid syscall processor index");
@@ -697,8 +704,21 @@ static UINT64 NtQuerySystemInformation(UINT64 *a)
         info->AllocationGranularity = 0x10000;
         info->MinimumUserModeAddress = 0x10000;
         info->MaximumUserModeAddress = 0x00007FFFFFFEFFFFULL;
-        info->ActiveProcessorsAffinityMask = 1;
-        info->NumberOfProcessors = 1;
+        UINT32 discovered = HalGetProcessorCount();
+        if (discovered > KE_MAXIMUM_PROCESSORS)
+            discovered = KE_MAXIMUM_PROCESSORS;
+        UINT64 active_mask = 1;
+        UINT8 online = 1;
+        for (UINT32 i = 1; i < discovered && i < 64; ++i) {
+            PKPRCB cpu = KeGetProcessorBlock(i);
+            if (cpu && cpu->StartupState == 2 &&
+                __atomic_load_n(&cpu->StartupRelease, __ATOMIC_ACQUIRE)) {
+                active_mask |= 1ULL << i;
+                online++;
+            }
+        }
+        info->ActiveProcessorsAffinityMask = active_mask;
+        info->NumberOfProcessors = online;
         return (UINT64)STATUS_SUCCESS;
     }
 
@@ -1373,12 +1393,15 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
 {
     __atomic_add_fetch(&KeGetCurrentProcessorBlock()->SystemCalls,1,__ATOMIC_RELAXED);
     PKTHREAD current = KeGetCurrentThread();
+    if (SVINDOWS_EXEC_TRACE) PsTraceChildService("enter", number, 0);
     if (current && current->Process && current->Process->LinuxContext) {
         const UINT64 linux_args[6] = {
             reg_args[4], reg_args[5], reg_args[1],
             reg_args[0], reg_args[2], reg_args[3]
         };
-        return LinuxSystemCallDispatch(number, linux_args);
+        UINT64 result = LinuxSystemCallDispatch(number, linux_args);
+        if (SVINDOWS_EXEC_TRACE) PsTraceChildService("leave", number, result);
+        return result;
     }
     g_service_user_rsp = user_rsp;
     g_service_number = number;
@@ -1433,6 +1456,11 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
         case SN_NtFileSystemControlSimple:case SN_NtSetFileSizeSimple:
             __atomic_add_fetch(&KeGetCurrentProcessorBlock()->OtherIoOperations,1,__ATOMIC_RELAXED);break;
     }
+    if (SVINDOWS_EXEC_TRACE && number == SN_NtCreateUserProcessSimple)
+        PsTraceProcessLaunch("6d syscall return", NULL);
     KiDeliverKernelApcs();
+    if (SVINDOWS_EXEC_TRACE && number == SN_NtCreateUserProcessSimple)
+        PsTraceProcessLaunch("6e returning to user", NULL);
+    if (SVINDOWS_EXEC_TRACE) PsTraceChildService("leave", number, result);
     return result;
 }

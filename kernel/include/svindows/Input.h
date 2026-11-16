@@ -16,6 +16,8 @@
 /* ------------------------------------------------------------------ */
 
 void    HalInitializeKeyboard(void);
+/* Poll the 8042 as a fallback when firmware does not deliver IRQ1. */
+void    HalPollKeyboard(void);
 /* Inject a set-1 make/break byte from another keyboard transport. */
 void    HalKeyboardInjectSet1Byte(UINT8 byte);
 

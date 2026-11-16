@@ -159,6 +159,12 @@ static void kbd_deferred(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)
 
 static void kbd_irq(void)
 {
+    UINT8 status = __inbyte(PS2_STATUS);
+    /* The periodic fallback may have drained the byte after IRQ1 was latched.
+     * Do not read port 0x60 unless a keyboard byte is still present. */
+    if (!(status & PS2_STATUS_OUTPUT_FULL) ||
+        (status & PS2_STATUS_AUX_DATA))
+        return;
     HalQueueInputByte(&kbd_bytes, __inbyte(PS2_DATA));
     KeInsertQueueDpc(&kbd_dpc, NULL, NULL);
 }
@@ -169,6 +175,28 @@ void HalKeyboardInjectSet1Byte(UINT8 byte)
     HalQueueInputByte(&kbd_bytes, byte);
     KiIrqRestore(flags);
     KeInsertQueueDpc(&kbd_dpc, NULL, NULL);
+}
+
+void HalPollKeyboard(void)
+{
+    /* Some firmware leaves the 8042 keyboard IRQ disabled or routes it through
+     * an IOAPIC entry we do not yet own. Keep ordinary PS/2 typing usable by
+     * draining keyboard bytes from the controller in the existing input
+     * worker. Never consume AUX bytes; IRQ12 owns the mouse stream. */
+    UINT8 pending[16];
+    UINT32 count = 0;
+    UINT64 flags = KiIrqSave();
+    while (count < sizeof(pending)) {
+        UINT8 status = __inbyte(PS2_STATUS);
+        if (!(status & PS2_STATUS_OUTPUT_FULL) ||
+            (status & PS2_STATUS_AUX_DATA))
+            break;
+        pending[count++] = __inbyte(PS2_DATA);
+    }
+    KiIrqRestore(flags);
+
+    for (UINT32 i = 0; i < count; ++i)
+        HalKeyboardInjectSet1Byte(pending[i]);
 }
 
 void HalInitializeKeyboard(void)

@@ -126,7 +126,10 @@ void HalConsoleWrite(const char *s);
 
 /* Hardware IRQs are remapped to CPU vectors IRQ_BASE_VECTOR .. +15. */
 #define IRQ_BASE_VECTOR 32
+/* Local-APIC software interrupts: wake/preempt and periodic remote tick. */
 #define HAL_SMP_WAKE_VECTOR 0xF1
+#define HAL_SMP_TICK_VECTOR 0xF2
+#define HAL_LOCAL_TIMER_VECTOR 0xF3
 
 typedef void (*HAL_IRQ_HANDLER)(void);
 
@@ -152,6 +155,10 @@ BOOLEAN HalDiscoverProcessors(UINT64 multiboot_info_phys);
 UINT32 HalGetProcessorCount(void);
 const HAL_PROCESSOR_INFO *HalGetProcessorInfo(UINT32 index);
 BOOLEAN HalInitializeLocalApic(void);
+BOOLEAN HalLegacyPicUsesLocalApic(void);
+void HalRouteLegacyPicDirect(void);
+BOOLEAN HalInitializeLocalApicTimer(UINT32 hz);
+void HalStopLocalApicTimer(void);
 void HalLocalApicEoi(void);
 BOOLEAN HalSendIpi(UINT32 apic_id, UINT8 vector);
 BOOLEAN HalSendInitIpi(UINT32 apic_id, BOOLEAN assert_init);
@@ -166,6 +173,7 @@ void UsbPollInput(void);
 /* ------------------------------------------------------------------ */
 
 void HalInitializeTimer(UINT32 hz);
+void HalUseLegacyTimer(void);
 UINT32 HalTimerResolution(void); /* programmed interrupt period, 100 ns units */
 
 #endif /* _SVINDOWS_HAL_H_ */

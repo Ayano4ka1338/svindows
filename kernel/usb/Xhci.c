@@ -114,6 +114,7 @@ typedef struct _XHCI_HID_DEVICE {
 static XHCI_CONTROLLER g_xhci;
 static XHCI_HID_DEVICE g_hid[XHCI_MAX_HID];
 static UINT32 g_hid_count;
+static volatile BOOLEAN g_usb_poll_ready;
 
 static BOOLEAN xhci_enumerate_ports(void);
 static void xhci_poll_hid(void);
@@ -704,6 +705,7 @@ static BOOLEAN xhci_setup_hid(XHCI_HID_DEVICE *dev)
 static BOOLEAN xhci_enumerate_ports(void)
 {
     g_hid_count = 0;
+    UINT32 connected = 0;
     for (UINT32 port = 1; port <= g_xhci.MaxPorts &&
          g_hid_count < XHCI_MAX_HID; ++port) {
         UINT32 portoff = g_xhci.OperationalOffset + 0x400u +
@@ -714,6 +716,7 @@ static BOOLEAN xhci_enumerate_ports(void)
             xhci_write32(portoff, portsc); /* xHC controls root port power */
         }
         if (!(portsc & 1u)) continue;
+        ++connected;
         UINT8 speed = (UINT8)((portsc >> 10) & 0xfu);
         if (speed >= 4) {
             xhci_write32(portoff, portsc | (1u << 31)); /* warm reset */
@@ -742,7 +745,25 @@ static BOOLEAN xhci_enumerate_ports(void)
         if (xhci_setup_hid(dev)) ++g_hid_count;
         else KeLog("[usb]  device on port %u is not a supported boot HID\n", port);
     }
+    if (!connected)
+        KeLog("[usb]  xHCI is running, but no root-port devices are connected\n");
     return TRUE;
+}
+
+static void xhci_log_legacy_controller(void)
+{
+    static const UINT8 interfaces[] = { 0x00, 0x10, 0x20 };
+    static const char *names[] = { "UHCI", "OHCI", "EHCI" };
+    PCI_DEVICE pci;
+    for (UINT32 i = 0; i < sizeof(interfaces); ++i) {
+        if (PciFindDeviceByClass(0x0c, 0x03, interfaces[i], &pci)) {
+            KeLog("[usb]  found USB %s controller at %02x:%02x.%u; "
+                  "only xHCI HID is currently supported\n",
+                  names[i], pci.Bus, pci.Device, pci.Function);
+            return;
+        }
+    }
+    KeLog("[usb]  no xHCI or recognized UHCI/OHCI/EHCI host controller found\n");
 }
 
 static void xhci_poll_hid(void)
@@ -773,14 +794,29 @@ static void xhci_poll_hid(void)
 static BOOLEAN xhci_start(PCI_DEVICE *pci)
 {
     UINT32 bar0 = pci->Bar[0];
-    if ((bar0 & 1u) || (bar0 & 0xfffffff0u) == 0)
+    BOOLEAN bar64 = ((bar0 >> 1) & 3u) == 2u;
+    KeLog("[usb]  xHCI PCI %02x:%02x.%u BAR0=%08x BAR1=%08x\n",
+          pci->Bus, pci->Device, pci->Function, bar0, pci->Bar[1]);
+    if (bar0 & 1u) {
+        KeLog("[usb]  xHCI BAR0 is not an assigned memory BAR\n");
         return FALSE;
+    }
 
     UINT64 physical = bar0 & 0xfffffff0u;
-    if (((bar0 >> 1) & 3u) == 2u) {
+    if (bar64) {
         physical |= (UINT64)pci->Bar[1] << 32;
     }
-    if (physical >> 52) return FALSE;
+    /* A 64-bit BAR may have a zero low dword when its assigned base is above
+     * 4 GiB; only the combined physical address determines whether it is set. */
+    if (!physical) {
+        KeLog("[usb]  xHCI memory BAR is unassigned\n");
+        return FALSE;
+    }
+    if (physical >> 52) {
+        KeLog("[usb]  xHCI BAR address is outside the CPU physical range: 0x%lx\n",
+              (unsigned long)physical);
+        return FALSE;
+    }
 
     UINT32 command = PciReadConfig32(pci->Bus, pci->Device, pci->Function, 4);
     PciWriteConfig32(pci->Bus, pci->Device, pci->Function, 4,
@@ -820,7 +856,10 @@ static BOOLEAN xhci_start(PCI_DEVICE *pci)
         return FALSE;
     }
 
-    if (!xhci_handoff(hcc1)) return FALSE;
+    if (!xhci_handoff(hcc1)) {
+        KeLog("[usb]  xHCI firmware handoff failed\n");
+        return FALSE;
+    }
 
     UINT32 usbcmd = xhci_read32(g_xhci.OperationalOffset + XHCI_USBCMD);
     if (usbcmd & 1u) {
@@ -947,22 +986,34 @@ static BOOLEAN xhci_start(PCI_DEVICE *pci)
 BOOLEAN UsbInitialize(void)
 {
     PCI_DEVICE pci;
+    __atomic_store_n(&g_usb_poll_ready, FALSE, __ATOMIC_RELEASE);
     memset(&g_xhci, 0, sizeof(g_xhci));
     if (!PciFindDeviceByClass(XHCI_PCI_CLASS, XHCI_PCI_SUBCLASS,
                               XHCI_PCI_PROGIF, &pci)) {
-        KeLog("[usb]  no PCI xHCI host controller found\n");
+        xhci_log_legacy_controller();
         return FALSE;
     }
     if (!xhci_start(&pci)) {
+        KeLog("[usb]  xHCI controller initialization failed at %02x:%02x.%u\n",
+              pci.Bus, pci.Device, pci.Function);
         g_xhci.Running = FALSE;
         return FALSE;
     }
     (void)xhci_enumerate_ports();
-    return TRUE;
+    __atomic_store_n(&g_usb_poll_ready, TRUE, __ATOMIC_RELEASE);
+    UINT32 keyboards = 0, mice = 0;
+    for (UINT32 i = 0; i < g_hid_count; ++i) {
+        if (g_hid[i].Protocol == 1) ++keyboards;
+        if (g_hid[i].Protocol == 2) ++mice;
+    }
+    KeLog("[usb]  HID input ready: %u keyboard(s), %u mouse(s)\n",
+          keyboards, mice);
+    return (BOOLEAN)(keyboards || mice);
 }
 
 void UsbPollInput(void)
 {
-    if (g_xhci.Running)
+    if (__atomic_load_n(&g_usb_poll_ready, __ATOMIC_ACQUIRE) &&
+        g_xhci.Running)
         xhci_poll_hid();
 }

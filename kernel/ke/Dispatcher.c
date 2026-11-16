@@ -259,6 +259,10 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
     }
 
     UINT64 flags = KiAcquireSchedulerLock();
+    /* A blocked thread resumes from KiBlockCurrentThreadWithSchedulerLock
+     * with interrupts masked. Keep the caller's original RFLAGS separately;
+     * the lock state captured after each wake is necessarily IF=0. */
+    UINT64 caller_interrupt_state = flags;
     PKTHREAD thread = KeGetCurrentThread();
     UINT64 now = KeGetTickCount();
     UINT64 deadline = timeout_ticks == ~(UINT64)0 ? 0 :
@@ -267,6 +271,7 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
     for (;;) {
         if (alertable && thread && thread->UserApcCount) {
             KiReleaseSchedulerLock(flags);
+            KiIrqRestore(caller_interrupt_state);
             return STATUS_USER_APC;
         }
         if (wait_all) {
@@ -283,6 +288,7 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
                         STATUS_ABANDONED_WAIT_0)
                         result = STATUS_ABANDONED_WAIT_0 + i;
                 KiReleaseSchedulerLock(flags);
+                KiIrqRestore(caller_interrupt_state);
                 return result;
             }
         } else {
@@ -290,6 +296,7 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
                 if (KiCanAcquire(objects[i])) {
                     NTSTATUS consumed = KiConsumeSignal(objects[i]);
                     KiReleaseSchedulerLock(flags);
+                    KiIrqRestore(caller_interrupt_state);
                     if (consumed == STATUS_ABANDONED_WAIT_0)
                         return STATUS_ABANDONED_WAIT_0 + i;
                     return (NTSTATUS)(STATUS_WAIT_0 + i);
@@ -299,6 +306,7 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
 
         if (timeout_ticks == 0 || (deadline && KeGetTickCount() >= deadline)) {
             KiReleaseSchedulerLock(flags);
+            KiIrqRestore(caller_interrupt_state);
             return STATUS_TIMEOUT;
         }
 
@@ -324,11 +332,13 @@ NTSTATUS KeWaitForMultipleObjectsAlertable(ULONG count,
         if (thread->WaitStatus == STATUS_USER_APC) {
             thread->WaitBlockCount = 0;
             KiReleaseSchedulerLock(flags);
+            KiIrqRestore(caller_interrupt_state);
             return STATUS_USER_APC;
         }
         if (thread->WaitStatus == STATUS_TIMEOUT) {
             thread->WaitBlockCount = 0;
             KiReleaseSchedulerLock(flags);
+            KiIrqRestore(caller_interrupt_state);
             return STATUS_TIMEOUT;
         }
         thread->WaitBlockCount = 0;

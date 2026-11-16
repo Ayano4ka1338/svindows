@@ -11,6 +11,44 @@
 #include <svindows/Ldr.h>
 #include <svindows/Ob.h>
 #include <svindows/Rtl.h>
+#include <svindows/Gfx.h>
+
+void PsTraceProcessLaunch(const char *stage, const char *image)
+{
+    if (!SVINDOWS_EXEC_TRACE) return;
+    UINT64 flags = KiIrqSave();
+    /* Keep tracing independent of console scrolling and its cursor/state.
+     * This is also called while the scheduler lock is held: do not allocate,
+     * log, take another lock, or mutate the process-visible terminal here. */
+    if (GfxAvailable()) {
+        char text[192];
+        RtlFormat(text, sizeof(text), "[exec] %s%s%s", stage,
+                  image ? ": " : "", image ? image : "");
+        UINT32 background = GfxColor(0, 0, 70);
+        UINT32 row = 0;
+        if (stage[0] == '7' || stage[0] == '8' || !strncmp(stage, "6s.", 3)) row = 1;
+        if (!strncmp(stage, "child syscall", 13)) row = 2;
+        if (!strncmp(stage, "child state", 11)) row = 3;
+        if (!strncmp(stage, "1 process", 9))
+            GfxFillRect(0, GFX_FONT_H, GfxFramebuffer.Width, 3 * GFX_FONT_H, background);
+        GfxFillRect(0, row * GFX_FONT_H, GfxFramebuffer.Width, GFX_FONT_H, background);
+        GfxDrawString(0, row * GFX_FONT_H, text, GfxColor(255, 255, 255), background);
+    }
+    KiIrqRestore(flags);
+}
+
+void PsTraceChildService(const char *phase, UINT64 number, UINT64 result)
+{
+    if (!SVINDOWS_EXEC_TRACE) return;
+    PKTHREAD thread = KeGetCurrentThread();
+    if (!thread || !thread->UserMode || !thread->Process ||
+        thread->Process->ParentProcessId <= 4) return;
+    char detail[128];
+    RtlFormat(detail, sizeof(detail), "%s pid=%u tid=%u nr=0x%lx result=0x%lx",
+              phase, thread->Process->ProcessId, thread->ThreadId,
+              (unsigned long)number, (unsigned long)result);
+    PsTraceProcessLaunch("child syscall", detail);
+}
 
 #define PE_COMMAND_MAX 768u
 #include <svindows/Win32k.h>
@@ -743,6 +781,9 @@ static NTSTATUS create_process_captured(const char *filename,
                                         const char *const *environment,
                                         UINT32 environment_count)
 {
+    BOOLEAN user_request = KeGetCurrentThread() && KeGetCurrentThread()->UserMode;
+    BOOLEAN trace = SVINDOWS_EXEC_TRACE && user_request;
+    if (trace) PsTraceProcessLaunch("1 process objects", filename);
     if (!g_process_type)
         g_process_type = ObCreateObjectType("Process", delete_process);
     POBJECT raw;
@@ -851,6 +892,7 @@ static NTSTATUS create_process_captured(const char *filename,
         ObDereferenceObject(raw);
         return STATUS_INVALID_HANDLE;
     }
+    if (trace) PsTraceProcessLaunch("2 address space", NULL);
     object->Process.DirectoryTableBase = MmCreateAddressSpace();
     if (object->Process.DirectoryTableBase == MM_INVALID_PHYS) {
         LdrDestroyProcessContext(object->Process.LoaderContext);
@@ -873,6 +915,7 @@ static NTSTATUS create_process_captured(const char *filename,
     PKTHREAD thread = NULL;
     void *image_data = NULL;
     SIZE_T image_size = 0;
+    if (trace) PsTraceProcessLaunch("3 read executable", NULL);
     status = FatLoadFile(object->Process.ImagePath, &image_data, &image_size,
                          NULL);
     if (NT_SUCCESS(status) && LinuxIsElfImage(image_data, image_size)) {
@@ -914,6 +957,7 @@ static NTSTATUS create_process_captured(const char *filename,
             }
         }
     } else {
+        if (trace) PsTraceProcessLaunch("4 PE loader", NULL);
         if (image_data) ExFreePool(image_data);
         UINT64 parent_space = MmGetCurrentAddressSpace();
         PLDR_PROCESS_CONTEXT previous_loader = LdrSetThreadProcessContext(
@@ -922,9 +966,11 @@ static NTSTATUS create_process_captured(const char *filename,
         LdrResetProcessContext();
         UINT64 entry, base, argument;
         status = LdrLoadExecutable(filename, &entry, &base, &argument);
-        if (NT_SUCCESS(status))
+        if (NT_SUCCESS(status)) {
+            if (trace) PsTraceProcessLaunch("5 environment and thread", NULL);
             status = build_environment(object, command, base, entry, argument,
                                        &thread);
+        }
         MmSwitchAddressSpace(parent_space);
         LdrSetThreadProcessContext(previous_loader);
     }
@@ -941,14 +987,28 @@ static NTSTATUS create_process_captured(const char *filename,
     }
     if (out) *out = handle;
     if (pid_out) *pid_out = object->Process.ProcessId;
+    if (trace) PsTraceProcessLaunch("6 return to parent", NULL);
     KIRQL old_irql;
     KeAcquireSpinLock(&g_process_list_lock, &old_irql);
+    if (trace) PsTraceProcessLaunch("6.1 list lock acquired", NULL);
     InsertTailList(&g_process_list, &object->GlobalEntry);
+    if (trace) PsTraceProcessLaunch("6.2 releasing list lock", NULL);
     KeReleaseSpinLock(&g_process_list_lock, old_irql);
+    if (trace) PsTraceProcessLaunch("6a process registered", NULL);
     ObDereferenceObject(raw); /* handle + running thread retain it */
+    if (trace) PsTraceProcessLaunch("6b references retained", NULL);
     KeLog("[ps]   process '%s' pid %u -> handle %p, CR3 0x%lx\n",
           filename, object->Process.ProcessId, handle,
           (unsigned long)object->Process.DirectoryTableBase);
+    if (trace) PsTraceProcessLaunch("6c creation complete", NULL);
+    /* Publish the fully initialized process before offering the CPU to its
+     * ready thread. The parent address space and loader context are restored
+     * above, and all process-list/object locks have been released. */
+    if (user_request) {
+        PsTraceProcessLaunch("6f dispatch child", NULL);
+        KeYield();
+        PsTraceProcessLaunch("6g parent resumed", NULL);
+    }
     return STATUS_SUCCESS;
 }
 

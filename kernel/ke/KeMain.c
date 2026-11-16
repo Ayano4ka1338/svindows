@@ -23,6 +23,7 @@
 #include <svindows/Linux.h>
 #include <svindows/Net.h>
 #include <svindows/Rtl.h>
+#include <svindows/Multiboot2.h>
 
 #define SVINDOWS_VERSION "0.6.0"
 
@@ -30,6 +31,66 @@
 #define BOOT_REPORT_LABEL_WIDTH 38
 static char g_boot_report[BOOT_REPORT_CAPACITY];
 static SIZE_T g_boot_report_length;
+static BOOLEAN g_boot_report_replayed;
+static volatile BOOLEAN g_safe_peripherals;
+
+static BOOLEAN KiBootHasOption(UINT64 mbi_phys, const char *option)
+{
+    const MB_INFO_HEADER *info = MmPhysToVirt(mbi_phys);
+    UINT64 end = mbi_phys + info->total_size;
+    SIZE_T length = strlen(option);
+    for (UINT64 at = mbi_phys + sizeof(*info); at + sizeof(MB_TAG) <= end;) {
+        const MB_TAG *tag = MmPhysToVirt(at);
+        if (tag->size < sizeof(*tag) || tag->size > end - at) return FALSE;
+        if (tag->type == MB_TAG_TYPE_END) return FALSE;
+        if (tag->type == MB_TAG_TYPE_CMDLINE) {
+            const char *text = (const char *)(tag + 1);
+            SIZE_T size = tag->size - sizeof(*tag);
+            for (SIZE_T i = 0; i + length <= size; ++i) {
+                if (i && text[i - 1] != ' ') continue;
+                if (!memcmp(text + i, option, length) &&
+                    (i + length == size || !text[i + length] || text[i + length] == ' '))
+                    return TRUE;
+            }
+        }
+        at += ((UINT64)tag->size + 7u) & ~7ULL;
+    }
+    return FALSE;
+}
+
+/* Run before any worker or user thread is queued. Merely programming a timer
+ * proves nothing about interrupt delivery on physical firmware. Keep dispatch
+ * deferred while observing several actual IRQs, with a bounded polling wait. */
+static BOOLEAN KiProbeBootClock(void)
+{
+    KIRQL old_irql;
+    KeRaiseIrql(DISPATCH_LEVEL, &old_irql);
+    UINT64 start = KeGetTickCount();
+    __sti();
+    for (UINT32 spin = 0; spin < 20000000u; ++spin) {
+        if (KeGetTickCount() - start >= 3) break;
+        __asm__ volatile("pause" ::: "memory");
+    }
+    __cli();
+    BOOLEAN running = KeGetTickCount() - start >= 3;
+    KeLowerIrql(old_irql);
+    return running;
+}
+
+/* Legacy PCI scans and xHCI firmware handoff can be slow or non-responsive on
+ * physical hardware. Run those optional transports below the interactive shell
+ * so a controller timeout cannot hold the boot sequence before the prompt. */
+static void PeripheralInitializationWorker(PVOID context)
+{
+    (void)context;
+    BOOLEAN network_ready = NetInitialize();
+    KeLog("[boot] background network initialization %s\n",
+          network_ready ? "complete" : "unavailable");
+
+    BOOLEAN usb_ready = UsbInitialize();
+    KeLog("[boot] background USB HID initialization %s\n",
+          usb_ready ? "complete" : "unavailable");
+}
 
 /* Set by the top-level Makefile (PROGRAM=...). This keeps boot-program
  * selection a build-time policy rather than a special kernel code path. */
@@ -38,6 +99,9 @@ static SIZE_T g_boot_report_length;
 #endif
 #ifndef SVINDOWS_BOOT_COMMAND_LINE
 #define SVINDOWS_BOOT_COMMAND_LINE SVINDOWS_BOOT_PROGRAM
+#endif
+#ifndef SVINDOWS_ENABLE_SMP
+#define SVINDOWS_ENABLE_SMP 0
 #endif
 
 /* The input thread bridges hardware queues to USER messages. The window
@@ -51,6 +115,7 @@ static void InputWorker(PVOID context)
     KeInitializeTimerEx(&poll_timer, FALSE);
 
     for (;;) {
+        HalPollKeyboard();
         UsbPollInput();
         /* One ordered hardware stream: make, translated character, break.
          * Win32 receives it when a window owns focus; Linux evdev gets its
@@ -77,7 +142,8 @@ static void InputWorker(PVOID context)
         if (have_key) W32kInputKey(pending_key, 0);
 
         /* Headless `make run-serial` uses COM1 as the keyboard. */
-        while (HalSerialDataAvailable()) {
+        for (UINT32 serial_budget = 0;
+             serial_budget < 64 && HalSerialDataAvailable(); ++serial_budget) {
             char c = HalSerialReadChar();
             if (c == '\r') c = '\n';
             if ((UINT8)c == 127) c = '\b';
@@ -128,6 +194,15 @@ static void print_banner(void)
  * bugcheck, so an [ ok ] marker never masks a failed boot step. */
 static void KiBootRecordStep(const char *name, const char *state)
 {
+    /* UEFI has no visible VGA text console. Keep the latest completed step
+     * on the GOP framebuffer even when there is no COM1 attached. The full
+     * report replaces this line before the initial process starts. */
+    if (!g_boot_report_replayed && GfxAvailable()) {
+        GfxFillRect(0, 0, GfxFramebuffer.Width, GFX_FONT_H, GfxColor(0, 0, 0));
+        GfxDrawString(0, 0, name, GfxColor(210, 210, 210), GfxColor(0, 0, 0));
+        GfxDrawString(50 * GFX_FONT_W, 0, state,
+                      GfxColor(120, 220, 120), GfxColor(0, 0, 0));
+    }
     const char *prefix = "  ";
     SIZE_T name_length = strlen(name);
 
@@ -144,6 +219,7 @@ static void KiBootRecordStep(const char *name, const char *state)
 
 static void KiReplayBootReport(void)
 {
+    g_boot_report_replayed = TRUE;
     const SIZE_T label_end = 2 + BOOT_REPORT_LABEL_WIDTH;
     SIZE_T offset = 0;
 
@@ -234,22 +310,40 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     if (GfxRequestBootMode((UINT64)mbi_phys, 1200, 800))
         KeLog("[gfx]  selected 1200x800 via VBE DISPI\n");
     MmInitialize((UINT64)mbi_phys);
+    g_safe_peripherals = KiBootHasOption(mbi_phys, "safe-peripherals");
     KiBootStepOk("Physical / virtual memory");
 
     /* Discover firmware CPU topology before allocating any per-CPU state.
-     * APs remain parked until their interrupt and scheduler state is ready. */
+     * AP startup is deferred until all scheduler and worker state is ready. */
     (void)HalDiscoverProcessors((UINT64)mbi_phys);
     KeLog("[smp]  discovered %u logical processor(s)\n",
           HalGetProcessorCount());
-    /* Keep the established PIC/PIT path on a uniprocessor. Enabling the LAPIC
-     * without any AP to start is unnecessary and can leave firmware virtual-
-     * wire interrupt state active on machines that booted with the PIC path. */
-    if (HalGetProcessorCount() > 1) {
-        if (!HalInitializeLocalApic())
-            KeLog("[smp]  local APIC unavailable; SMP interrupt delivery disabled\n");
+#if !SVINDOWS_ENABLE_SMP
+    /* Respect firmware's IMCR route. Enable/EOI the local APIC only when the
+     * chipset already sends legacy PIC interrupts through LINT0; never force
+     * that route on machines without an IMCR or with direct PIC delivery. */
+    BOOLEAN pic_virtual_wire = HalLegacyPicUsesLocalApic();
+    /* Enable the local APIC without changing IMCR. This keeps LAPIC EOI ready
+     * if firmware routes PIC IRQs through LINT0, while leaving direct PIC
+     * routing untouched on boards that connect it straight to the BSP. */
+    if (HalInitializeLocalApic()) {
+        KeLog("[smp]  BSP local APIC ready; firmware PIC route is %s\n",
+              pic_virtual_wire ? "virtual wire" : "direct");
+        KiBootStepOk("BSP local APIC EOI / PIC route");
     } else {
-        KeLog("[smp]  one processor; using PIC/PIT interrupt delivery\n");
+        if (pic_virtual_wire) HalRouteLegacyPicDirect();
+        KeLog("[smp]  local APIC unavailable; using direct PIC/PIT delivery\n");
+        KiBootStepUnavailable("BSP local APIC EOI / PIC route");
     }
+#else
+    if (HalGetProcessorCount() > 1 && HalInitializeLocalApic()) {
+        KeLog("[smp]  BSP local APIC ready for legacy IRQ delivery\n");
+        KiBootStepOk("BSP local APIC IRQ route");
+    } else {
+        KeLog("[smp]  BSP local APIC unavailable; AP startup may fail\n");
+        KiBootStepUnavailable("BSP local APIC IRQ route");
+    }
+#endif
 
     /* Map the shared user-data page (tick count / system time for ring 3). */
     KeInitializeSharedData();
@@ -317,43 +411,22 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     HalRegisterIrqHandler(0, KeClockTick);
     HalInitializeTimer(100); /* 100 Hz preemption tick */
     KiBootStepOk("100 Hz system timer");
-
-    /* APs initialize their private architectural state, then park on a wake
-     * IPI until shared scheduler and dispatcher state is SMP-safe. */
-    KiStartApplicationProcessors();
-    UINT32 online_processors = 1; /* BSP */
-    for (UINT32 i = 1; i < HalGetProcessorCount(); ++i) {
-        PKPRCB processor = KeGetProcessorBlock(i);
-        if (processor && processor->StartupState == 2)
-            online_processors++;
+    if (!KiProbeBootClock()) {
+        KeLog("[boot] local timer IRQ probe failed; trying legacy PIT\n");
+        HalUseLegacyTimer();
+        if (!KiProbeBootClock()) {
+            KiBootStepFailed("System clock interrupt delivery", STATUS_UNSUCCESSFUL);
+            KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                       "neither local APIC nor PIT delivers system clock interrupts");
+        }
+        KiBootStepOk("Verified legacy PIT clock interrupts");
+    } else {
+        KiBootStepOk("Verified system clock interrupts");
     }
-    KeLog("[smp]  SMP запущен: %u из %u CPU онлайн; AP пока припаркованы\n",
-          online_processors, HalGetProcessorCount());
-    KiBootStepOk("SMP startup");
-
-    /* Bring up the PCI Ethernet transport after the scheduler and timer.
-     * Protocols are layered above this frame interface, never in the IRQ path. */
-    /* Initialize networking silently; it is a background service, not an
-     * interactive boot-status item. Failures remain available through the
-     * network subsystem diagnostic/logging paths. */
-    (void)NetInitialize();
-
-    /* Do not enqueue the first ring-3 process until the network stack has
-     * completed its tcpip_thread/netif initialization. NetInitialize may
-     * yield while waiting for lwIP's tcpip callback; if the user process is
-     * already queued, the scheduler can run it during that wait and its first
-     * AF_INET socket() incorrectly observes ENETDOWN. */
-    NTSTATUS st = PsCreateInitialProcess(SVINDOWS_BOOT_PROGRAM,
-                                         SVINDOWS_BOOT_COMMAND_LINE);
-    if (NT_SUCCESS(st))
-        KiBootStepOk("Initial user process");
-    else
-        KiBootStepFailed("Initial user process", st);
 
     /* Input: PS/2 keyboard + mouse, feeding the USER message queues. */
     HalInitializeKeyboard();
     HalInitializeMouse();
-    (void)UsbInitialize();
     /* Expose the same sources as evdev character devices so Linux binaries
      * (Xorg, libinput) can open /dev/input/eventN. */
     LinuxInputInitialize();
@@ -367,6 +440,25 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
         KiBootStepOk("Win32 Xorg presentation");
     else
         KiBootStepFailed("Win32 Xorg presentation", STATUS_NO_MEMORY);
+    if (g_safe_peripherals) {
+        KiBootStepUnavailable("USB / network disabled (safe mode)");
+    } else if (KeCreateThread("Peripheral initialization",
+                       PeripheralInitializationWorker, NULL, 4))
+        KiBootStepOk("Deferred network / USB initialization");
+    else
+        KiBootStepFailed("Deferred network / USB initialization",
+                         STATUS_NO_MEMORY);
+
+    /* The shell can run as soon as it is queued: clock IRQs may preempt the
+     * rest of kernel startup. Publish it after PS/2 and input dispatch are
+     * ready; slower optional PCI/network/USB initialization runs at low
+     * priority so a physical controller timeout cannot block the boot prompt. */
+    NTSTATUS st = PsCreateInitialProcess(SVINDOWS_BOOT_PROGRAM,
+                                         SVINDOWS_BOOT_COMMAND_LINE);
+    if (NT_SUCCESS(st))
+        KiBootStepOk("Initial user process");
+    else
+        KiBootStepFailed("Initial user process", st);
 
     /* IoInitialize created the process-visible console and cleared its screen
      * buffer. Replay the independently collected, real boot results there so
@@ -385,9 +477,40 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
         HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
     }
 
+    /* Start APs after all shared kernel services and initial worker threads
+     * have been published. The APs now execute the multiprocessor scheduler;
+     * each CPU receives reschedule IPIs from the BSP's 100 Hz clock tick. */
+#if SVINDOWS_ENABLE_SMP
+    KiStartApplicationProcessors();
+    UINT32 online_processors = 1; /* BSP */
+    for (UINT32 i = 1; i < HalGetProcessorCount(); ++i) {
+        PKPRCB processor = KeGetProcessorBlock(i);
+        if (processor && processor->StartupState == 2 &&
+            __atomic_load_n(&processor->StartupRelease, __ATOMIC_ACQUIRE))
+            online_processors++;
+    }
+    KeLog("[smp]  multiprocessor scheduler online: %u/%u CPU\n",
+          online_processors, HalGetProcessorCount());
+    if (online_processors > 1)
+        KiBootStepOk("SMP scheduler / AP workers");
+    else
+        KiBootStepUnavailable("SMP scheduler / AP workers");
+#else
+    KiBootStepUnavailable("SMP scheduler / AP workers");
+#endif
+
     /* Become the idle thread. The scheduler runs the ring-3 PE (which makes
      * syscalls) and the kernel worker. */
+    ConAppendKernelText("Starting scheduler (clock IRQs verified)...\n",
+                       sizeof("Starting scheduler (clock IRQs verified)...\n") - 1);
     __sti();
+    KeYield(); /* Dispatch queued work without waiting for the first idle IRQ. */
+    /* The BSP owns the only system clock. Until we have an independent
+     * broadcast clock/wakeup source, keep it out of firmware C1/C1E states:
+     * a LAPIC that ticks during the busy boot probe may stop once HLT enters
+     * idle. PS/2 polling and every dispatcher timer then stop with it. PAUSE
+     * leaves IRQs enabled and lets the clock continue scheduling real work.
+     * This compatibility policy costs idle power on one logical processor. */
     for (;;)
-        __halt();
+        __asm__ volatile("pause" ::: "memory");
 }

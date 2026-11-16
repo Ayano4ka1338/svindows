@@ -33,6 +33,7 @@
 #define PS2_CONFIG_AUX_IRQ   0x02
 #define PS2_CONFIG_KBD_CLOCK 0x10 /* 1 = disabled */
 #define PS2_CONFIG_AUX_CLOCK 0x20 /* 1 = disabled */
+#define PS2_CONFIG_TRANSLATE 0x40 /* translate keyboard set 2 to set 1 */
 
 /* Bring up the controller (both ports enabled, both IRQs enabled). Idempotent;
  * the first driver to initialize calls it. */

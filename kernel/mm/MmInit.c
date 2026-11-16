@@ -7,6 +7,8 @@
  */
 #include <svindows/Mm.h>
 #include <svindows/Ke.h>
+#include <svindows/Multiboot2.h>
+#include <svindows/Gfx.h>
 
 /* 0 => identity map (early boot); becomes MM_DIRECT_MAP_BASE once VMM is up. */
 UINT64 MmDirectMapBase = 0;
@@ -31,13 +33,40 @@ void MmInitialize(UINT64 mb_info_phys)
           (unsigned long)(g_memory_map.total_available >> 20),
           (unsigned long)g_memory_map.highest_address);
 
+    MM_PHYSICAL_RESERVATION reservations[3];
+    UINT32 reservation_count = 0;
     UINT64 initrd_base = 0, initrd_size = 0;
     BOOLEAN has_initrd = MmFindMultibootModule(mb_info_phys, "initrd.fat",
                                                &initrd_base, &initrd_size);
+    if (has_initrd && initrd_size) {
+        reservations[reservation_count++] = (MM_PHYSICAL_RESERVATION){
+            initrd_base, initrd_size
+        };
+    }
 
-    MmInitializePhysicalMemory(&g_memory_map);
+    /* The boot information block and framebuffer can also occupy RAM that
+     * Limine reports as available. Reserve them before the PMM chooses and
+     * clears its bitmap; otherwise bitmap initialization can corrupt either. */
+    MB_INFO_HEADER *boot_info = (MB_INFO_HEADER *)MmPhysToVirt(mb_info_phys);
+    if (boot_info->total_size) {
+        reservations[reservation_count++] = (MM_PHYSICAL_RESERVATION){
+            mb_info_phys, boot_info->total_size
+        };
+    }
+    if (GfxFramebuffer.Present && GfxFramebuffer.Pitch &&
+        GfxFramebuffer.Height &&
+        (UINT64)GfxFramebuffer.Pitch <=
+            ~(UINT64)0 / GfxFramebuffer.Height) {
+        UINT64 fb_size = (UINT64)GfxFramebuffer.Pitch * GfxFramebuffer.Height;
+        if (fb_size && GfxFramebuffer.PhysAddr <= ~(UINT64)0 - fb_size)
+            reservations[reservation_count++] = (MM_PHYSICAL_RESERVATION){
+                GfxFramebuffer.PhysAddr, fb_size
+            };
+    }
+
+    MmInitializePhysicalMemory(&g_memory_map, reservations,
+                               reservation_count);
     if (has_initrd) {
-        MmReservePhysicalRange(initrd_base, initrd_size);
         KeLog("[mm]   reserved initrd.fat physical range 0x%lx..0x%lx\n",
               (unsigned long)initrd_base,
               (unsigned long)(initrd_base + initrd_size));

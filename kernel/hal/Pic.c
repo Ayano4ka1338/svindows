@@ -49,6 +49,10 @@ void HalSendEoi(UINT8 irq)
     if (irq >= 8)
         __outbyte(PIC2_CMD, PIC_EOI);
     __outbyte(PIC1_CMD, PIC_EOI);
+    /* With the BSP in virtual-wire mode, legacy IRQs arrive through the
+     * local APIC's ExtINT input as well as the 8259. Retire both controllers
+     * so a physical machine cannot leave the LAPIC ISR bit set forever. */
+    HalLocalApicEoi();
 }
 
 void HalMaskIrq(UINT8 irq)

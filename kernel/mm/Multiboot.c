@@ -140,12 +140,18 @@ BOOLEAN MmParseMultibootMemoryMap(UINT64 mb_info_phys, MM_MEMORY_MAP *out)
             UINT64 entries_end = cursor + tag->size;
 
             for (UINT64 e = cursor + 16;
-                 e + entry_size <= entries_end && out->count < MM_MAX_REGIONS;
+                 e + entry_size <= entries_end;
                  e += entry_size) {
                 MB_MMAP_ENTRY *me = (MB_MMAP_ENTRY *)MmPhysToVirt(e);
                 if (me->len > ~(UINT64)0 - me->addr ||
                     (me->type == MB_MEMORY_AVAILABLE &&
                      me->len > ~(UINT64)0 - out->total_available))
+                    return FALSE;
+
+                /* Never report a successful but silently truncated map: the
+                 * PMM bitmap and direct map both depend on seeing every RAM
+                 * range Limine supplied. */
+                if (out->count >= MM_MAX_REGIONS)
                     return FALSE;
 
                 MM_MEMORY_REGION *r = &out->regions[out->count++];

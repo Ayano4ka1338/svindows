@@ -165,9 +165,12 @@ mode `REP MOVS` spans use SSE2 bulk copies, and `REP STOSD` spans use SSE2
 vector stores; device-backed VGA spans retain the checked per-element path.
 Mode 13h scanout caches its nearest-neighbour scale maps, converts each
 palette color once per frame, and uses SSE2 copies for repeated output rows.
-These raster optimizations run on the BSP. APs remain parked because shared
-thread scheduling is not yet safe for SMP, so DOS work is not distributed
-across processors.
+These raster optimizations run in the DOS VM's process context. APs now
+participate in the shared process-aware scheduler, but a process is admitted to
+only one CPU at a time until remote TLB shootdowns are implemented. Therefore
+threads within one DOS VM are not executed in parallel; other process address
+spaces may run on other processors. This is an initial SMP scheduler, not a
+claim that every kernel subsystem is already fully MP-safe.
 The Doom startup probe
 checks WAD loading and VGA mode entry, but it does not measure in-game frame
 rate or establish a 30-FPS target.

@@ -71,9 +71,15 @@ static BOOLEAN g_x2apic;
 #define IA32_APIC_BASE_MSR 0x1B
 #define IA32_X2APIC_EOI    0x80B
 #define IA32_X2APIC_ICR    0x830
+#define IA32_X2APIC_LVT_LINT0 0x835
 #define APIC_BASE_ENABLE   (1ULL << 11)
 #define APIC_BASE_X2       (1ULL << 10)
 #define APIC_MMIO_VA       0xFFFF900000000000ULL
+#define APIC_LVT_MASKED    (1u << 16)
+#define APIC_LVT_DELIVERY_MASK (7u << 8)
+#define APIC_LVT_EXTINT    (7u << 8)
+#define APIC_TIMER_CALIBRATION_SPINS 2000000u
+#define APIC_TIMER_FALLBACK_COUNT 1000000u
 
 static UINT64 apic_rdmsr(UINT32 msr)
 {
@@ -86,6 +92,34 @@ static void apic_wrmsr(UINT32 msr, UINT64 value)
 {
     __asm__ volatile("wrmsr" : : "c"(msr), "a"((UINT32)value),
                      "d"((UINT32)(value >> 32)));
+}
+
+/* Read, but do not change, the firmware's IMCR routing choice. Some chipsets
+ * have no IMCR at all, and forcing bit 0 on those can disconnect legacy IRQs. */
+BOOLEAN HalLegacyPicUsesLocalApic(void)
+{
+    __outbyte(0x22, 0x70); /* IMCR select */
+    __iodelay();
+    UINT8 route = __inbyte(0x23);
+    if (route == 0xFFu) {
+        KeLog("[apic] IMCR unavailable; preserving direct legacy PIC route\n");
+        return FALSE;
+    }
+    KeLog("[apic] IMCR legacy PIC route: %s\n",
+          (route & 1u) ? "local APIC LINT0" : "direct BSP INTR");
+    return (route & 1u) != 0;
+}
+
+void HalRouteLegacyPicDirect(void)
+{
+    __outbyte(0x22, 0x70);
+    __iodelay();
+    UINT8 route = __inbyte(0x23);
+    if (route == 0xFFu || !(route & 1u)) return;
+    __outbyte(0x22, 0x70);
+    __outbyte(0x23, route & (UINT8)~1u);
+    __iodelay();
+    KeLog("[apic] restored direct PIC-to-BSP routing\n");
 }
 
 static void apic_wait_delivery(void)
@@ -322,8 +356,18 @@ BOOLEAN HalInitializeLocalApic(void)
         apic_wrmsr(0x832, 1u << 16); /* mask timer LVT */
         apic_wrmsr(0x833, 1u << 16); /* mask thermal LVT */
         apic_wrmsr(0x834, 1u << 16); /* mask performance LVT */
-        apic_wrmsr(0x835, 1u << 16); /* mask LINT0 */
-        apic_wrmsr(0x836, 1u << 16); /* mask LINT1 */
+        /* Keep the legacy 8259 PIC path usable on real firmware too. Some
+         * machines leave LINT0 masked or in a fixed-delivery mode even though
+         * this kernel still routes PIT and PS/2 through the PIC. */
+        if (KeGetCurrentProcessorBlock()->ProcessorNumber != 0) {
+            apic_wrmsr(IA32_X2APIC_LVT_LINT0, APIC_LVT_MASKED);
+        } else {
+            UINT32 lint0 = (UINT32)apic_rdmsr(IA32_X2APIC_LVT_LINT0);
+            lint0 = (lint0 & ~(APIC_LVT_MASKED | APIC_LVT_DELIVERY_MASK)) |
+                    APIC_LVT_EXTINT;
+            apic_wrmsr(IA32_X2APIC_LVT_LINT0, lint0);
+            KeLog("[smp]  BSP LINT0 configured for legacy PIC interrupts\n");
+        }
         apic_wrmsr(0x837, 1u << 16); /* mask error LVT */
         if (KeGetCurrentProcessorBlock()->ProcessorNumber == 0)
             KeLog("[smp]  local APIC enabled in x2APIC mode\n");
@@ -332,10 +376,16 @@ BOOLEAN HalInitializeLocalApic(void)
 
     UINT64 physical = (base & 0xFFFFF000ULL);
     if (g_local_apic_phys) physical = g_local_apic_phys;
-    if (!physical || !MmMapPage(APIC_MMIO_VA, physical,
-                                 PTE_WRITE | PTE_PCD | PTE_PWT))
-        return FALSE;
-    g_local_apic = (volatile UINT32 *)APIC_MMIO_VA;
+    if (!physical) return FALSE;
+    /* The BSP maps the xAPIC MMIO page before AP startup. Page tables and this
+     * HAL mapping are shared by all CPUs, so APs must reuse it rather than
+     * trying to create the same virtual mapping again. */
+    if (!g_local_apic) {
+        if (!MmMapPage(APIC_MMIO_VA, physical,
+                       PTE_WRITE | PTE_PCD | PTE_PWT))
+            return FALSE;
+        g_local_apic = (volatile UINT32 *)APIC_MMIO_VA;
+    }
     apic_wrmsr(IA32_APIC_BASE_MSR,
                (base & ~0xFFFFF000ULL) | physical | APIC_BASE_ENABLE);
     g_local_apic[0x80 / 4] = 0; /* task priority */
@@ -343,13 +393,111 @@ BOOLEAN HalInitializeLocalApic(void)
     g_local_apic[0x320 / 4] = 1u << 16; /* mask timer LVT */
     g_local_apic[0x330 / 4] = 1u << 16; /* mask thermal LVT */
     g_local_apic[0x340 / 4] = 1u << 16; /* mask performance LVT */
-    g_local_apic[0x350 / 4] = 1u << 16; /* mask LINT0 */
-    g_local_apic[0x360 / 4] = 1u << 16; /* mask LINT1 */
+    if (KeGetCurrentProcessorBlock()->ProcessorNumber != 0) {
+        g_local_apic[0x350 / 4] = 1u << 16; /* APs must not take legacy PIC IRQs */
+    } else {
+        UINT32 lint0 = g_local_apic[0x350 / 4];
+        lint0 = (lint0 & ~(APIC_LVT_MASKED | APIC_LVT_DELIVERY_MASK)) |
+                APIC_LVT_EXTINT;
+        g_local_apic[0x350 / 4] = lint0;
+        KeLog("[smp]  BSP LINT0 configured for legacy PIC interrupts\n");
+    }
+    /* Preserve LINT1: firmware commonly configures it as the NMI input. */
     g_local_apic[0x370 / 4] = 1u << 16; /* mask error LVT */
     if (KeGetCurrentProcessorBlock()->ProcessorNumber == 0)
         KeLog("[smp]  local APIC enabled (MMIO 0x%lx)\n",
               (unsigned long)physical);
     return TRUE;
+}
+
+BOOLEAN HalInitializeLocalApicTimer(UINT32 hz)
+{
+    if (!hz || (!g_x2apic && !g_local_apic)) return FALSE;
+
+    /* Calibrate the LAPIC decrement rate against PIT channel 2 for 10 ms.
+     * If channel 2 is unavailable, use a fixed LAPIC count rather than relying
+     * on channel 0/PIC, whose route is unreliable on some physical boards. */
+    const UINT32 timer_lvt = g_x2apic ? 0x832u : 0x320u;
+    const UINT32 timer_divide = g_x2apic ? 0x83Eu : 0x3E0u;
+    const UINT32 timer_initial = g_x2apic ? 0x838u : 0x380u;
+    const UINT32 timer_current = g_x2apic ? 0x839u : 0x390u;
+    if (g_x2apic) {
+        apic_wrmsr(timer_lvt, HAL_LOCAL_TIMER_VECTOR | APIC_LVT_MASKED);
+        apic_wrmsr(timer_divide, 3u); /* divide by 16 */
+    } else {
+        g_local_apic[timer_lvt / 4] = HAL_LOCAL_TIMER_VECTOR | APIC_LVT_MASKED;
+        g_local_apic[timer_divide / 4] = 3u;
+    }
+
+    UINT8 port61 = __inbyte(0x61);
+    __outbyte(0x61, port61 & (UINT8)~1u); /* gate channel 2 off */
+    __outbyte(0x43, 0xB0);                /* channel 2, mode 0, lo/hi */
+    const UINT16 pit_count = 11932u;      /* approximately 10 ms */
+    __outbyte(0x42, (UINT8)pit_count);
+    __outbyte(0x42, (UINT8)(pit_count >> 8));
+
+    /* Real 8254-compatible bridges may post the mode/count writes. Do not
+     * mistake the preceding mode's high OUT signal for a completed 10 ms
+     * measurement: that produces a tiny count and an interrupt storm. */
+    UINT32 settle;
+    for (settle = 0; settle < APIC_TIMER_CALIBRATION_SPINS; ++settle) {
+        if (!(__inbyte(0x61) & 0x20u)) break;
+        __asm__ volatile("pause");
+    }
+
+    if (g_x2apic) apic_wrmsr(timer_initial, 0xFFFFFFFFu);
+    else g_local_apic[timer_initial / 4] = 0xFFFFFFFFu;
+    __outbyte(0x61, (port61 & (UINT8)~3u) | 1u); /* gate on, speaker off */
+
+    UINT32 spins;
+    for (spins = 0; spins < APIC_TIMER_CALIBRATION_SPINS; ++spins) {
+        if (__inbyte(0x61) & 0x20u) break; /* channel-2 output went high */
+        __asm__ volatile("pause");
+    }
+    UINT32 current = g_x2apic ? (UINT32)apic_rdmsr(timer_current) :
+                                g_local_apic[timer_current / 4];
+    __outbyte(0x61, port61); /* restore gate and speaker state */
+
+    UINT32 elapsed = 0xFFFFFFFFu - current;
+    UINT64 scaled = 0;
+    BOOLEAN calibrated = FALSE;
+    if (settle != APIC_TIMER_CALIBRATION_SPINS &&
+        spins != APIC_TIMER_CALIBRATION_SPINS && elapsed && current != 0) {
+        scaled = ((UINT64)elapsed * 100u + hz / 2u) / hz;
+        if (scaled > 0xFFFFFFFFu) scaled = 0;
+        calibrated = scaled != 0;
+    }
+    if (!scaled) {
+        /* Some firmware does not expose a working PIT channel 2. Keep the
+         * independent LAPIC clock alive with the same conservative initial
+         * count used by YabroOS-32; falling back to IRQ0 can freeze scheduling
+         * on the very boards where legacy PIC routing is broken. */
+        scaled = APIC_TIMER_FALLBACK_COUNT;
+        KeLog("[apic] PIT calibration unavailable; using fallback count %u\n",
+              (UINT32)scaled);
+    }
+    if (g_x2apic) {
+        apic_wrmsr(timer_lvt, HAL_LOCAL_TIMER_VECTOR | (1u << 17));
+        apic_wrmsr(timer_initial, scaled);
+    } else {
+        g_local_apic[timer_lvt / 4] = HAL_LOCAL_TIMER_VECTOR | (1u << 17);
+        g_local_apic[timer_initial / 4] = (UINT32)scaled;
+    }
+    KeLog("[apic] local timer active: requested %u Hz, initial count %u%s\n",
+          hz, (UINT32)scaled,
+          calibrated ? " (calibrated)" : " (fallback)");
+    return TRUE;
+}
+
+void HalStopLocalApicTimer(void)
+{
+    if (g_x2apic) {
+        apic_wrmsr(0x832, HAL_LOCAL_TIMER_VECTOR | APIC_LVT_MASKED);
+        apic_wrmsr(0x838, 0);
+    } else if (g_local_apic) {
+        g_local_apic[0x320 / 4] = HAL_LOCAL_TIMER_VECTOR | APIC_LVT_MASKED;
+        g_local_apic[0x380 / 4] = 0;
+    }
 }
 
 void HalLocalApicEoi(void)

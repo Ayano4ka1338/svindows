@@ -99,8 +99,9 @@ NORETURN void KeBugCheck(ULONG code, const char *message);
 #define KE_IRQL_NOT_LESS_OR_EQUAL        0x0000000Au
 #define KE_IRQL_NOT_GREATER_OR_EQUAL     0x00000009u
 
-/* UP/PIC execution contract. DISPATCH_LEVEL and above mask all local IRQs;
- * DIRQL nesting and SMP synchronization are not implemented yet. */
+/* SMP execution contract. IRQL masks local interrupts; spin locks provide
+ * inter-processor exclusion. Scheduler state is protected by one global
+ * run-queue lock, while each PRCB owns its current/idle thread and quantum. */
 typedef UINT8 KIRQL;
 #define PASSIVE_LEVEL  0
 #define APC_LEVEL      1
@@ -494,6 +495,11 @@ typedef struct _KPROCESS {
     struct _LINUX_PROCESS_CONTEXT *LinuxContext;
     UINT64 KernelTime, UserTime; /* includes threads which have exited */
     UINT64 PeakWorkingSetBytes;
+    /* Number of CPUs currently executing non-idle threads in this address
+     * space. The initial SMP scheduler limits a process to one active CPU so
+     * user page-table updates remain locally TLB-coherent until shootdowns are
+     * implemented for every memory-management path. */
+    volatile ULONG ActiveProcessorCount;
 } KPROCESS, *PKPROCESS;
 
 typedef struct _KE_PROCESS_THREAD_INFO {

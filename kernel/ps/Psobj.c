@@ -568,6 +568,27 @@ UINT64 NtWaitForSingleObject(UINT64 *a)
     BOOLEAN indefinite = !a[2];
     UINT64 tid = 0;
     PKTHREAD thread = KeGetCurrentThread();
+    BOOLEAN process_wait = SVINDOWS_EXEC_TRACE && obj &&
+        PsIsProcessObjectType(ObHeaderFromObject(obj)->Type);
+    if (process_wait) {
+        PKPROCESS child = PsGetProcessFromObject(obj);
+        char detail[160];
+        UINT64 flags = KiAcquireSchedulerLock();
+        PKTHREAD main = NULL;
+        for (PLIST_ENTRY e = child->ThreadListHead.Flink;
+             e != &child->ThreadListHead; e = e->Flink) {
+            PKTHREAD candidate = CONTAINING_RECORD(e, KTHREAD, ProcessEntry);
+            if (candidate->ProcessMainThread) { main = candidate; break; }
+        }
+        RtlFormat(detail, sizeof(detail),
+                  "pid=%u signal=%d state=%d active=%u switches=%lu wait=%u rip=%p",
+                  child->ProcessId, header->SignalState, main ? (int)main->State : -1,
+                  child->ActiveProcessorCount, main ? (unsigned long)main->ContextSwitches : 0,
+                  main ? main->WaitBlockCount : 0, main ? (void *)main->UserRip : NULL);
+        KiReleaseSchedulerLock(flags);
+        PsTraceProcessLaunch("child state", detail);
+        PsTraceProcessLaunch("6w waiting for child", NULL);
+    }
     if (thread)
         tid = thread->ThreadId;
     if (indefinite) {
@@ -584,8 +605,10 @@ UINT64 NtWaitForSingleObject(UINT64 *a)
         }
     }
 
+    if (process_wait) PsTraceProcessLaunch("6w.1 entering dispatcher", NULL);
     st = KeWaitForSingleObjectTimeoutAlertable(
         header, timeout_to_ticks((const INT64 *)a[2]), (BOOLEAN)(a[1] != 0));
+    if (process_wait) PsTraceProcessLaunch("6w.2 child signalled", NULL);
     if (indefinite)
         KeLog("[ps]   thread %llu resumed from indefinite wait on %p "
               "(status 0x%08lx)\n", (unsigned long long)tid,

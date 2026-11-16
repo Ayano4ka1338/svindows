@@ -19,6 +19,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=45)
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--cpus", type=int, default=1,
+                        help="number of emulated CPUs (use 4 to exercise SMP)")
+    parser.add_argument("--boot-only", action="store_true",
+                        help="stop after the requested CPU count reaches the shell prompt")
     parser.add_argument("--skip-network", action="store_true",
                         help="skip the DHCP/DNS/TCP/HTTP/HTTPS check when offline")
     parser.add_argument("--apk-gcc-probe", action="store_true",
@@ -30,7 +34,8 @@ def main():
     parser.add_argument("--doom-probe-timeout", type=float, default=180,
                         help="seconds to wait for Doom graphics startup (default: 180)")
     args = parser.parse_args()
-    if args.timeout <= 0 or args.repeat <= 0 or args.doom_probe_timeout <= 0:
+    if (args.timeout <= 0 or args.repeat <= 0 or args.doom_probe_timeout <= 0
+            or args.cpus <= 0 or args.cpus > 64):
         parser.error("timeouts and repeat must be positive")
     log_dir = ROOT / "build" / "checks"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -44,6 +49,7 @@ def main():
                     "qemu-system-x86_64", "-m",
                     "1024M", "-no-reboot",
                     "-no-shutdown", "-boot", "d", "-machine", "pc", "-cpu", "max",
+                    "-smp", str(args.cpus),
                     "-cdrom",
                     str(ROOT / "build/svindows.iso"), "-netdev", "user,id=svnet0",
                     "-device", "virtio-net-pci,netdev=svnet0,disable-modern=on,bus=pci.0,addr=0x04",
@@ -77,6 +83,20 @@ def main():
                                 raw.extend(chunk)
 
                     wait_for(r"C:\\>")
+                    boot_text = ANSI.sub("", raw.decode("utf-8", errors="replace"))
+                    if args.cpus > 1:
+                        expected_online = rf"multiprocessor scheduler online: {args.cpus}/{args.cpus} CPU"
+                        if not re.search(expected_online, boot_text):
+                            raise RuntimeError(
+                                f"SMP scheduler did not admit all {args.cpus} CPUs")
+                        print(f"PASS SMP scheduler and shell boot ({args.cpus} CPUs)",
+                              flush=True)
+                    if args.boot_only:
+                        process.terminate()
+                        process.wait(timeout=5)
+                        process = None
+                        print(f"PASS QEMU shell boot ({args.cpus} CPUs)", flush=True)
+                        continue
                     # Exercise the real emulated PS/2 controller and ISR/DPC
                     # path, not only the serial input used by other commands.
                     start = len(ANSI.sub("", raw.decode("utf-8", errors="replace")))
@@ -114,6 +134,46 @@ def main():
                         wait_for(r"\[net\] DHCP lease address=", 0,
                                  timeout=args.timeout)
                         print("PASS QEMU DHCP lease", flush=True)
+                    # Keep the Doom startup probe independent from the
+                    # general DOS smoke suite: unrelated DOS test failures
+                    # must not prevent this requested compatibility check.
+                    if args.doom_probe:
+                        doom_start = len(ANSI.sub("", raw.decode("utf-8", errors="replace")))
+                        # Exercise the same direct launch path used from
+                        # `C:\doom>`; the root-level `doom` batch wrapper is
+                        # a separate path and can hide DOS executable lookup
+                        # regressions.
+                        process.stdin.write(b"cd \\doom\n")
+                        process.stdin.flush()
+                        wait_for(r"C:\\doom>", doom_start)
+                        doom_start = len(ANSI.sub("", raw.decode("utf-8", errors="replace")))
+                        process.stdin.write(b"doom\n")
+                        process.stdin.flush()
+                        wait_for(r"\[dos\] DPMI initial 32-bit selectors",
+                                 doom_start, timeout=args.doom_probe_timeout)
+                        wait_for(r"\[dos-vga\] video mode=13|DOSVM:|thread .*DOOM.*terminated",
+                                 doom_start, timeout=args.doom_probe_timeout)
+                        wait_for(r"loaded 'C:\\doom\\doom\.wad'",
+                                 doom_start, timeout=args.doom_probe_timeout)
+                        settle_deadline = time.monotonic() + 10
+                        while time.monotonic() < settle_deadline:
+                            if process.poll() is not None:
+                                raise RuntimeError("QEMU exited during Doom probe")
+                            for key, _ in selector.select(0.5):
+                                chunk = os.read(key.fileobj.fileno(), 65536)
+                                if not chunk:
+                                    raise RuntimeError("QEMU serial output closed")
+                                raw.extend(chunk)
+                        output = ANSI.sub("", raw.decode("utf-8", errors="replace"))[doom_start:]
+                        if re.search(r"DOSVM:|thread .*doom.*terminated|unsupported protected-mode instruction",
+                                     output, re.IGNORECASE):
+                            raise RuntimeError("Doom DPMI probe reached a protected-mode fault")
+                        print("PASS Doom direct launch, WAD loading, and VGA mode 13", flush=True)
+                        process.terminate()
+                        process.wait(timeout=5)
+                        process = None
+                        print(f"PASS QEMU boot {iteration + 1}/{args.repeat}", flush=True)
+                        continue
                     commands = [
                         *([("C:\\WINDOWS7\\EXPLORER.EXE", None, "nonzero")]
                           if args.explorer_probe else []),
@@ -194,35 +254,6 @@ def main():
                         print(f"PASS {command}", flush=True)
                     if not args.skip_network:
                         print("PASS QEMU Internet: IPv4 + DHCP + DNS + ICMP + TCP + HTTP + HTTPS/TLS", flush=True)
-                    if args.doom_probe:
-                        # Require the real game startup, including WAD loading
-                        # and mode 13h, then observe it for delayed CPU faults.
-                        doom_start = len(ANSI.sub("", raw.decode("utf-8", errors="replace")))
-                        process.stdin.write(b"doom\n")
-                        process.stdin.flush()
-                        output = wait_for(
-                            r"\[dos\] DPMI initial 32-bit selectors",
-                            doom_start, timeout=args.doom_probe_timeout)
-                        output = wait_for(
-                            r"\[dos-vga\] video mode=13|DOSVM:|thread .*DOOM.*terminated",
-                            doom_start, timeout=args.doom_probe_timeout)
-                        # Keep collecting after the first port access: an
-                        # invalid CS default size can fault immediately after
-                        # an apparently successful DPMI entry / IN instruction.
-                        settle_deadline = time.monotonic() + 10
-                        while time.monotonic() < settle_deadline:
-                            if process.poll() is not None:
-                                raise RuntimeError("QEMU exited during Doom probe")
-                            for key, _ in selector.select(0.5):
-                                chunk = os.read(key.fileobj.fileno(), 65536)
-                                if not chunk:
-                                    raise RuntimeError("QEMU serial output closed")
-                                raw.extend(chunk)
-                        output = ANSI.sub("", raw.decode("utf-8", errors="replace"))[doom_start:]
-                        if re.search(r"DOSVM:|thread .*doom.*terminated|unsupported protected-mode instruction",
-                                     output, re.IGNORECASE):
-                            raise RuntimeError("Doom DPMI probe reached a protected-mode fault")
-                        print("PASS Doom WAD loading and VGA graphics startup (gameplay not validated)", flush=True)
                 process.terminate()
                 process.wait(timeout=5)
                 process = None

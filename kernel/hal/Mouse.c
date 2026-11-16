@@ -137,6 +137,12 @@ static void mouse_deferred(PKDPC dpc, PVOID context, PVOID arg1, PVOID arg2)
 
 static void mouse_irq(void)
 {
+    UINT8 status = __inbyte(PS2_STATUS);
+    /* Do not consume a keyboard byte if IRQ12 was stale or raced the keyboard
+     * polling fallback. */
+    if (!(status & PS2_STATUS_OUTPUT_FULL) ||
+        !(status & PS2_STATUS_AUX_DATA))
+        return;
     HalQueueInputByte(&mouse_bytes, __inbyte(PS2_DATA));
     KeInsertQueueDpc(&mouse_dpc, NULL, NULL);
 }

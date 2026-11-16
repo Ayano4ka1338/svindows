@@ -88,15 +88,82 @@ static void free_range(UINT64 base, UINT64 length)
     }
 }
 
-void MmInitializePhysicalMemory(const MM_MEMORY_MAP *map)
+static BOOLEAN pmm_ranges_overlap(UINT64 a, UINT64 a_size,
+                                 UINT64 b, UINT64 b_size)
+{
+    if (!a_size || !b_size || a > ~(UINT64)0 - a_size ||
+        b > ~(UINT64)0 - b_size)
+        return FALSE;
+    return a < b + b_size && b < a + a_size;
+}
+
+/* The bootstrap page tables identity-map only the low 4 GiB. Keep the bitmap
+ * there and inside a firmware-reported RAM range, and never place it over a
+ * loaded module or the Multiboot information block. Limine is free to put any
+ * of those objects immediately after the kernel image. */
+static UINT64 pmm_find_bitmap(const MM_MEMORY_MAP *map, UINT64 kernel_end,
+                             UINT64 bitmap_size,
+                             const MM_PHYSICAL_RESERVATION *reservations,
+                             UINT32 reservation_count)
+{
+    const UINT64 low_identity_limit = 0x100000000ULL;
+    UINT64 bitmap_span = PAGE_ALIGN_UP(bitmap_size);
+    for (UINT32 i = 0; i < map->count; ++i) {
+        const MM_MEMORY_REGION *region = &map->regions[i];
+        if (region->type != MmRegionAvailable || !region->length ||
+            region->base > ~(UINT64)0 - region->length)
+            continue;
+        UINT64 region_start = PAGE_ALIGN_UP(region->base);
+        UINT64 region_end = PAGE_ALIGN(region->base + region->length);
+        if (region_start < kernel_end)
+            region_start = PAGE_ALIGN_UP(kernel_end);
+        if (region_end > low_identity_limit)
+            region_end = low_identity_limit;
+
+        for (UINT64 candidate = region_start;
+             candidate <= region_end && bitmap_span <= region_end - candidate;) {
+            UINT64 next = candidate + bitmap_span;
+            BOOLEAN conflict = pmm_ranges_overlap(candidate, bitmap_span,
+                                                   KERNEL_PHYS_BASE,
+                                                   kernel_end - KERNEL_PHYS_BASE);
+            for (UINT32 r = 0; !conflict && r < reservation_count; ++r) {
+                if (pmm_ranges_overlap(candidate, bitmap_span,
+                                       reservations[r].base,
+                                       reservations[r].length)) {
+                    conflict = TRUE;
+                    if (reservations[r].base <= ~(UINT64)0 - reservations[r].length) {
+                        UINT64 after = PAGE_ALIGN_UP(reservations[r].base +
+                                                     reservations[r].length);
+                        if (after > next) next = after;
+                    }
+                }
+            }
+            if (!conflict)
+                return candidate;
+            if (next <= candidate)
+                break;
+            candidate = next;
+        }
+    }
+    return MM_INVALID_PHYS;
+}
+
+void MmInitializePhysicalMemory(const MM_MEMORY_MAP *map,
+                                const MM_PHYSICAL_RESERVATION *reservations,
+                                UINT32 reservation_count)
 {
     KeInitializeSpinLock(&g_pmm_lock);
     g_pmm.total_pages = map->highest_address >> PAGE_SHIFT;
     g_pmm.bitmap_bytes = (g_pmm.total_pages + 7) / 8;
 
-    /* Park the bitmap just past the kernel image. */
+    /* Do not assume Limine leaves free RAM directly after the kernel image. */
     UINT64 kernel_end = (UINT64)(ULONG_PTR)__kernel_phys_end;
-    g_pmm.bitmap_phys = PAGE_ALIGN_UP(kernel_end);
+    g_pmm.bitmap_phys = pmm_find_bitmap(map, kernel_end,
+                                        g_pmm.bitmap_bytes,
+                                        reservations, reservation_count);
+    if (g_pmm.bitmap_phys == MM_INVALID_PHYS)
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "no low RAM available for physical-memory bitmap");
     UINT64 bitmap_pages = BYTES_TO_PAGES(g_pmm.bitmap_bytes);
 
     /* Start with everything marked used, then free the available regions. */
@@ -116,6 +183,8 @@ void MmInitializePhysicalMemory(const MM_MEMORY_MAP *map)
     reserve_range(0, 0x100000);                                  /* low 1 MiB      */
     reserve_range(KERNEL_PHYS_BASE, kernel_end - KERNEL_PHYS_BASE); /* kernel image */
     reserve_range(g_pmm.bitmap_phys, bitmap_pages << PAGE_SHIFT);   /* the bitmap   */
+    for (UINT32 i = 0; i < reservation_count; ++i)
+        reserve_range(reservations[i].base, reservations[i].length);
 
     g_pmm.next_hint = 0x100000 >> PAGE_SHIFT;
 

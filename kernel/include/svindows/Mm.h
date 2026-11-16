@@ -72,7 +72,7 @@ static ALWAYS_INLINE UINT64 MmVirtToPhysDirect(void *virt)
 /* Physical memory map (parsed from Multiboot2)                       */
 /* ------------------------------------------------------------------ */
 
-#define MM_MAX_REGIONS 64
+#define MM_MAX_REGIONS 256
 
 typedef enum _MM_REGION_TYPE {
     MmRegionAvailable = 1,
@@ -95,6 +95,11 @@ typedef struct _MM_MEMORY_MAP {
     UINT64           total_available; /* sum of available bytes             */
 } MM_MEMORY_MAP;
 
+typedef struct _MM_PHYSICAL_RESERVATION {
+    UINT64 base;
+    UINT64 length;
+} MM_PHYSICAL_RESERVATION;
+
 /* Parse the Multiboot2 info block (physical pointer) into `out`. */
 BOOLEAN MmParseMultibootMemoryMap(UINT64 mb_info_phys, MM_MEMORY_MAP *out);
 BOOLEAN MmFindMultibootModule(UINT64 mb_info_phys, const char *name,
@@ -107,7 +112,9 @@ const char *MmRegionTypeName(MM_REGION_TYPE type);
 
 #define MM_INVALID_PHYS ((UINT64)-1)
 
-void   MmInitializePhysicalMemory(const MM_MEMORY_MAP *map);
+void   MmInitializePhysicalMemory(const MM_MEMORY_MAP *map,
+                                  const MM_PHYSICAL_RESERVATION *reservations,
+                                  UINT32 reservation_count);
 void   MmReservePhysicalRange(UINT64 base, UINT64 length);
 UINT64 MmAllocatePage(void);                 /* one 4 KiB frame, or MM_INVALID_PHYS */
 UINT64 MmAllocatePages(SIZE_T count);        /* `count` contiguous frames          */

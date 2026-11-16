@@ -34,6 +34,8 @@ BOOLEAN GfxAvailable(void);
  * framebuffer, either because it was not supplied or one of its mappings
  * could not be installed. */
 BOOLEAN GfxInitialize(void);
+/* Install the framebuffer's PAT cache type on each processor before it draws. */
+void GfxInitializeProcessor(void);
 /* On Bochs/QEMU VBE adapters, select and publish an exact boot display mode. */
 BOOLEAN GfxRequestBootMode(UINT64 mbi_phys, UINT32 width, UINT32 height);
 

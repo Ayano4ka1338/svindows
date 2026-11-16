@@ -204,9 +204,13 @@ KiSystemCallEntry:
     mov     r11, [r11+KTH_CB_FLAGS]
     and     r11d, 0x240fd7        ; user flags only: clear IOPL/NT/VM/RF
     or      r11d, 0x202           ; reserved bit and IF must be set
-    mov     rsp, rdx
+    push    0x1B
+    push    rdx
+    push    r11
+    push    0x23
+    push    rcx
     swapgs                        ; GS -> user
-    o64 sysret
+    iretq
 .return_normal:
     ; SYSRET with a non-user or non-canonical RCX may #GP in ring 0. Reject
     ; the frame while still on the kernel stack, before swapping GS or RSP.
@@ -218,11 +222,19 @@ KiSystemCallEntry:
     jnz     .bad_normal_return
     pop     r11                   ; user RFLAGS
     pop     rcx                   ; user RIP
-    pop     rsp                   ; user RSP (from this thread's kernel stack)
     and     r11d, 0x240fd7
     or      r11d, 0x202
+    ; Keep RSP on the kernel stack until the architectural ring transition.
+    ; The saved user RSP is still at [rsp]. Do not clobber RDX (Linux syscall
+    ; callers require it preserved). IRETQ restores SS/CS/RSP/RFLAGS together
+    ; rather than relying on SYSRET's synthesized segment attributes.
+    push    0x1B                  ; SS; saved user RSP is now at [rsp+8]
+    push    qword [rsp+8]         ; user RSP
+    push    r11                   ; sanitized user RFLAGS
+    push    0x23                  ; CS
+    push    rcx                   ; user RIP
     swapgs                        ; GS -> user
-    o64 sysret                    ; back to ring 3 (RIP=RCX, RFLAGS=R11)
+    iretq                         ; atomic return on the kernel-owned frame
 
 .bad_callback_return:
     mov     rdi, [r11+KTH_CB_RIP]
@@ -242,6 +254,10 @@ KiSystemCallEntry:
 ;   first-argument register). Never returns.
 global KiEnterUserMode
 KiEnterUserMode:
+    ; KiThreadStartup enables IRQs. No interrupt may observe CPL0 with the
+    ; user's GS base: its kernel-entry stub would otherwise interpret the TEB
+    ; as a KPCR. IRETQ enables IRQs only after installing the user frame.
+    cli
     mov     ax, 0x1B              ; user data selector (RPL 3)
     mov     ds, ax
     mov     es, ax
@@ -262,13 +278,10 @@ KiEnterUserMode:
                                   ; off into mapped code. The CRT exits via
                                   ; ExitProcess and never returns here.
 
-    ; Switch the active GS base to this thread's TEB (held in KERNEL_GS_BASE by
-    ; the scheduler) before entering ring 3.
-    swapgs
-
     push    0x1B                  ; SS  = user data | 3
     push    rsi                   ; RSP = user stack
     push    0x202                 ; RFLAGS: IF=1, reserved bit set
     push    0x23                  ; CS  = user code | 3
     push    rdi                   ; RIP = user entry
+    swapgs                        ; keep kernel GS until the frame is complete
     iretq

@@ -63,11 +63,13 @@ void Ps2ControllerInit(void)
     /* Flush any stale byte from the output buffer. */
     (void)__inbyte(PS2_DATA);
 
-    /* Read, adjust, and write back the config byte: enable both IRQs and make
-     * sure both clocks are running (clear the "disabled" bits). */
+    /* Enable both IRQs, keep both clocks running, and force the controller's
+     * set-2-to-set-1 translation. Keyboard.c decodes set-1 make/break codes;
+     * firmware may leave translation disabled even though QEMU enables it. */
     ps2_command(PS2_CMD_READ_CONFIG);
     UINT8 config = ps2_read_data();
     config |= PS2_CONFIG_KBD_IRQ | PS2_CONFIG_AUX_IRQ;
+    config |= PS2_CONFIG_TRANSLATE;
     config &= (UINT8)~(PS2_CONFIG_KBD_CLOCK | PS2_CONFIG_AUX_CLOCK);
     ps2_command(PS2_CMD_WRITE_CONFIG);
     ps2_write_data(config);

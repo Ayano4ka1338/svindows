@@ -6,6 +6,10 @@ HOSTCC  ?= clang
 
 CONFIG ?= release
 FAT_FAULT_AFTER ?= -1
+INITRD_SIZE_MB ?= 320
+# Keep AP bring-up opt-in until the multiprocessor scheduler has been proven
+# on physical firmware and hardware. A deliberate `make SMP=1` enables it.
+SMP ?= 0
 ifeq ($(CONFIG),release)
 KERNEL_OPT := -O2 -DSVINDOWS_RELEASE
 USER_OPT   := -O2
@@ -55,6 +59,7 @@ CFLAGS := -std=gnu11 -ffreestanding \
           $(KERNEL_OPT) -g -Ikernel/include -DSVINDOWS_BOOT_PROGRAM=\"$(PROGRAM)\" \
           -DSVINDOWS_BOOT_COMMAND_LINE='"$(CMDLINE)"' \
           -DIO_FAULT_AFTER_WRITES=$(FAT_FAULT_AFTER)
+CFLAGS += -DSVINDOWS_ENABLE_SMP=$(SMP)
 CFLAGS += -Ikernel/net/lwip -I$(LWIP_ROOT)/include
 
 NASMFLAGS := -f elf64 -g -F dwarf
@@ -241,7 +246,7 @@ $(CURL_HTTP): user/l/net/curl.c user/l/net/netutil.h user/l/runtime/Memory.c
 # Preserve the stamp's mtime when settings have not changed.
 $(BUILD_CONFIG): .FORCE
 	@mkdir -p $(BUILD)
-	@printf '%s\n' 'CONFIG=$(CONFIG)' 'KERNEL_OPT=$(KERNEL_OPT)' 'USER_OPT=$(USER_OPT)' > $@.tmp
+	@printf '%s\n' 'CONFIG=$(CONFIG)' 'KERNEL_OPT=$(KERNEL_OPT)' 'USER_OPT=$(USER_OPT)' 'SMP=$(SMP)' > $@.tmp
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 
 # ZIP extraction can preserve source mtimes older than an existing build/gui.
@@ -590,8 +595,9 @@ $(DOS_TESTS): tools/BuildDosTests.py
 
 $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(TASK_SERVICES) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
-	# Leave room for Alpine packages and their expanded files.
-	dd if=/dev/zero of=$(INITRD) bs=1M count=450 status=none
+	# Keep enough room for Alpine packages while avoiding an unnecessarily
+	# large contiguous Multiboot2 module allocation during UEFI boot.
+	dd if=/dev/zero of=$(INITRD) bs=1M count=$(INITRD_SIZE_MB) status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
 	mcopy -i $(INITRD) $(CMD) ::CMD.EXE
 	mmd -i $(INITRD) ::WINDOWS ::WINDOWS/SYSTEM32
@@ -749,6 +755,8 @@ $(ISO): Makefile $(KERNEL) $(INITRD) boot/limine.conf other/Logo.png $(LIMINE_FI
 	@cp $(KERNEL) $(BUILD)/limine-isodir/boot/svindowskrnl.elf
 	@cp $(INITRD) $(BUILD)/limine-isodir/boot/initrd.fat
 	@cp boot/limine.conf $(BUILD)/limine-isodir/boot/limine/limine.conf
+	@cp boot/limine.conf $(BUILD)/limine-isodir/limine.conf
+	@cp boot/limine.conf $(BUILD)/limine-isodir/boot/limine.conf
 	@cp other/Logo.png $(BUILD)/limine-isodir/logo.png
 	@cp limine-bin/limine-bios.sys limine-bin/limine-bios-cd.bin \
 	    limine-bin/limine-uefi-cd.bin $(BUILD)/limine-isodir/boot/limine/
@@ -756,7 +764,8 @@ $(ISO): Makefile $(KERNEL) $(INITRD) boot/limine.conf other/Logo.png $(LIMINE_FI
 	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
 	    -no-emul-boot -boot-load-size 4 -boot-info-table \
 	    -eltorito-alt-boot -e boot/limine/limine-uefi-cd.bin \
-	    -no-emul-boot -isohybrid-gpt-basdat -o $@ $(BUILD)/limine-isodir
+	    -no-emul-boot -efi-boot-part --efi-boot-image \
+	    -o $@ $(BUILD)/limine-isodir
 	$(LIMINE_CLI) bios-install $@
 	@echo "  ISO   $@"
 

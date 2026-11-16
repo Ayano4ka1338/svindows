@@ -3,27 +3,28 @@ bits 64
 section .text
 global KiEnterLinuxUserMode
 KiEnterLinuxUserMode:
+    cli                       ; protect the GS/CPL transition until IRETQ
     mov ax, 0x1b
     mov ds, ax
     mov es, ax
     and rsi, -16
-    swapgs
     push 0x1b
     push rsi
     push 0x202
     push 0x23
     push rdi
     xor edx, edx              ; no dynamic linker fini callback
+    swapgs
     iretq
 
 ; Resume a clone child at the instruction after the parent's SYSCALL.
 ; Arguments: entry, child RSP, saved RFLAGS, pointer to saved registers.
 global KiEnterLinuxCloneUserMode
 KiEnterLinuxCloneUserMode:
+    cli                       ; saved user RFLAGS are restored by IRETQ
     mov ax, 0x1b
     mov ds, ax
     mov es, ax
-    swapgs
     push 0x1b
     push rsi
     push rdx
@@ -43,4 +44,5 @@ KiEnterLinuxCloneUserMode:
     mov r9,  [rax+0x50]
     mov r10, [rax+0x58]
     xor eax, eax              ; clone() returns zero to the child
+    swapgs
     iretq
