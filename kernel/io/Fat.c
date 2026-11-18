@@ -1575,6 +1575,33 @@ NTSTATUS FatSetFileDateTime(const char *name, UINT16 date, UINT16 time)
     return STATUS_SUCCESS;
 }
 
+NTSTATUS FatSetFileAttributes(const char *name, UINT8 attributes)
+{
+    if (!g_fat.Mounted)
+        return STATUS_DEVICE_NOT_READY;
+    UINT32 directory;
+    char leaf[260];
+    NTSTATUS status = fat_resolve_parent(name, &directory, leaf);
+    if (!NT_SUCCESS(status))
+        return status;
+    FAT_DIRENT entry;
+    FAT_ENTRY_LOCATION location;
+    if (!fat_find(directory, leaf, &entry, &location))
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    /* FAT has no Unix execute/group/other permission bits. Preserve the
+       directory bit and support the DOS readonly, hidden, system and archive
+       attributes that can be represented in its directory entry. */
+    entry.Attr = (UINT8)((entry.Attr & 0x10u) | (attributes & 0x27u));
+    if (!IoBlockBeginTransaction())
+        return STATUS_INTERNAL_ERROR;
+    if (!fat_write_dirent(location, &entry) || !IoBlockCommitTransaction()) {
+        IoBlockRollbackTransaction();
+        return STATUS_DEVICE_NOT_READY;
+    }
+    return STATUS_SUCCESS;
+}
+
 static BOOLEAN fat_write_dirent(FAT_ENTRY_LOCATION location,
                                 const FAT_DIRENT *entry)
 {

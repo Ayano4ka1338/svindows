@@ -1,5 +1,5 @@
-/* The current scheduler is still UP, but spin locks use inter-CPU atomic
- * exclusion so their contract remains valid as processors are brought online. */
+/* IRQL state and interrupt masking are per-CPU; spin locks provide shared
+ * inter-processor exclusion for the scheduler and executive data structures. */
 #include <svindows/Ke.h>
 
 KIRQL KeGetCurrentIrql(void)

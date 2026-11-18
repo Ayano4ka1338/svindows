@@ -455,7 +455,11 @@ static UINT8 xhci_key_scancode(UINT8 usage, BOOLEAN *extended)
     case 0x3f: return 0x40; case 0x40: return 0x41;
     case 0x41: return 0x42; case 0x42: return 0x43;
     case 0x43: return 0x44; case 0x44: return 0x57;
-    case 0x45: return 0x58; case 0x49: *extended = TRUE; return 0x52;
+    case 0x45: return 0x58;
+    case 0x46: *extended = TRUE; return 0x37; /* Print Screen */
+    case 0x47: return 0x46; /* Scroll Lock */
+    case 0x48: return 0x45; /* Pause/Break (best available set-1 key) */
+    case 0x49: *extended = TRUE; return 0x52;
     case 0x4a: *extended = TRUE; return 0x47;
     case 0x4b: *extended = TRUE; return 0x49;
     case 0x4c: *extended = TRUE; return 0x53;
@@ -465,6 +469,35 @@ static UINT8 xhci_key_scancode(UINT8 usage, BOOLEAN *extended)
     case 0x50: *extended = TRUE; return 0x4b;
     case 0x51: *extended = TRUE; return 0x50;
     case 0x52: *extended = TRUE; return 0x48;
+    case 0x53: return 0x45; /* Num Lock */
+    case 0x54: return 0x35; /* keypad divide */
+    case 0x55: return 0x37; /* keypad multiply */
+    case 0x56: return 0x4a; /* keypad minus */
+    case 0x57: return 0x4e; /* keypad plus */
+    case 0x58: *extended = TRUE; return 0x1c; /* keypad enter */
+    case 0x59: return 0x4f; case 0x5a: return 0x50;
+    case 0x5b: return 0x51; case 0x5c: return 0x4b;
+    case 0x5d: return 0x4c; case 0x5e: return 0x4d;
+    case 0x5f: return 0x47; case 0x60: return 0x48;
+    case 0x61: return 0x49; case 0x62: return 0x52;
+    case 0x63: return 0x53; case 0x64: return 0x56;
+    case 0x65: *extended = TRUE; return 0x5b; /* Application */
+    case 0x67: return 0x59; /* keypad equals */
+    case 0x68: return 0x57; case 0x69: return 0x58;
+    case 0x6a: return 0x5b; case 0x6b: return 0x5c;
+    case 0x6c: return 0x5d; case 0x6d: return 0x5e;
+    case 0x6e: return 0x5f; case 0x6f: return 0x60;
+    case 0x70: return 0x61; case 0x71: return 0x62;
+    case 0x72: return 0x63; case 0x73: return 0x64;
+    case 0x74: return 0x65; case 0x75: return 0x66;
+    case 0x76: return 0x67; case 0x77: return 0x68;
+    case 0x78: return 0x69; case 0x79: return 0x6a;
+    case 0x7a: return 0x6b; case 0x7b: return 0x6c;
+    case 0x7c: return 0x6d; case 0x7d: return 0x6e;
+    case 0x7e: return 0x76; /* Help */
+    case 0x7f: return 0x5e; /* Mute */
+    case 0x80: return 0x30; /* Volume up */
+    case 0x81: return 0x2e; /* Volume down */
     default: return 0;
     }
 }
@@ -488,8 +521,8 @@ static void xhci_keyboard_report(XHCI_HID_DEVICE *dev)
         BOOLEAN before = (old[0] & (1u << bit)) != 0;
         BOOLEAN after = (now[0] & (1u << bit)) != 0;
         if (before == after) continue;
-        if (bit == 3 || bit == 7) continue; /* GUI keys are not translated yet */
-        if (bit >= 4) HalKeyboardInjectSet1Byte(0xe0);
+        if (bit >= 4 || bit == 3 || bit == 7)
+            HalKeyboardInjectSet1Byte(0xe0);
         HalKeyboardInjectSet1Byte((UINT8)(mod_scan[bit] |
                                   (after ? 0 : 0x80u)));
     }
@@ -768,26 +801,38 @@ static void xhci_log_legacy_controller(void)
 
 static void xhci_poll_hid(void)
 {
-    for (UINT32 i = 0; i < g_hid_count; ++i) {
-        XHCI_HID_DEVICE *dev = &g_hid[i];
-        if (!dev->Active || !dev->TransferPending) continue;
+    /* Consume every event at the ring head. Port-status and other events can
+     * be interleaved with interrupt transfers; leaving one unrecognized event
+     * at the head would otherwise permanently stop USB input. */
+    for (UINT32 budget = 0; budget < XHCI_TRBS_PER_RING; ++budget) {
         XHCI_TRB *event = &g_xhci.EventRing[g_xhci.EventConsumer];
         __asm__ volatile("lfence" ::: "memory");
-        if ((event->Control & 1u) != g_xhci.EventCycle) continue;
+        if ((event->Control & 1u) != g_xhci.EventCycle) break;
         UINT32 type = (event->Control >> XHCI_TRB_TYPE_SHIFT) & 0x3fu;
         UINT8 ep = (UINT8)((event->Control >> 16) & 0x1fu);
         UINT8 sid = (UINT8)(event->Control >> 24);
-        if (type != 32u || sid != dev->SlotId || ep != dev->EndpointId)
-            continue;
         UINT8 completion = (UINT8)(event->Status >> 24);
         xhci_event_advance();
-        dev->TransferPending = FALSE;
-        if (completion == 1u) {
-            if (dev->Protocol == 1) xhci_keyboard_report(dev);
-            else xhci_mouse_report(dev);
+
+        if (type == 32u) { /* Transfer Event */
+            for (UINT32 i = 0; i < g_hid_count; ++i) {
+                XHCI_HID_DEVICE *dev = &g_hid[i];
+                if (!dev->Active || !dev->TransferPending ||
+                    sid != dev->SlotId || ep != dev->EndpointId)
+                    continue;
+                dev->TransferPending = FALSE;
+                if (completion == 1u) {
+                    if (dev->Protocol == 1) xhci_keyboard_report(dev);
+                    else xhci_mouse_report(dev);
+                } else {
+                    KeLog("[usb]  HID slot %u endpoint %u transfer completion %u\n",
+                          sid, ep, completion);
+                }
+                memset(dev->Report, 0, PAGE_SIZE);
+                xhci_queue_interrupt(dev);
+                break;
+            }
         }
-        memset(dev->Report, 0, PAGE_SIZE);
-        xhci_queue_interrupt(dev);
     }
 }
 

@@ -1466,6 +1466,7 @@ UINT64 NtQueryDirectoryFile(UINT64 *a)
 #define FileRenameInformationLocal       10u
 #define FileDispositionInformationLocal  13u
 #define FilePositionInformationLocal     14u
+#define FileBasicInformationLocal        4u
 #define FileEndOfFileInformationLocal    20u
 
 static NTSTATUS IopResizeFile(FILE_OBJECT *file, SIZE_T size)
@@ -1554,6 +1555,7 @@ UINT64 NtSetInformationFile(UINT64 *a)
 
     UINT32 minimum;
     switch (info_class) {
+    case FileBasicInformationLocal: minimum = 40; break;
     case FileRenameInformationLocal: minimum = 20; break;
     case FileDispositionInformationLocal: minimum = 1; break;
     case FilePositionInformationLocal:
@@ -1582,7 +1584,17 @@ UINT64 NtSetInformationFile(UINT64 *a)
     FILE_OBJECT *file = (FILE_OBJECT *)object;
     IO_VNODE *vnode = file->Vnode;
 
-    if (info_class == FilePositionInformationLocal) {
+    if (info_class == FileBasicInformationLocal) {
+        if (!vnode || !(file->Access & DELETE_ACCESS_LOCAL)) {
+            status = STATUS_ACCESS_DENIED;
+        } else {
+            UINT32 attributes = *(volatile UINT32 *)(information + 32);
+            status = FatSetFileAttributes(vnode->Name, (UINT8)attributes);
+            if (NT_SUCCESS(status))
+                vnode->Attributes = (vnode->Attributes & 0x10u) |
+                                    (attributes & 0x27u);
+        }
+    } else if (info_class == FilePositionInformationLocal) {
         INT64 position = *(volatile INT64 *)information;
         if (file->Kind != FileKindDisk || position < 0)
             status = STATUS_INVALID_PARAMETER;

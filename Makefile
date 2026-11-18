@@ -7,9 +7,9 @@ HOSTCC  ?= clang
 CONFIG ?= release
 FAT_FAULT_AFTER ?= -1
 INITRD_SIZE_MB ?= 320
-# Keep AP bring-up opt-in until the multiprocessor scheduler has been proven
-# on physical firmware and hardware. A deliberate `make SMP=1` enables it.
-SMP ?= 0
+# Use the multiprocessor scheduler by default. `make SMP=0` keeps a UP build
+# available for firmware and hardware where AP startup is unavailable.
+SMP ?= 1
 ifeq ($(CONFIG),release)
 KERNEL_OPT := -O2 -DSVINDOWS_RELEASE
 USER_OPT   := -O2
@@ -110,6 +110,7 @@ MSVCRTLIB  := $(BUILD)/msvcrt.lib
 CRT0       := $(BUILD)/crt0.obj
 CMD        := $(BUILD)/cmd.exe
 CMDUTIL    := $(BUILD)/cmdutil.exe
+SVINDOWSBOX := $(BUILD)/SVINDOWSBOX.EXE
 # USER/GDI client layer: user32.dll and gdi32.dll provide Win32 graphics APIs.
 USER32     := $(BUILD)/user32.dll
 USER32LIB  := $(BUILD)/user32.lib
@@ -562,7 +563,7 @@ $(USER32): user/w/user32/User32.c user/w/user32/User32.h $(USER32_PARTS) $(CONTR
 # Stateless console commands are separate programs. One implementation is
 # linked once and installed under each command/alias name; it selects behavior
 # from argv[0], like a compact multi-call toolset without shell-resident code.
-$(CMDUTIL): user/w/cmdutils/Cmdutils.c $(CRT0) $(KERNEL32)
+$(CMDUTIL): user/w/cmdutils/Cmdutils.c user/w/cmdutils/SvindowsBox.inc $(CRT0) $(KERNEL32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/w/cmdutils/Cmdutils.c -o $(BUILD)/cmdutils.obj
 	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
@@ -570,6 +571,9 @@ $(CMDUTIL): user/w/cmdutils/Cmdutils.c $(CRT0) $(KERNEL32)
 	@echo "  PE    $@"
 
 $(COMMAND_BINS): $(CMDUTIL)
+	cp $(CMDUTIL) $@
+
+$(SVINDOWSBOX): $(CMDUTIL)
 	cp $(CMDUTIL) $@
 
 # FAT32 initrd holding user-space executables and Mesa's software GL runtime.
@@ -593,7 +597,7 @@ $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFe
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(TASK_SERVICES) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(SVINDOWSBOX) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(TASK_SERVICES) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 	# Keep enough room for Alpine packages while avoiding an unnecessarily
 	# large contiguous Multiboot2 module allocation during UEFI boot.
@@ -625,6 +629,7 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -i $(INITRD) $(IPHLPAPI) ::WINDOWS/SYSTEM32/IPHLPAPI.DLL
 	for dll in $(TASK_SERVICES); do mcopy -i $(INITRD) "$$dll" ::WINDOWS/SYSTEM32/; done
 	mcopy -i $(INITRD) $(COMMAND_BINS) ::WINDOWS/SYSTEM32/
+	mcopy -i $(INITRD) $(SVINDOWSBOX) ::WINDOWS/SYSTEM32/SVINDOWSBOX.EXE
 	# Keep each Windows release together; root batch files are launchers.
 	mmd -i $(INITRD) ::WINDOWS1 ::WINDOWS3 ::WINDOWS7
 	if [ -n "$(WINDOWS1_FILES)" ]; then mcopy -i $(INITRD) $(WINDOWS1_FILES) ::WINDOWS1/; fi

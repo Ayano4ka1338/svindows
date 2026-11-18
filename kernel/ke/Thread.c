@@ -9,8 +9,8 @@
  *
  * The scheduler uses one globally locked run queue shared by all online CPUs.
  * Each CPU owns an idle context and quantum; APs are woken/preempted by local
- * APIC IPIs. Until remote TLB shootdowns exist, one process is admitted to one
- * CPU at a time, while different processes may execute concurrently.
+ * APIC IPIs. Threads from the same process may run concurrently; page-table
+ * edits use synchronous TLB shootdowns.
  */
 #include <svindows/Ke.h>
 #include <svindows/Ps.h>
@@ -158,27 +158,45 @@ static void KepSignalProcessTermination(PKPROCESS process)
 static void KepReapTerminatedThreads(void)
 {
     PLIST_ENTRY head = &g_all_threads;
-    for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
-        PKTHREAD thread = CONTAINING_RECORD(entry, KTHREAD, SchedulerEntry);
-        entry = entry->Flink;
-        PKPRCB current_processor = KeGetCurrentProcessorBlock();
-        PKTHREAD current_thread = current_processor->CurrentThread;
-        BOOLEAN same_address_space_active = current_thread &&
-            current_thread != current_processor->IdleThread &&
-            current_thread->Process == thread->Process;
-        if (KepThreadCurrentOnAnyProcessor(thread) ||
-            thread->State != ThreadStateTerminated ||
-            (!same_address_space_active && thread->Process &&
-             __atomic_load_n(&thread->Process->ActiveProcessorCount,
-                             __ATOMIC_ACQUIRE) != 0))
-            continue;
+    for (;;) {
+        PKTHREAD thread = NULL;
+        for (PLIST_ENTRY entry = head->Flink; entry != head;
+             entry = entry->Flink) {
+            PKTHREAD candidate = CONTAINING_RECORD(entry, KTHREAD,
+                                                    SchedulerEntry);
+            PKPRCB current_processor = KeGetCurrentProcessorBlock();
+            PKTHREAD current_thread = current_processor->CurrentThread;
+            BOOLEAN same_address_space_active = current_thread &&
+                current_thread != current_processor->IdleThread &&
+                current_thread->Process == candidate->Process;
+            ULONG active_processors = candidate->Process
+                ? __atomic_load_n(&candidate->Process->ActiveProcessorCount,
+                                  __ATOMIC_ACQUIRE)
+                : 0;
+            if (KepThreadCurrentOnAnyProcessor(candidate) ||
+                candidate->State != ThreadStateTerminated ||
+                active_processors > (same_address_space_active ? 1u : 0u))
+                continue;
+            thread = candidate;
+            break;
+        }
+        if (!thread) return;
+
+        /* Detach under the scheduler lock, then perform cleanup with that
+         * lock released. User mapping release waits for remote TLB IPIs; an
+         * AP spinning for the scheduler lock has interrupts disabled and
+         * cannot acknowledge such an IPI until we drop the lock. */
+        KiCancelThreadTimersWithSchedulerLock(thread);
+        RemoveEntryList(&thread->SchedulerEntry);
+        RemoveEntryList(&thread->ProcessEntry);
+        __asm__ volatile("cli" ::: "memory");
+        KiReleaseRawSpinLock(&g_scheduler_lock, 0);
         W32kCleanupThreadUser(thread);
         if (thread->DosContext) {
             DosDestroyVm(thread->DosContext);
             thread->DosContext = NULL;
         }
         LinuxDestroyThread(thread);
-        KiCancelThreadTimersWithSchedulerLock(thread);
         UINT64 root = thread->Process->DirectoryTableBase;
         MmReleaseUserPagesInAddressSpace(root, thread->OwnedTlsBase,
                                          thread->OwnedTlsPages);
@@ -186,8 +204,6 @@ static void KepReapTerminatedThreads(void)
                                          thread->OwnedUserTebPages);
         MmReleaseUserPagesInAddressSpace(root, thread->OwnedUserStackBase,
                                          thread->OwnedUserStackPages);
-        RemoveEntryList(&thread->SchedulerEntry);
-        RemoveEntryList(&thread->ProcessEntry);
         POBJECT process_object = thread->OwningProcessObject;
         thread->OwningProcessObject = NULL;
         if (thread->KernelStackBase)
@@ -195,6 +211,9 @@ static void KepReapTerminatedThreads(void)
         ExFreePool(thread);
         if (process_object)
             ObDereferenceObject(process_object);
+        (void)KiAcquireRawSpinLock(&g_scheduler_lock);
+        /* Restart from the list head: another CPU may have reaped or inserted
+         * nodes while the scheduler lock was dropped. */
     }
 }
 
@@ -328,6 +347,8 @@ void KeInitializeScheduler(void)
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
 
     g_system_process.DirectoryTableBase = cr3;
+    __atomic_store_n(&KeGetCurrentProcessorBlock()->ActiveAddressSpace,
+                     cr3 & PTE_ADDR_MASK, __ATOMIC_RELEASE);
     g_system_process.HandleTable = ObGetBootstrapHandleTable();
     g_system_process.LoaderContext = LdrCreateProcessContext();
     if (!g_system_process.LoaderContext)
@@ -434,10 +455,14 @@ static BOOLEAN KepEnqueueThread(PKTHREAD t)
         KiReleaseRawSpinLock(&g_scheduler_lock, interrupt_state);
         return FALSE;
     }
-    InsertTailList(&g_ready_queue, &t->ReadyEntry);
+    if (t->SuspendCount) {
+        t->State = ThreadStateSuspended;
+    } else {
+        InsertTailList(&g_ready_queue, &t->ReadyEntry);
+    }
     InsertTailList(&t->Process->ThreadListHead, &t->ProcessEntry);
     InsertTailList(&g_all_threads, &t->SchedulerEntry);
-    KepWakeIdleProcessors();
+    if (!t->SuspendCount) KepWakeIdleProcessors();
     KiReleaseRawSpinLock(&g_scheduler_lock, interrupt_state);
     return TRUE;
 }
@@ -506,6 +531,16 @@ PKTHREAD KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
                                       UINT64 user_gs_base, UINT64 user_arg,
                                       LONG priority)
 {
+    return KeCreateUserThreadForProcessEx(process, name, user_entry,
+        user_stack, user_gs_base, user_arg, priority, 0);
+}
+
+PKTHREAD KeCreateUserThreadForProcessEx(PKPROCESS process, const char *name,
+                                        UINT64 user_entry, UINT64 user_stack,
+                                        UINT64 user_gs_base, UINT64 user_arg,
+                                        LONG priority, ULONG suspend_count)
+{
+    if (suspend_count > 127) return NULL;
     PKTHREAD t = KepAllocThread(process, name, priority);
     if (!t)
         return NULL;
@@ -515,6 +550,7 @@ PKTHREAD KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
     t->UserStack = user_stack;
     t->UserGsBase = user_gs_base;
     t->UserArg = user_arg;
+    t->SuspendCount = suspend_count;
 
     /* Ps builds the TEB before Ke allocates the KTHREAD, so this is the first
      * point at which the real thread id is known.  Native code reads the id
@@ -553,9 +589,7 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
         KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
                    "processor has no idle thread");
 
-    /* Release this CPU's address-space execution slot before choosing the
-     * next thread. This prevents two CPUs from mutating/running one process
-     * address space concurrently while the VM lacks remote TLB shootdowns. */
+    /* Track active address spaces for process teardown and accounting. */
     if (prev && prev != idle && prev->Process) {
         ULONG active = __atomic_load_n(&prev->Process->ActiveProcessorCount,
                                        __ATOMIC_RELAXED);
@@ -566,17 +600,26 @@ static void KiScheduleWithLock(UINT64 scheduler_interrupt_state)
                            __ATOMIC_RELEASE);
     }
 
-    /* A single global run queue allows migration across CPUs. Skip threads
-     * whose process is already executing elsewhere; keep them queued for the
-     * processor that currently owns that address space. */
+    /* The shared ready queue permits unrestricted migration, including
+     * threads from one process on different processors. */
     PLIST_ENTRY best = NULL;
     LONG highest = (-2147483647 - 1);
     for (PLIST_ENTRY e = g_ready_queue.Flink;
          e != &g_ready_queue; e = e->Flink) {
         PKTHREAD candidate = CONTAINING_RECORD(e, KTHREAD, ReadyEntry);
-        if (candidate->Process &&
-            __atomic_load_n(&candidate->Process->ActiveProcessorCount,
+        /* The executive process hosts kernel workers which share subsystem
+         * globals. Keep those workers serialized until each subsystem has
+         * its own inter-CPU locking. */
+        if (candidate->Process == &g_system_process &&
+            __atomic_load_n(&g_system_process.ActiveProcessorCount,
                             __ATOMIC_ACQUIRE) != 0)
+            continue;
+        /* The Linux personality still has process-global loader and libc
+         * state without SMP-safe locking. Keep its processes on the BSP until
+         * those shared paths are audited; other kernel and native work remains
+         * schedulable across the APs. */
+        if (processor->ProcessorNumber != 0 && candidate->Process &&
+            candidate->Process->LinuxContext)
             continue;
         LONG score = KepDispatchPriority(candidate);
         if (!best || score > highest) {

@@ -537,6 +537,13 @@ static BOOLEAN hal_send_apic_command(UINT32 apic_id, UINT32 command)
     return TRUE;
 }
 
+BOOLEAN HalSendTlbShootdownNmi(UINT32 apic_id)
+{
+    /* TLB invalidation must reach CPUs even while they have IF clear inside
+     * scheduler or page-table critical sections. NMI delivery bypasses IF. */
+    return hal_send_apic_command(apic_id, 4u << 8);
+}
+
 BOOLEAN HalSendInitIpi(UINT32 apic_id, BOOLEAN assert_init)
 {
     /* INIT is level-triggered and must be explicitly deasserted. */

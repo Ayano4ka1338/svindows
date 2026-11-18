@@ -6,6 +6,7 @@
  * are populated later while the new CR3 is active.
  */
 #include <svindows/AddressSpace.h>
+#include <svindows/Ke.h>
 #include <svindows/Mm.h>
 #include <svindows/Rtl.h>
 
@@ -97,6 +98,11 @@ UINT64 MmGetCurrentAddressSpace(void)
 
 void MmSwitchAddressSpace(UINT64 directory_table_base)
 {
+    if (directory_table_base) {
+        __atomic_store_n(&KeGetCurrentProcessorBlock()->ActiveAddressSpace,
+                         directory_table_base & PTE_ADDR_MASK,
+                         __ATOMIC_RELEASE);
+    }
     if (directory_table_base &&
         directory_table_base != MmGetCurrentAddressSpace())
         __asm__ volatile("mov %0, %%cr3" : : "r"(directory_table_base)
@@ -106,21 +112,26 @@ void MmSwitchAddressSpace(UINT64 directory_table_base)
 BOOLEAN MmMapPageInAddressSpace(UINT64 root, UINT64 va, UINT64 pa,
                                 UINT64 flags)
 {
+    UINT64 lock = MmAcquirePageTableLock();
     UINT64 *pml4 = table(root);
     UINT64 pdpt_phys = next_table(&pml4[PML4_INDEX(va)]);
-    if (pdpt_phys == MM_INVALID_PHYS) return FALSE;
+    if (pdpt_phys == MM_INVALID_PHYS) goto failed;
     UINT64 *pdpt = table(pdpt_phys);
     UINT64 pd_phys = next_table(&pdpt[PDPT_INDEX(va)]);
-    if (pd_phys == MM_INVALID_PHYS) return FALSE;
+    if (pd_phys == MM_INVALID_PHYS) goto failed;
     UINT64 *pd = table(pd_phys);
-    if (pd[PD_INDEX(va)] & PTE_LARGE) return FALSE;
+    if (pd[PD_INDEX(va)] & PTE_LARGE) goto failed;
     UINT64 pt_phys = next_table(&pd[PD_INDEX(va)]);
-    if (pt_phys == MM_INVALID_PHYS) return FALSE;
+    if (pt_phys == MM_INVALID_PHYS) goto failed;
     table(pt_phys)[PT_INDEX(va)] = (pa & PTE_ADDR_MASK) |
                                    flags | PTE_PRESENT;
-    if (root == MmGetCurrentAddressSpace())
-        __asm__ volatile("invlpg (%0)" : : "r"(va) : "memory");
+    MmReleasePageTableLock(lock);
+    MmTlbShootdown(root, va, root == MmGetKernelAddressSpace());
     return TRUE;
+
+failed:
+    MmReleasePageTableLock(lock);
+    return FALSE;
 }
 
 UINT64 MmCreateAddressSpace(void)

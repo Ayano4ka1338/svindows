@@ -111,9 +111,9 @@ UINT64 LinuxClone(PKTHREAD parent, const UINT64 args[6])
     context->ClearChildTid = (flags & LINUX_CLONE_CHILD_CLEARTID) ?
                              child_tid : 0;
 
-    PKTHREAD child = KeCreateUserThreadForProcess(parent->Process,
+    PKTHREAD child = KeCreateUserThreadForProcessEx(parent->Process,
                     parent->Name, parent->UserRip, stack, 0, 0,
-                    parent->Priority);
+                    parent->Priority, 1);
     if (!child) {
         ExFreePool(context);
         return LinuxError(LINUX_ENOMEM);
@@ -128,6 +128,7 @@ UINT64 LinuxClone(PKTHREAD parent, const UINT64 args[6])
         *(UINT32 *)(ULONG_PTR)parent_tid = (UINT32)context->Tid;
     if (flags & LINUX_CLONE_CHILD_SETTID)
         *(UINT32 *)(ULONG_PTR)child_tid = (UINT32)context->Tid;
+    KeResumeThread(child, NULL);
     return context->Tid;
 }
 
@@ -144,9 +145,9 @@ NTSTATUS LinuxCreateForkThread(PKTHREAD parent, PKPROCESS process,
     context->Tid = process->ProcessId;
     KeInitializeEvent(&context->FutexEvent, FALSE, FALSE);
     UINT64 irq = KiIrqSave();
-    PKTHREAD child = KeCreateUserThreadForProcess(
+    PKTHREAD child = KeCreateUserThreadForProcessEx(
         process, process->Name, parent->UserRip, parent->UserRsp,
-        0, 0, process->BasePriority);
+        0, 0, process->BasePriority, 1);
     if (child) {
         child->LinuxThread = context;
         child->UserFsBase = parent->UserFsBase;
@@ -161,6 +162,7 @@ NTSTATUS LinuxCreateForkThread(PKTHREAD parent, PKPROCESS process,
         ExFreePool(context);
         return STATUS_NO_MEMORY;
     }
+    KeResumeThread(child, NULL);
     *out = child;
     return STATUS_SUCCESS;
 }

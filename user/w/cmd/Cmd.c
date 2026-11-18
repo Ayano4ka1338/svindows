@@ -398,6 +398,8 @@ static void tab_collect_matches(const char *token, int command_position)
     static const char *const commands[] = {
         "cd", "cls", "copy", "del", "dir", "echo", "exit",
         "fastfetch", "help", "history", "hostname", "md", "rd",
+        "basename", "dirname", "date", "sleep", "seq", "true", "false",
+        "wc", "head", "tail", "grep", "cut", "sort", "uniq", "chmod",
         "ren", "set", "start", "terminal", "type", "uname", "ver",
         "vol", "xterm"
     };

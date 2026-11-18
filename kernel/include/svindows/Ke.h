@@ -424,12 +424,16 @@ typedef struct _KPRCB {
     volatile ULONG ReschedulePending;
     volatile ULONG StartupState;   /* 0=offline, 1=booting, 2=online */
     volatile ULONG StartupRelease; /* AP may enter the shared scheduler */
+    volatile ULONG TlbShootdownPending;
     PKTHREAD IdleThread;
     UINT64 IdleTime, KernelTime, UserTime;
     ULONG ContextSwitches;
     UINT64 DpcTime;
     ULONG InterruptCount;
     UINT64 SystemCalls, PageFaults, OtherIoOperations;
+    /* Published before CR3 changes so remote TLB shootdowns can target the
+     * processors using an address space without chasing thread pointers. */
+    volatile UINT64 ActiveAddressSpace;
 } KPRCB, *PKPRCB;
 
 #define KE_MAXIMUM_PROCESSORS 64u
@@ -496,9 +500,7 @@ typedef struct _KPROCESS {
     UINT64 KernelTime, UserTime; /* includes threads which have exited */
     UINT64 PeakWorkingSetBytes;
     /* Number of CPUs currently executing non-idle threads in this address
-     * space. The initial SMP scheduler limits a process to one active CPU so
-     * user page-table updates remain locally TLB-coherent until shootdowns are
-     * implemented for every memory-management path. */
+     * space. Used to keep teardown from reclaiming a live process. */
     volatile ULONG ActiveProcessorCount;
 } KPROCESS, *PKPROCESS;
 
@@ -529,6 +531,10 @@ PKTHREAD  KeCreateUserThreadForProcess(PKPROCESS process, const char *name,
                                        UINT64 user_entry, UINT64 user_stack,
                                        UINT64 user_gs_base, UINT64 user_arg,
                                        LONG priority);
+PKTHREAD  KeCreateUserThreadForProcessEx(PKPROCESS process, const char *name,
+                            UINT64 user_entry, UINT64 user_stack,
+                            UINT64 user_gs_base, UINT64 user_arg,
+                            LONG priority, ULONG suspend_count);
 PKTHREAD  KeGetCurrentThread(void);
 PKPRCB    KeGetCurrentProcessorBlock(void);
 PKPRCB    KeGetProcessorBlock(ULONG processor_number);

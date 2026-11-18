@@ -20,6 +20,132 @@
 static UINT64 g_kernel_pml4_phys;
 extern char __kernel_phys_end[];
 
+typedef struct _MM_TLB_REQUEST {
+    volatile UINT32 Sequence;
+    volatile UINT32 Reserved;
+    UINT64 Root;
+    UINT64 Virt;
+    UINT32 SharedKernelMapping;
+    UINT32 Padding;
+    UINT64 Targets;
+    volatile UINT64 Acknowledged;
+} MM_TLB_REQUEST;
+
+static KSPIN_LOCK g_page_table_lock;
+static MM_TLB_REQUEST g_tlb_requests[KE_MAXIMUM_PROCESSORS];
+static UINT32 g_tlb_sequence[KE_MAXIMUM_PROCESSORS];
+static volatile UINT32 g_tlb_shootdown_lock;
+
+UINT64 MmAcquirePageTableLock(void)
+{
+    return KiAcquireRawSpinLock(&g_page_table_lock);
+}
+
+void MmReleasePageTableLock(UINT64 interrupt_state)
+{
+    KiReleaseRawSpinLock(&g_page_table_lock, interrupt_state);
+}
+
+void MmTlbShootdown(UINT64 root, UINT64 virt, BOOLEAN shared_kernel_mapping)
+{
+    PKPRCB current = KeGetCurrentProcessorBlock();
+    UINT32 source = current->ProcessorNumber;
+    MM_TLB_REQUEST *request = &g_tlb_requests[source];
+    UINT64 targets = 0;
+
+    /* Each CPU owns one request slot. Serialize publishers so a preempted
+     * shootdown cannot have its slot overwritten by another thread on the
+     * same CPU (or race another CPU's request/acknowledgements). Keep IF
+     * enabled while waiting for the lock; also poll requests in case this
+     * routine was entered with interrupts disabled. */
+    while (__atomic_test_and_set(&g_tlb_shootdown_lock, __ATOMIC_ACQUIRE)) {
+        MmHandleTlbShootdownIpi();
+        __asm__ volatile("pause" ::: "memory");
+    }
+
+    if (shared_kernel_mapping || MmGetCurrentAddressSpace() == root)
+        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+
+    UINT32 count = HalGetProcessorCount();
+    if (count > KE_MAXIMUM_PROCESSORS) count = KE_MAXIMUM_PROCESSORS;
+    for (UINT32 i = 0; i < count; ++i) {
+        if (i == source) continue;
+        PKPRCB cpu = KeGetProcessorBlock(i);
+        UINT64 active_root = cpu ? __atomic_load_n(&cpu->ActiveAddressSpace,
+                                                   __ATOMIC_ACQUIRE) : 0;
+        BOOLEAN uses_address_space = shared_kernel_mapping ||
+                                     active_root == (root & PTE_ADDR_MASK);
+        if (cpu && uses_address_space && cpu->StartupState == 2 &&
+            __atomic_load_n(&cpu->StartupRelease, __ATOMIC_ACQUIRE))
+            targets |= 1ULL << i;
+    }
+    if (!targets) {
+        __atomic_clear(&g_tlb_shootdown_lock, __ATOMIC_RELEASE);
+        return;
+    }
+
+    UINT32 sequence = ++g_tlb_sequence[source];
+    if (!sequence) sequence = ++g_tlb_sequence[source];
+    request->Root = root & PTE_ADDR_MASK;
+    request->Virt = virt;
+    request->SharedKernelMapping = shared_kernel_mapping;
+    request->Targets = targets;
+    __atomic_store_n(&request->Acknowledged, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&request->Sequence, sequence, __ATOMIC_RELEASE);
+
+    for (UINT32 i = 0; i < count; ++i) {
+        if (!(targets & (1ULL << i))) continue;
+        PKPRCB cpu = KeGetProcessorBlock(i);
+        __atomic_store_n(&cpu->TlbShootdownPending, 1, __ATOMIC_RELEASE);
+        if (!HalSendTlbShootdownNmi(cpu->ApicId))
+            KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                       "cannot deliver TLB shootdown NMI");
+    }
+
+    ULONG wait = 100000000u;
+    while ((__atomic_load_n(&request->Acknowledged, __ATOMIC_ACQUIRE) &
+            targets) != targets && wait--) {
+        /* A caller can enter here with IF clear while retiring a thread. If
+         * two CPUs shoot down concurrently, each may need the other's IPI
+         * acknowledged before it can return to an interruptible context. */
+        MmHandleTlbShootdownIpi();
+        __asm__ volatile("pause" ::: "memory");
+    }
+    UINT64 acknowledged = __atomic_load_n(&request->Acknowledged,
+                                           __ATOMIC_ACQUIRE);
+    if ((acknowledged & targets) != targets) {
+        KeLog("[mm] TLB shootdown timeout CPU %u seq %u ack=0x%lx target=0x%lx\n",
+              source, sequence, (unsigned long)acknowledged,
+              (unsigned long)targets);
+        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+                   "remote CPU failed to acknowledge TLB shootdown");
+    }
+    __atomic_clear(&g_tlb_shootdown_lock, __ATOMIC_RELEASE);
+}
+
+BOOLEAN MmHandleTlbShootdownIpi(void)
+{
+    UINT32 processor = KeGetCurrentProcessorBlock()->ProcessorNumber;
+    UINT64 bit = 1ULL << processor;
+    BOOLEAN handled = FALSE;
+    for (UINT32 i = 0; i < KE_MAXIMUM_PROCESSORS; ++i) {
+        MM_TLB_REQUEST *request = &g_tlb_requests[i];
+        UINT32 sequence = __atomic_load_n(&request->Sequence, __ATOMIC_ACQUIRE);
+        UINT64 targets = __atomic_load_n(&request->Targets, __ATOMIC_RELAXED);
+        UINT64 acknowledged = __atomic_load_n(&request->Acknowledged,
+                                               __ATOMIC_RELAXED);
+        if (!sequence || !(targets & bit)) continue;
+        handled = TRUE;
+        if (acknowledged & bit) continue;
+        UINT64 root = request->Root;
+        if (request->SharedKernelMapping ||
+            MmGetCurrentAddressSpace() == root)
+            __asm__ volatile("invlpg (%0)" : : "r"(request->Virt) : "memory");
+        __atomic_fetch_or(&request->Acknowledged, bit, __ATOMIC_RELEASE);
+    }
+    return handled;
+}
+
 UINT64 MmGetKernelAddressSpace(void)
 {
     return g_kernel_pml4_phys;
@@ -233,6 +359,7 @@ void MmInitializeVirtualMemory(const MM_MEMORY_MAP *map)
 
 BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags)
 {
+    UINT64 lock = MmAcquirePageTableLock();
     UINT64 *pml4 = table_at(MmGetCurrentAddressSpace());
     UINT64 pdpt_phys = next_table(&pml4[PML4_INDEX(virt)]);
     UINT64 *pdpt = table_at(pdpt_phys);
@@ -247,7 +374,8 @@ BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags)
     UINT64 *pt = table_at(pt_phys);
 
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | flags | PTE_PRESENT;
-    invlpg(virt);
+    MmReleasePageTableLock(lock);
+    MmTlbShootdown(MmGetKernelAddressSpace(), virt, TRUE);
     return TRUE;
 }
 
@@ -259,20 +387,26 @@ BOOLEAN MmUnmapPage(UINT64 virt)
 BOOLEAN MmUnmapPageInAddressSpace(UINT64 root, UINT64 virt)
 {
     if (!root) return FALSE;
+    UINT64 lock = MmAcquirePageTableLock();
     UINT64 *pml4 = table_at(root);
     if (!(pml4[PML4_INDEX(virt)] & PTE_PRESENT))
-        return FALSE;
+        goto not_mapped;
     UINT64 *pdpt = table_at(pml4[PML4_INDEX(virt)] & PTE_ADDR_MASK);
     if (!(pdpt[PDPT_INDEX(virt)] & PTE_PRESENT))
-        return FALSE;
+        goto not_mapped;
     UINT64 *pd = table_at(pdpt[PDPT_INDEX(virt)] & PTE_ADDR_MASK);
     if (!(pd[PD_INDEX(virt)] & PTE_PRESENT) || (pd[PD_INDEX(virt)] & PTE_LARGE))
-        return FALSE;
+        goto not_mapped;
     UINT64 *pt = table_at(pd[PD_INDEX(virt)] & PTE_ADDR_MASK);
 
     pt[PT_INDEX(virt)] = 0;
-    if (root == MmGetCurrentAddressSpace()) invlpg(virt);
+    MmReleasePageTableLock(lock);
+    MmTlbShootdown(root, virt, root == MmGetKernelAddressSpace());
     return TRUE;
+
+not_mapped:
+    MmReleasePageTableLock(lock);
+    return FALSE;
 }
 
 /* Release thread-owned mappings even when another process is current. */

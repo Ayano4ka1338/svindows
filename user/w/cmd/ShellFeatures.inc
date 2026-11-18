@@ -198,9 +198,39 @@ static int try_program(const char *base, char result[260])
     return 0;
 }
 
+static int svindowsbox_applet_name(const char *name)
+{
+    static const char *const applets[] = {
+        "basename", "dirname", "date", "sleep", "seq", "true", "false",
+        "wc", "head", "tail", "grep", "cut", "sort", "uniq", "chmod"
+    };
+    for (const char *p = name; *p; ++p)
+        if (*p == '\\' || *p == '/' || *p == ':') return 0;
+    unsigned name_length = slen(name);
+    for (unsigned i = 0; i < sizeof(applets) / sizeof(applets[0]); ++i) {
+        unsigned applet_length = slen(applets[i]);
+        if (name_length == applet_length && same(name, applets[i])) return 1;
+        if (name_length == applet_length + 4 && ends_ci(name, ".exe")) {
+            unsigned j = 0;
+            while (j < applet_length && lower(name[j]) == lower(applets[i][j])) ++j;
+            if (j == applet_length) return 1;
+        }
+    }
+    return 0;
+}
+
 static int resolve_program(const char *name, char result[260])
 {
     if (try_program(name, result)) return 1;
+    /* These applets share one image, but the command line and argv[0] keep the
+       spelling the user entered so shell scripts need no svindowsbox prefix. */
+    if (svindowsbox_applet_name(name)) {
+        const char *box = "C:\\WINDOWS\\SYSTEM32\\SVINDOWSBOX.EXE";
+        unsigned i = 0;
+        while (box[i] && i + 1 < 260) { result[i] = box[i]; ++i; }
+        result[i] = 0;
+        return 1;
+    }
     if (name[0] == '\\' || name[0] == '/' || name[1] == ':' ||
         !*env_get("PATH")) return 0;
     const char *path = env_get("PATH");

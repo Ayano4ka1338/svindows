@@ -37,6 +37,7 @@ __declspec(dllimport) BOOL MoveFileA(const char *, const char *);
 __declspec(dllimport) BOOL CreateDirectoryA(const char *, LPVOID);
 __declspec(dllimport) BOOL RemoveDirectoryA(const char *);
 __declspec(dllimport) DWORD GetFileAttributesA(const char *);
+__declspec(dllimport) BOOL SetFileAttributesW(const WCHAR *, DWORD);
 __declspec(dllimport) DWORD GetCurrentDirectoryW(DWORD, WCHAR *);
 
 typedef struct _SYSTEM_INFO_K {
@@ -476,11 +477,21 @@ static int run_help(void)
     return 0;
 }
 
+#include "SvindowsBox.inc"
+
 int main(int argc, char **argv)
 {
     g_in = GetStdHandle(STD_INPUT_HANDLE);
     g_out = GetStdHandle(STD_OUTPUT_HANDLE);
     const char *command = command_name(argc ? argv[0] : "");
+    if (svbox_is(command, "svindowsbox")) {
+        if (argc < 2) return svbox_list();
+        ++argv;
+        --argc;
+        command = command_name(argv[0]);
+    }
+    int box_status;
+    if (svbox_applet(command, argc, argv, &box_status)) return box_status;
     if (command_is(command, "dir")) return run_dir(argc, argv);
     if (command_is(command, "type")) return run_type(argc, argv);
     if (command_is(command, "copy")) return run_copy(argc, argv);

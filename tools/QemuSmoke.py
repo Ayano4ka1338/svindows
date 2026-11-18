@@ -23,6 +23,8 @@ def main():
                         help="number of emulated CPUs (use 4 to exercise SMP)")
     parser.add_argument("--boot-only", action="store_true",
                         help="stop after the requested CPU count reaches the shell prompt")
+    parser.add_argument("--smp-thread-probe", action="store_true",
+                        help="run the four-sibling-thread multicore barrier probe")
     parser.add_argument("--skip-network", action="store_true",
                         help="skip the DHCP/DNS/TCP/HTTP/HTTPS check when offline")
     parser.add_argument("--apk-gcc-probe", action="store_true",
@@ -96,6 +98,20 @@ def main():
                         process.wait(timeout=5)
                         process = None
                         print(f"PASS QEMU shell boot ({args.cpus} CPUs)", flush=True)
+                        continue
+                    if args.smp_thread_probe:
+                        wait_for(r"\[boot\] background network initialization complete",
+                                 0, timeout=args.timeout)
+                        start = len(ANSI.sub("", raw.decode("utf-8", errors="replace")))
+                        process.stdin.write(
+                            b"C:\\TESTS\\SMPTHREADSMOKE.EXE\n"
+                            b"echo SMP_THREAD_STATUS_%ERRORLEVEL%\n")
+                        process.stdin.flush()
+                        wait_for(r"[\r\n]SMP_THREAD_STATUS_0(?=[\r\n\[])", start)
+                        print("PASS four sibling threads ran concurrently", flush=True)
+                        process.terminate()
+                        process.wait(timeout=5)
+                        process = None
                         continue
                     # Exercise the real emulated PS/2 controller and ISR/DPC
                     # path, not only the serial input used by other commands.
@@ -198,6 +214,7 @@ def main():
                         ("copy smoke.txt smoke2.txt", r"(?i)copied"),
                         ("del smoke.txt", None),
                         ("type smoke2.txt", r"SVINDOWS_SMOKE_DATA"),
+                        (r"C:\TESTS\SMPTHREADSMOKE.EXE", None),
                         ("ver | hostname", r"(?i)SVINDOWS"),
                         (r"C:\TESTS\COMSMOKE.COM", r"DOS-COM PASS"),
                         (r"C:\TESTS\MEMSMOKE.COM", r"DOS-MEM PASS"),

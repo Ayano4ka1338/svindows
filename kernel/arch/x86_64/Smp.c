@@ -38,10 +38,6 @@ static NORETURN void smp_halt_forever(void)
 
 NORETURN void KiApplicationProcessorEntry(UINT32 processor_number)
 {
-    /* The SIPI tables map the kernel's higher-half window. Switch to the
-     * runtime page tables before touching any post-MMIO mapping or allocator. */
-    MmSwitchAddressSpace(MmGetKernelAddressSpace());
-
     PKPRCB processor = KeGetProcessorBlock(processor_number);
     if (!processor || processor_number == 0 ||
         processor_number >= HalGetProcessorCount())
@@ -50,6 +46,9 @@ NORETURN void KiApplicationProcessorEntry(UINT32 processor_number)
     KeInitializeGdtForProcessor(processor_number);
     KeLoadIdt();
     KiInitializeSystemCallsForProcessor(processor_number);
+    /* The SIPI tables map the kernel's higher-half window. Establish the
+     * per-CPU GS block first, then publish and load the runtime CR3. */
+    MmSwitchAddressSpace(MmGetKernelAddressSpace());
     GfxInitializeProcessor();
     if (processor->IdleThread) {
         processor->IdleThread->State = ThreadStateRunning;

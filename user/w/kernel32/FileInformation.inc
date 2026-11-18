@@ -36,10 +36,24 @@ __declspec(dllexport) BOOL SetFileInformationByHandle(HANDLE file, UINT kind,
 }
 __declspec(dllexport) BOOL SetFileAttributesW(const WCHAR *path, DWORD attributes)
 {
-    (void)attributes;
-    if (GetFileAttributesW(path)==(DWORD)-1) return 0;
-    SetLastError(50); /* FAT attribute mutation is not exposed by native I/O. */
-    return 0;
+    if (!path) { SetLastError(87); return 0; }
+    DWORD existing = GetFileAttributesW(path);
+    if (existing == (DWORD)-1) return 0;
+    HANDLE file = CreateFileW(path, 0x00010000u, 7, 0, 3,
+                              (existing & 0x10u) ? 0x02000000u : 0, 0);
+    if (file == NT_INVALID_HANDLE) return 0;
+    BYTE basic[40];
+    memset(basic, 0, sizeof(basic));
+    *(DWORD *)(basic + 32) = attributes;
+    IO_STATUS_BLOCK io = {0};
+    NTSTATUS status = NtSetInformationFile(file, &io, basic, sizeof(basic), 4);
+    CloseHandle(file);
+    if (!NT_SUCCESS(status)) {
+        SetLastError(ntstatus_to_win32(status));
+        return 0;
+    }
+    SetLastError(0);
+    return 1;
 }
 __declspec(dllexport) BOOL SetFileTime(HANDLE file, const FILETIME *created,
     const FILETIME *accessed, const FILETIME *written)

@@ -1087,9 +1087,9 @@ UINT64 NtCreateThreadEx(UINT64 *a)
 
     /* Interrupts are masked during a syscall, so the new thread cannot run
      * before we finish wiring it up. */
-    PKTHREAD kt = KeCreateUserThreadForProcess(
+    PKTHREAD kt = KeCreateUserThreadForProcessEx(
         process, "userthread", entry, stack_top, teb_va, arg,
-        process->BasePriority);
+        process->BasePriority, (create_flags & 1u) ? 1u : 0u);
     if (!kt) {
         ObCloseHandle(h);
         ObDereferenceObject(obj);
@@ -1108,9 +1108,6 @@ UINT64 NtCreateThreadEx(UINT64 *a)
      * signal a freed (and by then zeroed) dispatcher header. */
     ObReferenceObject(obj);
     kt->TerminationObject = &to->Header;
-
-    if (create_flags & 1u)
-        KeSuspendThread(kt, NULL);
 
     ObDereferenceObject(obj); /* the handle keeps it alive */
 

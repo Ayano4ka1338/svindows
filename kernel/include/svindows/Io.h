@@ -121,6 +121,7 @@ NTSTATUS FatCreateDirectory(const char *name);
 NTSTATUS FatRemoveDirectory(const char *name);
 NTSTATUS FatQueryPath(const char *name, FAT_FIND_DATA *out_info);
 NTSTATUS FatSetFileDateTime(const char *name, UINT16 date, UINT16 time);
+NTSTATUS FatSetFileAttributes(const char *name, UINT8 attributes);
 NTSTATUS FatQueryDiskSpace(UINT32 *sectors_per_cluster,
                            UINT32 *free_clusters, UINT32 *bytes_per_sector,
                            UINT32 *total_clusters);

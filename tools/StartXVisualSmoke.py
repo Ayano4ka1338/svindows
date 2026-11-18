@@ -87,7 +87,10 @@ def main():
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--kvm", action="store_true")
     parser.add_argument("--keyboard-probe", action="store_true")
+    parser.add_argument("--cpus", type=int, default=1)
     args = parser.parse_args()
+    if args.cpus < 1 or args.cpus > 64:
+        parser.error("--cpus must be between 1 and 64")
     CHECKS.mkdir(parents=True, exist_ok=True)
     screenshot = CHECKS / "startx-visual.ppm"
     transcript = CHECKS / "startx-visual.log"
@@ -101,6 +104,7 @@ def main():
         command += [
             "-m", "1024M", "-no-reboot", "-no-shutdown", "-boot", "d",
             "-cdrom", str(ROOT / "build/svindows.iso"),
+            "-smp", str(args.cpus),
             "-display", "none", "-monitor", "none", "-serial", "stdio",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
         ]
@@ -129,7 +133,11 @@ def main():
                             output.extend(chunk)
                     raise TimeoutError(f"waiting for {pattern}")
 
-                read_until(r"C:\\>", args.timeout)
+                # Kernel and network logs can interleave with the console
+                # prompt on SMP, so wait for the stable shell banner instead
+                # of requiring an uninterrupted C:\\> serial sequence.
+                read_until(r"list of commands\.", args.timeout)
+                time.sleep(0.5)
                 process.stdin.write(b"startx.elf\n")
                 process.stdin.flush()
                 read_until(r"loaded 'C:\\usr\\bin\\xterm'", args.timeout)

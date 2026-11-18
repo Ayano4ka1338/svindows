@@ -51,6 +51,14 @@ static UINT64 read_cr2(void)
     return v;
 }
 
+static UINT64 read_gs_base(void)
+{
+    UINT32 lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi)
+                     : "c"(0xC0000101u)); /* IA32_GS_BASE */
+    return ((UINT64)hi << 32) | lo;
+}
+
 static NTSTATUS exception_status(UINT64 vector)
 {
     switch (vector) {
@@ -341,6 +349,31 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
     /* CR2 is volatile across page faults. Snapshot it before any diagnostic
        helper or exception dispatch can touch pageable/user memory. */
     UINT64 fault_address = frame && frame->vector == 14 ? read_cr2() : 0;
+    if (frame->vector == 2) {
+        /* An NMI may interrupt SYSCALL/SYSRET after CPL changes but before
+         * their SWAPGS. In that window CS is ring 0 while GS still names the
+         * user TEB, so the common entry stub cannot infer GS state from CS. */
+        BOOLEAN swapped_for_transition = !(read_gs_base() >> 63);
+        if (swapped_for_transition)
+            __asm__ volatile("swapgs" ::: "memory");
+        PKPRCB processor = KeGetCurrentProcessorBlock();
+        BOOLEAN pending = processor &&
+            __atomic_exchange_n(&processor->TlbShootdownPending,
+                                0, __ATOMIC_ACQ_REL);
+        BOOLEAN handled = processor ? MmHandleTlbShootdownIpi() : FALSE;
+        if (pending || handled) {
+            if (swapped_for_transition)
+                __asm__ volatile("swapgs" ::: "memory");
+            return; /* NMI delivery does not set an APIC in-service bit. */
+        }
+        if (swapped_for_transition)
+            __asm__ volatile("swapgs" ::: "memory");
+    }
+    if (frame->vector == HAL_TLB_SHOOTDOWN_VECTOR) {
+        MmHandleTlbShootdownIpi();
+        HalLocalApicEoi();
+        return;
+    }
     if(frame&&frame->vector==14)
         __atomic_add_fetch(&KeGetCurrentProcessorBlock()->PageFaults,1,__ATOMIC_RELAXED);
     /* F1 is a non-periodic wake/termination IPI. F2 is the BSP clock's

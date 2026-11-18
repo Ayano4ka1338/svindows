@@ -130,6 +130,7 @@ void HalConsoleWrite(const char *s);
 #define HAL_SMP_WAKE_VECTOR 0xF1
 #define HAL_SMP_TICK_VECTOR 0xF2
 #define HAL_LOCAL_TIMER_VECTOR 0xF3
+#define HAL_TLB_SHOOTDOWN_VECTOR 0xF0
 
 typedef void (*HAL_IRQ_HANDLER)(void);
 
@@ -161,6 +162,7 @@ BOOLEAN HalInitializeLocalApicTimer(UINT32 hz);
 void HalStopLocalApicTimer(void);
 void HalLocalApicEoi(void);
 BOOLEAN HalSendIpi(UINT32 apic_id, UINT8 vector);
+BOOLEAN HalSendTlbShootdownNmi(UINT32 apic_id);
 BOOLEAN HalSendInitIpi(UINT32 apic_id, BOOLEAN assert_init);
 BOOLEAN HalSendStartupIpi(UINT32 apic_id, UINT8 startup_page);
 
