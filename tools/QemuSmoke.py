@@ -29,6 +29,8 @@ def main():
                         help="skip the DHCP/DNS/TCP/HTTP/HTTPS check when offline")
     parser.add_argument("--apk-gcc-probe", action="store_true",
                         help="install Alpine gcc in the guest and run it")
+    parser.add_argument("--apk-busybox-probe", action="store_true",
+                        help="install Alpine BusyBox in the guest and run an applet")
     parser.add_argument("--explorer-probe", action="store_true",
                         help="launch the bundled Windows 7 Explorer executable")
     parser.add_argument("--doom-probe", action="store_true",
@@ -193,10 +195,28 @@ def main():
                     commands = [
                         *([("C:\\WINDOWS7\\EXPLORER.EXE", None, "nonzero")]
                           if args.explorer_probe else []),
-                        *([("apk update", r"OK:.*packages available"),
-                           ("apk add gcc", r"Installing gcc"),
-                           ("gcc --version", r"gcc \(Alpine")]
+                        *([("apk update", r"[0-9]+ distinct packages available", "any"),
+                           ("apk add gcc nano musl-dev", r"Installing gcc"),
+                           ("gcc --version", r"gcc \(Alpine"),
+                           ('sh -c "printf \'int main(void){return 0;}\' > /svindows-apk-probe.c"',
+                            None),
+                           ("gcc /svindows-apk-probe.c -o /svindows-apk-probe",
+                            None),
+                           ("/svindows-apk-probe", None),
+                           ("nano --version", r"GNU nano"),
+                           ("nano /svindows-apk-probe.c", r"GNU nano")]
                           if args.apk_gcc_probe else []),
+                        *([("apk update", r"[0-9]+ distinct packages available", "any"),
+                           ("apk add busybox", r"Installing busybox"),
+                           ("busybox --install -s", None, "any"),
+                           ('sh -c "exec /bin/busybox --install -s"', None, "any"),
+                           ('sh -c "/bin/busybox --install -s"', None, "any"),
+                           ("busybox echo SVINDOWS_BUSYBOX_OK",
+                            r"SVINDOWS_BUSYBOX_OK"),
+                           ("busybox cat /etc/os-release", r"ID=svindows"),
+                           ("apk add tree", r"Installing tree"),
+                           ('sh -c "tree -L 1 /etc"', r"(?i)os-release")]
+                          if args.apk_busybox_probe else []),
                         *(([] if args.skip_network else [
                             ("ping -c 1 10.0.2.2", r"1 packets transmitted, 1 received"),
                             ("ping -c 1 example.com", r"1 packets transmitted, 1 received"),
@@ -227,7 +247,9 @@ def main():
                         ("rmdir smoketest", None),
                     ]
                     if args.apk_gcc_probe:
-                        commands = commands[:3]
+                        commands = commands[:8]
+                    elif args.apk_busybox_probe:
+                        commands = commands[:10]
                     if args.explorer_probe:
                         commands = commands[:1]
                     for index, check in enumerate(commands):
@@ -241,6 +263,46 @@ def main():
                         status_marker = f"SMOKE_STATUS_{index}_"
                         process.stdin.write((command + "\n").encode())
                         process.stdin.flush()
+                        if command == "nano /svindows-apk-probe.c":
+                            wait_for(r"GNU nano", start, timeout=30)
+                            exit_start = len(ANSI.sub(
+                                "", raw.decode("utf-8", errors="replace")))
+                            with socket.socket(socket.AF_UNIX,
+                                               socket.SOCK_STREAM) as nano_qmp:
+                                nano_qmp.settimeout(5)
+                                nano_qmp.connect(str(qmp_path))
+                                with nano_qmp.makefile("rb") as nano_replies:
+                                    if "QMP" not in json.loads(
+                                            nano_replies.readline()):
+                                        raise RuntimeError(
+                                            "missing QMP greeting for nano")
+
+                                    def nano_qmp_execute(qmp_command,
+                                                         arguments=None):
+                                        request = {"execute": qmp_command}
+                                        if arguments is not None:
+                                            request["arguments"] = arguments
+                                        nano_qmp.sendall(
+                                            (json.dumps(request) + "\n").encode())
+                                        while True:
+                                            line = nano_replies.readline()
+                                            if not line:
+                                                raise RuntimeError(
+                                                    "QMP closed during nano")
+                                            reply = json.loads(line)
+                                            if "error" in reply:
+                                                raise RuntimeError(
+                                                    f"QMP error: {reply['error']}")
+                                            if "return" in reply:
+                                                return reply["return"]
+
+                                    nano_qmp_execute("qmp_capabilities")
+                                    nano_qmp_execute("send-key", {
+                                        "keys": [
+                                            {"type": "qcode", "data": "ctrl"},
+                                            {"type": "qcode", "data": "x"}],
+                                        "hold-time": 100})
+                            wait_for(r"C:\\>", exit_start, timeout=30)
                         # A batch can launch several DOS children. If we queue
                         # the synchronization commands immediately, its first
                         # child may consume those keystrokes as stdin. Wait for
@@ -260,12 +322,13 @@ def main():
                         if expected and not re.search(expected, output):
                             raise RuntimeError(f"unexpected output for {command!r}")
                         status_value = (r"[1-9][0-9]*" if expected_status == "nonzero"
+                                        else r"[0-9]+" if expected_status == "any"
                                         else "0")
                         if not re.search(r"[\r\n]" + status_marker +
                                          status_value + r"(?=[\r\n\[])", output):
                             raise RuntimeError(f"unexpected errorlevel for {command!r}")
                         if expected_status == 0 and re.search(
-                                r"(?i)not recognized|cannot find|access is denied|failed",
+                                r"(?i)not recognized|cannot find|access is denied|failed|ERROR:|cannot fork|function not implemented|I/O error|unhandled exception",
                                 output):
                             raise RuntimeError(f"command failed: {command!r}")
                         print(f"PASS {command}", flush=True)

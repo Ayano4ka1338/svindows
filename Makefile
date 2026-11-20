@@ -6,7 +6,7 @@ HOSTCC  ?= clang
 
 CONFIG ?= release
 FAT_FAULT_AFTER ?= -1
-INITRD_SIZE_MB ?= 320
+INITRD_SIZE_MB ?= 512
 # Use the multiprocessor scheduler by default. `make SMP=0` keeps a UP build
 # available for firmware and hardware where AP startup is unavailable.
 SMP ?= 1

@@ -121,6 +121,10 @@ UINT64 LinuxSyncFile(PKPROCESS process, UINT64 fd)
         entry->Kind == LINUX_FD_TTY || entry->Kind == LINUX_FD_EVENT ||
         entry->Kind == LINUX_FD_FRAMEBUFFER)
         return LinuxError(LINUX_EINVAL);
+    if (entry->Kind == LINUX_FD_REGULAR) {
+        NTSTATUS status = IoFlushFileKernel(entry->Handle);
+        if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
+    }
     return NT_SUCCESS(FatFlush()) ? 0 : LinuxError(LINUX_EIO);
 }
 
@@ -167,6 +171,7 @@ UINT64 LinuxOpenAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
     char dos_path[260];
     UINT64 error = LinuxCapturePathAt(process, directory_fd, path, dos_path);
     if (error) return error;
+    LinuxResolvePath(dos_path);
     UINT8 proc = LinuxProcPathKind(dos_path);
     if (proc == LINUX_PROC_EXE) {
         memcpy(dos_path, process->ImagePath, sizeof(dos_path));
@@ -278,8 +283,14 @@ UINT64 LinuxClose(PKPROCESS process, UINT64 fd)
     if (kind == LINUX_FD_EVENT) return 0;
     if (kind == LINUX_FD_PROC) return 0;
     if (!owned) return 0; /* inherited standard handles remain process-owned */
+    UINT64 flush_error = 0;
+    if (kind == LINUX_FD_REGULAR) {
+        NTSTATUS flush_status = IoFlushFileKernel(handle);
+        if (!NT_SUCCESS(flush_status)) flush_error = linux_file_error(flush_status);
+    }
     NTSTATUS status = ObCloseHandle(handle);
-    return NT_SUCCESS(status) ? 0 : linux_file_error(status);
+    return flush_error ? flush_error :
+           NT_SUCCESS(status) ? 0 : linux_file_error(status);
 }
 
 UINT64 LinuxSeek(PKPROCESS process, UINT64 fd, INT64 offset, UINT64 whence)

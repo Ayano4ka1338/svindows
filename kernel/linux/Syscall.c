@@ -141,7 +141,9 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
     case 56:  /* clone: shared-address-space threads only */
         return LinuxClone(thread, args);
     case 57:  /* fork */
-        return LinuxFork(thread);
+        return LinuxFork(thread, 0);
+    case 58:  /* vfork; use the safe copied-address-space fork implementation */
+        return LinuxFork(thread, 0);
     case 59:  /* execve */
         return LinuxExecve(thread, args[0], args[1], args[2]);
     case 61:  /* wait4 */
@@ -166,6 +168,8 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
         return LinuxGetcwd(process, args[0], args[1]);
     case 80: /* chdir */
         return LinuxChdir(process, args[0]);
+    case 81: /* fchdir */
+        return LinuxFchdir(process, args[0]);
     case 83: /* mkdir */
         return LinuxMkdir(process, args[0], args[1]);
     case 258: /* mkdirat */

@@ -158,7 +158,8 @@ NTSTATUS PsCreateInitialProcess(const char *application,
  * handles. */
 NTSTATUS PsSwitchThreadToWindows(PKTHREAD thread, PKPROCESS process,
                                  const char *image_path, const char *command);
-NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
+NTSTATUS PsForkLinuxProcess(PKTHREAD parent, UINT64 child_stack,
+                            HANDLE *handle_out,
                             ULONG *pid_out);
 BOOLEAN PsIsProcessObjectType(struct _OBJECT_TYPE *type);
 UINT64 NtOpenProcess(UINT64 *args);

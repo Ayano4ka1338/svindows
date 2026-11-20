@@ -11,6 +11,7 @@
 #define LINUX_USER_ADDRESS_LIMIT 0x0000800000000000ULL
 
 #define LINUX_CLONE_VM 0x00000100u
+#define LINUX_CLONE_VFORK 0x00004000u
 #define LINUX_CLONE_FS 0x00000200u
 #define LINUX_CLONE_FILES 0x00000400u
 #define LINUX_CLONE_SIGHAND 0x00000800u
@@ -88,6 +89,21 @@ UINT64 LinuxClone(PKTHREAD parent, const UINT64 args[6])
 {
     UINT64 flags = args[0], stack = args[1];
     UINT64 parent_tid = args[2], child_tid = args[3], tls = args[4];
+    /* musl posix_spawn uses clone(CLONE_VM | CLONE_VFORK | SIGCHLD) to
+     * start the child that execs the requested program. A copied address
+     * space is safe here and preserves the parent's memory while matching
+     * the parent/child and descriptor semantics the spawn path needs. */
+    const UINT64 process_flags = LINUX_CLONE_VM | LINUX_CLONE_VFORK | 0xffu;
+    if ((flags & (LINUX_CLONE_VM | LINUX_CLONE_VFORK)) ==
+            (LINUX_CLONE_VM | LINUX_CLONE_VFORK) &&
+        !(flags & LINUX_CLONE_THREAD) &&
+        !(flags & ~(process_flags | LINUX_CLONE_FS | LINUX_CLONE_FILES |
+                    LINUX_CLONE_SIGHAND | LINUX_CLONE_SYSVSEM))) {
+        if (stack && (stack >= LINUX_USER_ADDRESS_LIMIT ||
+                      !MmProbeForWrite(stack - 8, 8)))
+            return LinuxError(LINUX_EINVAL);
+        return LinuxFork(parent, stack);
+    }
     if ((flags & LINUX_CLONE_REQUIRED) != LINUX_CLONE_REQUIRED ||
         (flags & ~(UINT64)LINUX_CLONE_ALLOWED) ||
         !stack || stack >= LINUX_USER_ADDRESS_LIMIT ||
@@ -134,7 +150,7 @@ UINT64 LinuxClone(PKTHREAD parent, const UINT64 args[6])
 
 NTSTATUS LinuxCreateForkThread(PKTHREAD parent, PKPROCESS process,
                                PDISPATCHER_HEADER termination,
-                               PKTHREAD *out)
+                               UINT64 child_stack, PKTHREAD *out)
 {
     LINUX_THREAD_CONTEXT *context = ExAllocatePoolWithTag(
         NonPagedPool, sizeof(*context), 'rhtL');
@@ -146,7 +162,8 @@ NTSTATUS LinuxCreateForkThread(PKTHREAD parent, PKPROCESS process,
     KeInitializeEvent(&context->FutexEvent, FALSE, FALSE);
     UINT64 irq = KiIrqSave();
     PKTHREAD child = KeCreateUserThreadForProcessEx(
-        process, process->Name, parent->UserRip, parent->UserRsp,
+        process, process->Name, parent->UserRip,
+        child_stack ? child_stack : parent->UserRsp,
         0, 0, process->BasePriority, 1);
     if (child) {
         child->LinuxThread = context;

@@ -251,6 +251,7 @@ UINT64 LinuxStatPath(PKPROCESS process, UINT64 dirfd, UINT64 path,
     char dos_path[260];
     UINT64 error = LinuxCapturePathAt(process, dirfd, path, dos_path);
     if (error) return error;
+    if (!(flags & LINUX_AT_SYMLINK_NOFOLLOW)) LinuxResolvePath(dos_path);
     UINT8 proc = LinuxProcPathKind(dos_path);
     if (proc != LINUX_PROC_NONE)
         return linux_proc_stat(process, proc, destination,

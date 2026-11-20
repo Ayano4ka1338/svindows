@@ -1511,7 +1511,13 @@ NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size,
         out_info->WriteTime = entry.WriteTime;
         from_83(entry.Name, out_info->ShortName);
     }
-    KeLog("[io]   loaded '%s' (%lu bytes) from disk\n", name, (unsigned long)size);
+    /* Package managers create and reopen thousands of small temporary files.
+     * Logging each one serializes otherwise useful work behind the slow debug
+     * console. Keep the diagnostic for large reads, which are the useful
+     * signal when loading executables and repository indexes. */
+    if (size >= 1024u * 1024u)
+        KeLog("[io]   loaded '%s' (%lu bytes) from disk\n", name,
+              (unsigned long)size);
     return STATUS_SUCCESS;
 }
 

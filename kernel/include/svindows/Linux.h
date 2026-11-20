@@ -32,7 +32,7 @@ NTSTATUS LinuxCloneProcessContext(PKPROCESS parent, PKPROCESS child);
 BOOLEAN LinuxSharedPage(UINT64 address, PVOID context);
 NTSTATUS LinuxCreateForkThread(PKTHREAD parent, PKPROCESS process,
                                PDISPATCHER_HEADER termination,
-                               PKTHREAD *out);
+                               UINT64 child_stack, PKTHREAD *out);
 void LinuxDestroyThread(PKTHREAD thread);
 void LinuxThreadExited(PKTHREAD thread);
 BOOLEAN LinuxIsCloneThread(PKTHREAD thread);

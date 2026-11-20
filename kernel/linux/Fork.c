@@ -78,16 +78,20 @@ NTSTATUS LinuxCloneProcessContext(PKPROCESS parent, PKPROCESS child)
     return STATUS_SUCCESS;
 }
 
-UINT64 LinuxFork(PKTHREAD parent)
+UINT64 LinuxFork(PKTHREAD parent, UINT64 child_stack)
 {
     PKPROCESS process = parent->Process;
     UINT32 slot = 0;
     while (slot < 32 && process->LinuxContext->Children[slot].ProcessHandle)
         slot++;
-    if (slot == 32) return LinuxError(LINUX_EAGAIN);
+    if (slot == 32) {
+        KeLog("[lx]   fork child table full for pid %u\n",
+              process->ProcessId);
+        return LinuxError(LINUX_EAGAIN);
+    }
     HANDLE handle = NULL;
     ULONG pid = 0;
-    NTSTATUS status = PsForkLinuxProcess(parent, &handle, &pid);
+    NTSTATUS status = PsForkLinuxProcess(parent, child_stack, &handle, &pid);
     if (!NT_SUCCESS(status)) {
         KeLog("[lx]   fork failed for pid %u: status 0x%08x\n",
               process->ProcessId, (unsigned)status);

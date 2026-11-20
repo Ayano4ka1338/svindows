@@ -55,6 +55,7 @@ typedef struct _IO_VNODE {
     UINT16    FatWriteDate;
     UINT16    FatWriteTime;
     BOOLEAN   DeletePending;
+    BOOLEAN   Dirty;
     char      Name[260];
 } IO_VNODE;
 
@@ -272,9 +273,8 @@ NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
                 memcpy(vnode->Data + file->Position, buffer, length);
                 file->Position = end;
                 if (end > vnode->Size) vnode->Size = end;
-                status = FatStoreFile(vnode->Name, vnode->Data,
-                                      vnode->Size, FALSE);
-                if (NT_SUCCESS(status)) n = length;
+                vnode->Dirty = TRUE;
+                n = length;
             }
         }
     } else status = STATUS_NOT_SUPPORTED;
@@ -361,6 +361,7 @@ static IO_VNODE *IopAcquireVnode(const char *name, UINT8 *data, SIZE_T size,
             vnode->Attributes = info ? info->Attributes : 0x20;
             vnode->FatWriteDate = info ? info->WriteDate : 0;
             vnode->FatWriteTime = info ? info->WriteTime : 0;
+            vnode->Dirty = FALSE;
         } else if (data) {
             ExFreePool(data);
         }
@@ -403,6 +404,15 @@ static void IopReleaseVnode(IO_VNODE *vnode)
     }
     RemoveEntryList(&vnode->Entry);
     KiIrqRestore(flags);
+    if (vnode->Dirty) {
+        NTSTATUS status = FatStoreFile(vnode->Name, vnode->Data,
+                                       vnode->Size, FALSE);
+        if (!NT_SUCCESS(status))
+            KeLog("[io]   close-time file commit failed for '%s': 0x%08x\n",
+                  vnode->Name, (unsigned)status);
+        else
+            vnode->Dirty = FALSE;
+    }
     if (vnode->DeletePending) {
         NTSTATUS status = (vnode->Attributes & 0x10)
                         ? FatRemoveDirectory(vnode->Name)
@@ -413,6 +423,26 @@ static void IopReleaseVnode(IO_VNODE *vnode)
     }
     if (vnode->Data) ExFreePool(vnode->Data);
     ExFreePool(vnode);
+}
+
+NTSTATUS IoFlushFileKernel(HANDLE handle)
+{
+    POBJECT object;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, g_file_type,
+                                                 &object);
+    if (!NT_SUCCESS(status)) return status;
+    FILE_OBJECT *file = (FILE_OBJECT *)object;
+    IO_VNODE *vnode = file->Vnode;
+    if (file->Kind != FileKindDisk || !vnode) {
+        ObDereferenceObject(object);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (vnode->Dirty) {
+        status = FatStoreFile(vnode->Name, vnode->Data, vnode->Size, FALSE);
+        if (NT_SUCCESS(status)) vnode->Dirty = FALSE;
+    }
+    ObDereferenceObject(object);
+    return status;
 }
 
 /* Kernel personalities use the same vnodes and handle table as NtCreateFile.
@@ -924,7 +954,7 @@ UINT64 NtCreateFile(UINT64 *a)
                 }
                 SIZE_T opened_size = vnode->Size;
                 ObDereferenceObject(obj);
-                if (NT_SUCCESS(status))
+                if (NT_SUCCESS(status) && opened_size >= 1024u * 1024u)
                     KeLog("[io]   NtCreateFile('%s') -> handle %p (%lu bytes)\n",
                           fname, h, (unsigned long)opened_size);
             }
@@ -1664,9 +1694,17 @@ UINT64 NtFlushBuffersFile(UINT64 *a)
                                                  &object);
     if (NT_SUCCESS(status)) {
         FILE_OBJECT *file = (FILE_OBJECT *)object;
-        status = (file->Kind == FileKindDisk ||
-                  file->Kind == FileKindDirectory)
-               ? FatFlush() : STATUS_INVALID_HANDLE;
+        if (file->Kind == FileKindDisk && file->Vnode && file->Vnode->Dirty)
+            status = FatStoreFile(file->Vnode->Name, file->Vnode->Data,
+                                  file->Vnode->Size, FALSE);
+        else
+            status = file->Kind == FileKindDisk ||
+                     file->Kind == FileKindDirectory
+                   ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+        if (NT_SUCCESS(status) && file->Kind == FileKindDisk && file->Vnode)
+            file->Vnode->Dirty = FALSE;
+        if (NT_SUCCESS(status) && file->Kind == FileKindDisk)
+            status = FatFlush();
         ObDereferenceObject(object);
     }
     iosb->Status = status;

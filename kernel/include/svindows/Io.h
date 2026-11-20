@@ -191,6 +191,7 @@ NTSTATUS IoHandleInputAvailableKernel(HANDLE handle, BOOLEAN *available);
 NTSTATUS IoFlushInputHandleKernel(HANDLE handle);
 NTSTATUS IoWriteHandleKernel(HANDLE handle, const void *buffer, SIZE_T length,
                              SIZE_T *written_out);
+NTSTATUS IoFlushFileKernel(HANDLE handle);
 NTSTATUS IoOpenFileKernel(const char *path, ULONG access, BOOLEAN create,
                           BOOLEAN exclusive, BOOLEAN truncate,
                           HANDLE *handle_out);

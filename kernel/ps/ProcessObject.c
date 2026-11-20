@@ -1012,7 +1012,8 @@ static NTSTATUS create_process_captured(const char *filename,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
+NTSTATUS PsForkLinuxProcess(PKTHREAD parent, UINT64 child_stack,
+                            HANDLE *handle_out,
                             ULONG *pid_out)
 {
     if (!parent || !parent->Process || !parent->Process->LinuxContext ||
@@ -1074,7 +1075,8 @@ NTSTATUS PsForkLinuxProcess(PKTHREAD parent, HANDLE *handle_out,
     status = ObCreateHandle(raw, GENERIC_ALL, &handle);
     if (!NT_SUCCESS(status)) goto failed;
     PKTHREAD child = NULL;
-    status = LinuxCreateForkThread(parent, target, &object->Header, &child);
+    status = LinuxCreateForkThread(parent, target, &object->Header,
+                                   child_stack, &child);
     if (!NT_SUCCESS(status)) {
         ObCloseHandle(handle);
         goto failed;

@@ -111,16 +111,6 @@ static void *inet_stage_send_buffer(UINT64 user_buffer, UINT64 length)
 }
 
 
-static void inet_log_ipv4(const char *label, const struct sockaddr_in *address,
-                          UINT16 port)
-{
-    const UINT8 *octet = (const UINT8 *)&address->sin_addr.s_addr;
-    KeLog("[linux-net] %s %u.%u.%u.%u:%u\n", label,
-          (unsigned)octet[0], (unsigned)octet[1],
-          (unsigned)octet[2], (unsigned)octet[3],
-          (unsigned)lwip_ntohs(port));
-}
-
 static UINT64 inet_socket_ref(PKPROCESS process, UINT64 fd,
                               LINUX_SOCKET **out)
 {
@@ -437,7 +427,6 @@ static int inet_socket_option(int linux_level, int linux_option)
 UINT64 LinuxInetReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
                           UINT64 buffer, UINT64 length, UINT64 flags)
 {
-    static volatile UINT32 io_trace_count;
     UINT64 supported = LINUX_MSG_DONTWAIT | LINUX_MSG_NOSIGNAL |
                        (write ? 0 : LINUX_MSG_PEEK);
     if (flags & ~supported) return LinuxError(LINUX_EOPNOTSUPP);
@@ -453,11 +442,6 @@ UINT64 LinuxInetReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
         LinuxSocketRelease(socket);
         return LinuxError(LINUX_ENOMEM);
     }
-    UINT32 trace = __sync_fetch_and_add(&io_trace_count, 1u);
-    if (trace < 96u)
-        KeLog("[linux-net] %s begin fd=%d length=%u flags=0x%llx\n",
-              write ? "send" : "recv", socket->LwipFd,
-              (unsigned)length, (unsigned long long)flags);
     int transferred = write ?
         lwip_send(socket->LwipFd, staged, (size_t)length,
                   inet_translate_flags(flags)) :
@@ -465,10 +449,10 @@ UINT64 LinuxInetReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
                   (size_t)length, inet_translate_flags(flags));
     int saved_errno = errno;
     result = transferred < 0 ? inet_error() : (UINT64)transferred;
-    if (trace < 96u)
-        KeLog("[linux-net] %s end fd=%d transferred=%d errno=%d result=0x%llx\n",
-              write ? "send" : "recv", socket->LwipFd, transferred,
-              saved_errno, (unsigned long long)result);
+    if (transferred < 0)
+        KeLog("[linux-net] %s failed fd=%d length=%u errno=%d\n",
+              write ? "send" : "recv", socket->LwipFd,
+              (unsigned)length, saved_errno);
     if (staged) ExFreePool(staged);
     LinuxSocketRelease(socket);
     return result;
@@ -504,20 +488,6 @@ UINT64 LinuxInetSendToRecvFrom(PKPROCESS process, BOOLEAN write, UINT64 fd,
         LinuxSocketRelease(socket);
         return LinuxError(LINUX_ENOMEM);
     }
-    static volatile UINT32 datagram_trace_count;
-    UINT32 trace = __sync_fetch_and_add(&datagram_trace_count, 1u);
-    if (trace < 64u) {
-        if (write && address) {
-            KeLog("[linux-net] sendto begin fd=%d length=%u flags=0x%llx\n",
-                  socket->LwipFd, (unsigned)length,
-                  (unsigned long long)flags);
-            inet_log_ipv4("sendto dst", &target, target.sin_port);
-        }
-        else
-            KeLog("[linux-net] %s begin fd=%d length=%u flags=0x%llx\n",
-                  write ? "send" : "recvfrom", socket->LwipFd,
-                  (unsigned)length, (unsigned long long)flags);
-    }
     if (write) {
         transferred = address ?
             lwip_sendto(socket->LwipFd, staged,
@@ -537,14 +507,10 @@ UINT64 LinuxInetSendToRecvFrom(PKPROCESS process, BOOLEAN write, UINT64 fd,
     int saved_errno = errno;
     if (transferred < 0) result = inet_error();
     else if (!result) result = (UINT64)transferred;
-    if (trace < 64u) {
-        KeLog("[linux-net] %s end fd=%d transferred=%d errno=%d result=0x%llx\n",
-              write ? (address ? "sendto" : "send") : "recvfrom",
-              socket->LwipFd, transferred, saved_errno,
-              (unsigned long long)result);
-        if (!write && transferred >= 0 && address)
-            inet_log_ipv4("recvfrom src", &source, source.sin_port);
-    }
+    if (transferred < 0)
+        KeLog("[linux-net] %s failed fd=%d length=%u errno=%d\n",
+              write ? "sendto" : "recvfrom", socket->LwipFd,
+              (unsigned)length, saved_errno);
     if (staged) ExFreePool(staged);
     LinuxSocketRelease(socket);
     return result;

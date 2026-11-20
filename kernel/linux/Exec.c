@@ -76,6 +76,125 @@ static BOOLEAN linux_is_pe_image(const void *image, SIZE_T size)
            bytes[offset + 2] == 0 && bytes[offset + 3] == 0;
 }
 
+static const char *linux_capture_append(LINUX_EXEC_CAPTURE *capture,
+                                        const char *text)
+{
+    SIZE_T length = strlen(text) + 1;
+    if (length > LINUX_EXEC_TEXT_MAX - capture->TextUsed) return NULL;
+    char *result = &capture->Text[capture->TextUsed];
+    memcpy(result, text, length);
+    capture->TextUsed += (UINT32)length;
+    return result;
+}
+
+static BOOLEAN linux_script_dos_path(const char *linux_path, char dos[260])
+{
+    if (linux_path[0] != '/') return FALSE;
+    SIZE_T i = 0;
+    dos[i++] = 'C';
+    dos[i++] = ':';
+    for (SIZE_T j = 0; linux_path[j]; j++) {
+        if (i + 1 >= 260) return FALSE;
+        dos[i++] = linux_path[j] == '/' ? '\\' : linux_path[j];
+    }
+    dos[i] = 0;
+    char canonical[260];
+    if (!IoCanonicalizeDosPathKernel(dos, canonical)) return FALSE;
+    memcpy(dos, canonical, sizeof(canonical));
+    return TRUE;
+}
+
+/* Linux execve handles #! files in the kernel. Alpine package hooks depend on
+ * this to run their /bin/sh scripts after unpacking a package. */
+static UINT64 linux_prepare_script_exec(LINUX_EXEC_CAPTURE *capture,
+                                       void **image, SIZE_T *image_size)
+{
+    for (UINT32 depth = 0; depth < 4; depth++) {
+        const UINT8 *bytes = *image;
+        if (*image_size < 2 || bytes[0] != '#' || bytes[1] != '!') return 0;
+        SIZE_T line_end = 2;
+        while (line_end < *image_size && bytes[line_end] != '\n' &&
+               line_end < 258) line_end++;
+        SIZE_T cursor = 2;
+        while (cursor < line_end &&
+               (bytes[cursor] == ' ' || bytes[cursor] == '\t')) cursor++;
+        char interpreter[260], optional[260];
+        SIZE_T interpreter_length = 0, optional_length = 0;
+        while (cursor < line_end && bytes[cursor] != ' ' &&
+               bytes[cursor] != '\t' && bytes[cursor] != '\r') {
+            if (interpreter_length + 1 >= sizeof(interpreter))
+                return LinuxError(8);
+            interpreter[interpreter_length++] = (char)bytes[cursor++];
+        }
+        if (!interpreter_length) return LinuxError(8);
+        interpreter[interpreter_length] = 0;
+        while (cursor < line_end &&
+               (bytes[cursor] == ' ' || bytes[cursor] == '\t')) cursor++;
+        while (cursor < line_end && bytes[cursor] != '\r') {
+            if (optional_length + 1 >= sizeof(optional))
+                return LinuxError(8);
+            optional[optional_length++] = (char)bytes[cursor++];
+        }
+        while (optional_length &&
+               (optional[optional_length - 1] == ' ' ||
+                optional[optional_length - 1] == '\t')) optional_length--;
+        optional[optional_length] = 0;
+
+        char script_path[260];
+        SIZE_T script_length = 0;
+        if ((capture->Path[0] != 'C' && capture->Path[0] != 'c') ||
+            capture->Path[1] != ':' || capture->Path[2] != '\\')
+            return LinuxError(LINUX_ENOEXEC);
+        script_path[script_length++] = '/';
+        for (SIZE_T i = 3; capture->Path[i]; i++) {
+            if (script_length + 1 >= sizeof(script_path))
+                return LinuxError(LINUX_ENAMETOOLONG);
+            script_path[script_length++] = capture->Path[i] == '\\' ? '/' :
+                                            capture->Path[i];
+        }
+        script_path[script_length] = 0;
+
+        const char *old_argv[LINUX_EXEC_VECTOR_MAX];
+        UINT32 old_argc = capture->Argc;
+        memcpy(old_argv, capture->Argv, old_argc * sizeof(old_argv[0]));
+        capture->Argc = 0;
+        const char *value = linux_capture_append(capture, interpreter);
+        if (!value) return LinuxError(LINUX_E2BIG);
+        capture->Argv[capture->Argc++] = value;
+        if (optional_length) {
+            value = linux_capture_append(capture, optional);
+            if (!value) return LinuxError(LINUX_E2BIG);
+            capture->Argv[capture->Argc++] = value;
+        }
+        value = linux_capture_append(capture, script_path);
+        if (!value) return LinuxError(LINUX_E2BIG);
+        capture->Argv[capture->Argc++] = value;
+        for (UINT32 i = 1; i < old_argc; i++) {
+            if (capture->Argc == LINUX_EXEC_VECTOR_MAX)
+                return LinuxError(LINUX_E2BIG);
+            capture->Argv[capture->Argc++] = old_argv[i];
+        }
+
+        char interpreter_dos[260];
+        if (!linux_script_dos_path(interpreter, interpreter_dos))
+            return LinuxError(LINUX_ENOENT);
+        void *interpreter_image = NULL;
+        SIZE_T interpreter_size = 0;
+        NTSTATUS status = FatLoadFile(interpreter_dos, &interpreter_image,
+                                      &interpreter_size, NULL);
+        ExFreePool(*image);
+        *image = interpreter_image;
+        *image_size = interpreter_size;
+        memcpy(capture->Path, interpreter_dos, strlen(interpreter_dos) + 1);
+        if (!NT_SUCCESS(status))
+            return LinuxError(status == STATUS_OBJECT_NAME_NOT_FOUND ||
+                              status == STATUS_OBJECT_PATH_NOT_FOUND ||
+                              status == STATUS_NO_SUCH_FILE ? LINUX_ENOENT :
+                                                              LINUX_EIO);
+    }
+    return LinuxError(LINUX_ENOEXEC);
+}
+
 static BOOLEAN linux_argument_needs_quotes(const char *text)
 {
     if (!text[0]) return TRUE;
@@ -360,6 +479,7 @@ UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp)
     if (!capture) return LinuxError(LINUX_ENOMEM);
     memset(capture, 0, sizeof(*capture));
     UINT64 error = LinuxCapturePath(process, path, capture->Path);
+    if (!error) LinuxResolvePath(capture->Path);
     if (!error) {
         UINT8 proc = LinuxProcPathKind(capture->Path);
         if (proc == LINUX_PROC_EXE)
@@ -387,6 +507,12 @@ UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp)
                           status == STATUS_OBJECT_PATH_NOT_FOUND ||
                           status == STATUS_NO_SUCH_FILE ? LINUX_ENOENT :
                                                           LINUX_EIO);
+    }
+    error = linux_prepare_script_exec(capture, &image, &size);
+    if (error) {
+        ExFreePool(image);
+        ExFreePool(capture);
+        return error;
     }
     if (linux_is_pe_image(image, size)) {
         ExFreePool(image);

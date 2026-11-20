@@ -22,6 +22,7 @@
 #define LINUX_EFAULT 14
 #define LINUX_EINVAL 22
 #define LINUX_ENOSYS 38
+#define LINUX_ENOEXEC 8
 #define LINUX_EIO 5
 #define LINUX_ENOENT 2
 #define LINUX_EACCES 13
@@ -203,7 +204,7 @@ UINT64 LinuxChmodAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
 UINT64 LinuxFchmod(PKPROCESS process, UINT64 fd, UINT64 mode);
 UINT64 LinuxArchPrctl(PKTHREAD thread, UINT64 command, UINT64 value);
 UINT64 LinuxClone(PKTHREAD thread, const UINT64 args[6]);
-UINT64 LinuxFork(PKTHREAD parent);
+UINT64 LinuxFork(PKTHREAD parent, UINT64 child_stack);
 UINT64 LinuxExecve(PKTHREAD thread, UINT64 path, UINT64 argv, UINT64 envp);
 UINT64 LinuxWait4(PKPROCESS process, INT64 pid, UINT64 status,
                   UINT64 options, UINT64 usage);
@@ -238,6 +239,7 @@ NTSTATUS LinuxPrepareWrite(PKPROCESS process, UINT64 fd);
 UINT64 LinuxCapturePath(PKPROCESS process, UINT64 user, char result[260]);
 UINT64 LinuxCapturePathAt(PKPROCESS process, UINT64 directory_fd,
                           UINT64 user, char result[260]);
+void LinuxResolvePath(char path[260]);
 UINT64 LinuxRenameAt2(PKPROCESS process, UINT64 old_directory_fd,
                       UINT64 old_path, UINT64 new_directory_fd,
                       UINT64 new_path, UINT64 flags);
@@ -298,6 +300,7 @@ BOOLEAN LinuxSocketUnlinkPath(const char *dos_path);
 UINT64 LinuxAccess(PKPROCESS process, UINT64 path, UINT64 mode);
 UINT64 LinuxGetcwd(PKPROCESS process, UINT64 buffer, UINT64 size);
 UINT64 LinuxChdir(PKPROCESS process, UINT64 path);
+UINT64 LinuxFchdir(PKPROCESS process, UINT64 fd);
 UINT64 LinuxMkdir(PKPROCESS process, UINT64 path, UINT64 mode);
 UINT64 LinuxUnlink(PKPROCESS process, UINT64 path);
 UINT64 LinuxUnlinkAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,

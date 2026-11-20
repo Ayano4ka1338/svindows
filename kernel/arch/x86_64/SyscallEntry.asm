@@ -58,11 +58,13 @@ KiSystemCallEntry:
     push    rsi
 
     ; clone children must resume with the parent's preserved user registers.
-    ; Save these for Linux clone(56) and fork(57). The Linux context
+    ; Save these for Linux clone(56), fork(57), and vfork(58). The context
     ; begins with LINUX_CLONE_REGISTERS (asserted in linux/Thread.c).
     cmp     rax, 56
     je      .capture_clone
     cmp     rax, 57
+    je      .capture_clone
+    cmp     rax, 58
     jne     .skip_clone_capture
 .capture_clone:
     mov     r11, [gs:16]

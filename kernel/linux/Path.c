@@ -7,6 +7,7 @@
 #define LINUX_AT_FDCWD ((UINT64)(INT64)-100)
 #define LINUX_PENDING_SYMLINK_COUNT 128
 #define LINUX_EMULATED_SYMLINK_COUNT 2048
+#define LINUX_BUSYBOX_LINK_COUNT 512
 
 typedef struct _LINUX_PENDING_SYMLINK {
     BOOLEAN Used;
@@ -19,7 +20,43 @@ typedef struct _LINUX_PENDING_SYMLINK {
 static LINUX_PENDING_SYMLINK g_linux_pending_symlinks[
     LINUX_PENDING_SYMLINK_COUNT];
 static char g_linux_emulated_symlinks[LINUX_EMULATED_SYMLINK_COUNT][260];
+static char g_linux_busybox_links[LINUX_BUSYBOX_LINK_COUNT][260];
 static BOOLEAN linux_path_equal(const char *left, const char *right);
+
+static BOOLEAN linux_is_busybox_target(const char *path)
+{
+    return linux_path_equal(path, "C:\\bin\\busybox");
+}
+
+static void linux_record_busybox_link(const char *path)
+{
+    for (UINT32 i = 0; i < LINUX_BUSYBOX_LINK_COUNT; i++) {
+        if (g_linux_busybox_links[i][0] &&
+            linux_path_equal(g_linux_busybox_links[i], path)) return;
+        if (g_linux_busybox_links[i][0]) continue;
+        memcpy(g_linux_busybox_links[i], path, strlen(path) + 1);
+        return;
+    }
+    KeLog("[linux-fs] BusyBox applet link table full at '%s'\n", path);
+}
+
+static void linux_forget_busybox_link(const char *path)
+{
+    for (UINT32 i = 0; i < LINUX_BUSYBOX_LINK_COUNT; i++)
+        if (g_linux_busybox_links[i][0] &&
+            linux_path_equal(g_linux_busybox_links[i], path))
+            g_linux_busybox_links[i][0] = 0;
+}
+
+void LinuxResolvePath(char path[260])
+{
+    for (UINT32 i = 0; i < LINUX_BUSYBOX_LINK_COUNT; i++)
+        if (g_linux_busybox_links[i][0] &&
+            linux_path_equal(g_linux_busybox_links[i], path)) {
+            memcpy(path, "C:\\bin\\busybox", sizeof("C:\\bin\\busybox"));
+            return;
+        }
+}
 
 static BOOLEAN linux_is_emulated_symlink(const char *path)
 {
@@ -32,6 +69,7 @@ static BOOLEAN linux_is_emulated_symlink(const char *path)
 
 static void linux_forget_emulated_symlink(const char *path)
 {
+    linux_forget_busybox_link(path);
     for (UINT32 i = 0; i < LINUX_EMULATED_SYMLINK_COUNT; i++)
         if (g_linux_emulated_symlinks[i][0] &&
             linux_path_equal(g_linux_emulated_symlinks[i], path))
@@ -54,9 +92,17 @@ static void linux_move_emulated_symlink(const char *source,
                                         const char *target)
 {
     BOOLEAN source_is_link = linux_is_emulated_symlink(source);
+    BOOLEAN source_is_busybox_link = FALSE;
+    for (UINT32 i = 0; i < LINUX_BUSYBOX_LINK_COUNT; i++)
+        if (g_linux_busybox_links[i][0] &&
+            linux_path_equal(g_linux_busybox_links[i], source)) {
+            source_is_busybox_link = TRUE;
+            break;
+        }
     linux_forget_emulated_symlink(target);
     linux_forget_emulated_symlink(source);
     if (source_is_link) linux_record_emulated_symlink(target);
+    if (source_is_busybox_link) linux_record_busybox_link(target);
 }
 
 static BOOLEAN linux_path_equal(const char *left, const char *right)
@@ -88,6 +134,8 @@ static void linux_materialize_pending_symlinks(const char *target_path)
         status = FatStoreFile(pending->LinkPath, contents, size, TRUE);
         if (NT_SUCCESS(status)) {
             linux_record_emulated_symlink(pending->LinkPath);
+            if (linux_is_busybox_target(pending->TargetPath))
+                linux_record_busybox_link(pending->LinkPath);
             pending->Used = FALSE;
         } else {
             KeLog("[linux-fs] deferred symlink '%s' -> '%s' materialization "
@@ -172,6 +220,7 @@ UINT64 LinuxAccess(PKPROCESS process, UINT64 path, UINT64 mode)
     char dos_path[260];
     UINT64 error = LinuxCapturePath(process, path, dos_path);
     if (error) return error;
+    LinuxResolvePath(dos_path);
     UINT8 proc = LinuxProcPathKind(dos_path);
     if (proc == LINUX_PROC_CWD) {
         memcpy(dos_path, process->CurrentDirectory, sizeof(dos_path));
@@ -239,6 +288,7 @@ UINT64 LinuxChdir(PKPROCESS process, UINT64 path)
     char dos_path[260];
     UINT64 error = LinuxCapturePath(process, path, dos_path);
     if (error) return error;
+    LinuxResolvePath(dos_path);
     UINT8 proc = LinuxProcPathKind(dos_path);
     if (proc == LINUX_PROC_CWD) {
         memcpy(dos_path, process->CurrentDirectory, sizeof(dos_path));
@@ -265,12 +315,28 @@ UINT64 LinuxChdir(PKPROCESS process, UINT64 path)
     return 0;
 }
 
+UINT64 LinuxFchdir(PKPROCESS process, UINT64 fd)
+{
+    if (fd >= LINUX_MAX_FDS || !process->LinuxContext->Files[fd].Used)
+        return LinuxError(LINUX_EBADF);
+    LINUX_FD_ENTRY *entry = &process->LinuxContext->Files[fd];
+    if (entry->Kind != LINUX_FD_DIRECTORY || !entry->DirectoryPath)
+        return LinuxError(LINUX_ENOTDIR);
+    SIZE_T length = strlen(entry->DirectoryPath);
+    if (length + 1 > sizeof(process->CurrentDirectory))
+        return LinuxError(LINUX_ENAMETOOLONG);
+    memcpy(process->CurrentDirectory, entry->DirectoryPath, length + 1);
+    return 0;
+}
+
 UINT64 LinuxMkdir(PKPROCESS process, UINT64 path, UINT64 mode)
 {
     (void)mode; /* FAT cannot store Unix permission bits. */
     char dos_path[260];
     UINT64 error = LinuxCapturePath(process, path, dos_path);
     if (error) return error;
+    if (linux_path_equal(dos_path, "C:\\"))
+        return LinuxError(LINUX_EEXIST); /* The mounted root already exists. */
     if (LinuxProcPathKind(dos_path) != LINUX_PROC_NONE)
         return LinuxError(LINUX_EROFS);
     NTSTATUS status = FatCreateDirectory(dos_path);
@@ -291,6 +357,8 @@ UINT64 LinuxMkdirAt(PKPROCESS process, UINT64 directory_fd, UINT64 path,
     char dos_path[260];
     UINT64 error = LinuxCapturePathAt(process, directory_fd, path, dos_path);
     if (error) return error;
+    if (linux_path_equal(dos_path, "C:\\"))
+        return LinuxError(LINUX_EEXIST);
     if (LinuxProcPathKind(dos_path) != LINUX_PROC_NONE)
         return LinuxError(LINUX_EROFS);
     NTSTATUS status = FatCreateDirectory(dos_path);
@@ -546,6 +614,21 @@ UINT64 LinuxSymlinkAt(PKPROCESS process, UINT64 target, UINT64 directory_fd,
     }
     if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
     if (existing.Attributes & 0x10u) return LinuxError(LINUX_EOPNOTSUPP);
+
+    /* BusyBox's post-install creates hundreds of applet symlinks to the same
+     * executable. FAT cannot store symlinks; copying that executable for every
+     * applet wastes space and can make apk report a partial install. Keep a
+     * zero-length FAT placeholder and resolve registered applet paths back to
+     * the single BusyBox binary instead. */
+    if (linux_is_busybox_target(target_dos)) {
+        status = FatStoreFile(link_dos, NULL, 0, TRUE);
+        if (status == STATUS_DISK_FULL) return LinuxError(LINUX_ENOSPC);
+        if (status == STATUS_NO_MEMORY) return LinuxError(LINUX_ENOMEM);
+        if (!NT_SUCCESS(status)) return LinuxError(LINUX_EIO);
+        linux_record_emulated_symlink(link_dos);
+        linux_record_busybox_link(link_dos);
+        return 0;
+    }
 
     void *contents = NULL;
     SIZE_T size = 0;

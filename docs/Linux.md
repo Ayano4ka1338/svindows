@@ -43,6 +43,8 @@ loader; `apk update` uses the existing HTTPS/network stack and stores indexes
 under `/var/cache/apk`. APK package extraction supports FAT timestamps and
 root ownership requests; FAT mode bits are advisory. Since FAT has no symlink
 entry type, links to existing regular files are materialized as file copies.
+Alpine separates the C compiler from libc development headers; install both
+before compiling C programs with standard headers: `apk add gcc musl-dev`.
 `apk add tree` and running the installed `tree` command have been verified in
 QEMU. Packages that need true symlink behavior, hard links, or unsupported
 Linux syscalls can still fail.
@@ -71,7 +73,7 @@ fbdev, VT, evdev, and PTY requests), `pread64` (17), `readv` (19),
 `setsockopt` (54), `getsockopt` (55), `fork` (57), `execve` (59),
 `exit` (60), `wait4` (61), `uname` (63), `fcntl` (72, descriptor and status flags,
 including `F_DUPFD`),
-`flock` (73), `getcwd` (79), `chdir` (80), `mkdir` (83), `unlink` (87),
+`flock` (73), `getcwd` (79), `chdir` (80), `fchdir` (81), `mkdir` (83), `unlink` (87),
 `readlink` (89, framebuffer sysfs links), `chmod` (90), `fchmod` (91),
 `chown` (92), `fchown` (93), `lchown` (94),
 `getrlimit` (97, `RLIMIT_NOFILE`),
@@ -93,8 +95,10 @@ return `-ENOSYS`.
 
 `clone` (56) supports threads sharing the process address space, file table,
 and working directory. It supports TLS and parent/child TID pointers; Linux
-namespace flags are not implemented. `fork` copies user pages and inherits
-descriptors; `execve` replaces the image and honors close-on-exec.
+namespace flags are not implemented. The `CLONE_VM | CLONE_VFORK` process
+form used by musl `posix_spawn` starts a copied-address-space child with the
+requested child stack. `fork` (57) and `vfork` (58) also copy user pages and
+inherit descriptors; `execve` replaces the image and honors close-on-exec.
 `sched_yield` (24) is
 also available. Thread exit clears the registered child TID and wakes one
 futex waiter. Futex supports `WAIT` and `WAKE`, with or without the private
