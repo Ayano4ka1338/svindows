@@ -101,6 +101,9 @@ def stage(destination: Path) -> None:
     # Xorg reads both the system and administrator configuration directories.
     # Install each section once, in the administrator directory.
     input_conf = (
+        "Section \"Module\"\n"
+        "    Load \"glx\"\n"
+        "EndSection\n\n"
         "Section \"InputDevice\"\n"
         "    Identifier \"svindows-keyboard\"\n"
         "    Driver \"evdev\"\n"

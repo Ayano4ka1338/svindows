@@ -24,6 +24,7 @@ section .text
 
 extern KiSystemServiceDispatch
 extern KiRejectUserReturn
+extern LinuxConsumeSignalReturn
 
 global KiSystemCallEntry
 ; KTHREAD field offsets for the callback redirect (see Ke.h; _Static_asserts in
@@ -186,6 +187,42 @@ KiSystemCallEntry:
     swapgs
     iretq
 .check_callback:
+    ; rt_sigreturn restores the exact Linux register context from the user
+    ; ucontext. A non-null pointer means LinuxSignalReturn prepared it.
+    mov     r11, [gs:16]          ; current KTHREAD
+    mov     r11, [r11+KTH_LINUX_THREAD]
+    test    r11, r11
+    jz      .skip_signal_return
+    cmp     byte [r11+232], 1     ; SignalReturnPending in LINUX_THREAD_CONTEXT
+    jne     .skip_signal_return
+    mov     rdi, [gs:16]          ; only rt_sigreturn reaches this helper
+    call    LinuxConsumeSignalReturn
+    push    rax                   ; keep mcontext base beyond the IRET frame
+    mov     r11, [rsp]
+    push    0x1B                  ; SS
+    push    qword [r11+120]       ; restored RSP
+    push    qword [r11+136]       ; restored RFLAGS
+    push    0x23                  ; CS
+    push    qword [r11+128]       ; restored RIP
+    ; The mcontext pointer remains at [rsp+40] while all GPRs are loaded.
+    mov     r15, [rsp+96]
+    mov     r14, [rsp+88]
+    mov     r13, [rsp+80]
+    mov     r12, [rsp+72]
+    mov     r10, [rsp+56]
+    mov     r9,  [rsp+48]
+    mov     r8,  [rsp+40]
+    mov     rbp, [rsp+120]
+    mov     rdi, [rsp+104]
+    mov     rsi, [rsp+112]
+    mov     rdx, [rsp+136]
+    mov     rbx, [rsp+128]
+    mov     rcx, [rsp+152]
+    mov     r11, [rsp+64]
+    mov     rax, [rsp+144]
+    swapgs
+    iretq
+.skip_signal_return:
     ; A kernel->user callback armed a one-shot redirect: send this sysret into
     ; the callback trampoline instead of the original caller. R11 is scratch
     ; until the normal path reloads the user RFLAGS into it below, and RAX (the

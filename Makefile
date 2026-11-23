@@ -6,7 +6,7 @@ HOSTCC  ?= clang
 
 CONFIG ?= release
 FAT_FAULT_AFTER ?= -1
-INITRD_SIZE_MB ?= 512
+INITRD_SIZE_MB ?= 640
 # Use the multiprocessor scheduler by default. `make SMP=0` keeps a UP build
 # available for firmware and hardware where AP startup is unavailable.
 SMP ?= 1
@@ -165,6 +165,8 @@ ALPINE_FASTFETCH := $(BUILD)/alpine-fastfetch/.ready
 ALPINE_CURL := $(BUILD)/alpine-curl/.ready
 ALPINE_FEH := $(BUILD)/alpine-feh/.ready
 ALPINE_APK := $(BUILD)/alpine-apk/.ready
+MINECRAFT := $(BUILD)/alpine-minecraft/.ready
+MINECRAFT_RUNTIME := $(BUILD)/minecraft-runtime/.ready
 # Keep each legacy Windows release isolated; their WIN.COM and system modules
 # share names but must never overwrite one another on the FAT image.
 WINDOWS1_FILES := $(sort $(wildcard user/d/windows1/*))
@@ -188,10 +190,12 @@ CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
 # vendor/custom QEMU builds commonly expose only the generic alias. Defaults
 # use user-mode NAT and the transitional VirtIO-net PCI interface.
 QEMU                 ?= qemu-system-x86_64
-QEMU_MEMORY          ?= 1024M
+QEMU_MEMORY          ?= 2G
 QEMU_MACHINE         ?= pc
 QEMU_ACCEL           ?= $(shell if test -r /dev/kvm -a -w /dev/kvm; then echo kvm; else echo tcg; fi)
+QEMU_TCG_TB_SIZE     ?= 128
 QEMU_CPU             ?= max
+QEMU_SMP              ?= 2
 QEMU_NET_ID          ?= svnet0
 QEMU_NETDEV          ?= user,id=$(QEMU_NET_ID),ipv6=off
 # Keep the device on the legacy PCI root bus and expose its legacy I/O BARs.
@@ -200,7 +204,12 @@ QEMU_NET_DEVICE      ?= virtio-net-pci,netdev=$(QEMU_NET_ID),disable-modern=on,b
 QEMU_AUDIO_BACKEND   ?= pa
 QEMU_EXTRA_ARGS      ?=
 QEMU_SERIAL          ?= stdio
-QEMUFLAGS            := -machine $(QEMU_MACHINE),accel=$(QEMU_ACCEL) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) -no-reboot -no-shutdown -boot d \
+ifeq ($(QEMU_ACCEL),tcg)
+QEMU_ACCEL_ARGS      ?= tcg,thread=multi,tb-size=$(QEMU_TCG_TB_SIZE)
+else
+QEMU_ACCEL_ARGS      ?= $(QEMU_ACCEL)
+endif
+QEMUFLAGS            := -machine $(QEMU_MACHINE) -accel $(QEMU_ACCEL_ARGS) -cpu $(QEMU_CPU) -smp $(QEMU_SMP) -m $(QEMU_MEMORY) -no-reboot -no-shutdown -boot d \
                         -netdev $(QEMU_NETDEV) -device $(QEMU_NET_DEVICE) \
                         -audiodev $(QEMU_AUDIO_BACKEND),id=svaudio0 \
                         -device sb16,audiodev=svaudio0,irq=5,dma=1,dma16=5 \
@@ -594,13 +603,19 @@ $(ALPINE_FEH): tools/StageAlpineFeh.py tools/alpine-feh.lock.json tools/AlpineFe
 $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-apk
 
+$(MINECRAFT_RUNTIME):
+	@test -f $@ || { echo "offline Alpha 1.2.6 runtime cache is missing: stage it before building" >&2; exit 1; }
+
+$(MINECRAFT): tools/StageMinecraft.py tools/minecraft.lock.json tools/third_party/libXtst.so.6.1.0 user/d/minecraft/client.jar $(MINECRAFT_RUNTIME)
+	python3 $< $(BUILD)/alpine-minecraft
+
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(SVINDOWSBOX) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(TASK_SERVICES) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(SVINDOWSBOX) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(TASK_SERVICES) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(MINECRAFT) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/minecraft.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
-	# Keep enough room for Alpine packages while avoiding an unnecessarily
-	# large contiguous Multiboot2 module allocation during UEFI boot.
+# Include the offline Alpha client and Mesa's software OpenGL stack while
+# keeping the initrd small enough for a contiguous Multiboot2 allocation.
 	dd if=/dev/zero of=$(INITRD) bs=1M count=$(INITRD_SIZE_MB) status=none
 	mformat -i $(INITRD) -F -v SVINDOWS ::
 	mcopy -i $(INITRD) $(CMD) ::CMD.EXE
@@ -662,6 +677,12 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-curl/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-feh/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-apk/root/* ::
+	mmd -i $(INITRD) ::USR/LIB/JVM ::USR/LIB/JVM/ZULU8 ::USR/SHARE/MINECRAFT
+	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/usr/lib/jvm/zulu8/* ::USR/LIB/JVM/ZULU8/
+	mcopy -o -i $(INITRD) $(BUILD)/alpine-minecraft/root/lib/libXtst.so.6 ::LIB/LIBXTST.SO.6
+	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/usr/lib/* ::USR/LIB/
+	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/lib/* ::LIB/
+	mcopy -o -i $(INITRD) user/d/minecraft.bat ::MINECRAFT.BAT
 	# mcopy -s may omit empty source directories; apk needs these parents when
 	# it atomically renames newly installed package files into /usr/bin and
 	# /usr/lib. Check first because other staged packages may already populate
@@ -694,7 +715,8 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mmd -i $(INITRD) ::dev ::dev/pts
 	mmd -i $(INITRD) ::tmp ::temp
 	# Give POSIX programs a real HOME rather than leaving HOME unset.
-	mmd -i $(INITRD) ::home ::home/user ::home/user/.config ::home/user/.config/feh
+	mmd -i $(INITRD) ::home ::home/user ::home/user/.config ::home/user/.config/feh ::home/user/.minecraft
+	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/home/user/.minecraft/* ::home/user/.minecraft/
 	# Keep the feh smoke-test image in the user's home directory.
 	mcopy -i $(INITRD) other/Logo_small.png ::home/user/LOGO.PNG
 	if [ -n "$(DOOM_FILES)" ]; then \
@@ -777,9 +799,9 @@ $(ISO): Makefile $(KERNEL) $(INITRD) boot/limine.conf other/Logo.png $(LIMINE_FI
 run: all
 	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) -serial $(QEMU_SERIAL) -display none
 
-run-gui:
-	$(MAKE) BUILD=build/gui PROGRAM=cmd.exe CMDLINE=cmd.exe all
-	$(QEMU) $(QEMUFLAGS) -cdrom build/gui/svindows.iso \
+
+run-gui: all
+	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) \
 	    -serial $(QEMU_SERIAL)
 
 # Explicit alias for testing DHCP/DNS/TCP/HTTP with the kernel's lwIP smoke

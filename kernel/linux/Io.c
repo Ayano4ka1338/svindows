@@ -1,17 +1,49 @@
 /* Linux read/write/writev through the process's file-number table. */
 #include "Internal.h"
+
 #include <svindows/Io.h>
 #include <svindows/Ob.h>
 #include <svindows/Rtl.h>
+#include <svindows/Ke.h>
 
 typedef struct _LINUX_IOVEC {
     UINT64 Base;
     UINT64 Length;
 } LINUX_IOVEC;
 
+static void linux_trace_stdio(PKPROCESS process, UINT64 fd,
+                               UINT64 buffer, UINT64 length)
+{
+    if (fd > 2 || !length || length > LINUX_IO_MAX ||
+        !MmProbeForRead(buffer, length)) return;
+    const char *text = (const char *)(ULONG_PTR)buffer;
+    SIZE_T count = length < 240 ? (SIZE_T)length : 240;
+    BOOLEAN relevant = FALSE;
+    for (SIZE_T i = 0; i < count; i++) {
+        if ((i + 11 <= count && !memcmp(text + i, "[minecraft]", 11)) ||
+            (i + 9 <= count && !memcmp(text + i, "Exception", 9)) ||
+            (i + 5 <= count && !memcmp(text + i, "Error", 5)) ||
+            (i + 14 <= count && !memcmp(text + i, "LWJGLException", 14)) ||
+            (i + 6 <= count && !memcmp(text + i, "    at", 6))) {
+            relevant = TRUE;
+            break;
+        }
+    }
+    if (!relevant) return;
+    char line[241];
+    memcpy(line, text, count);
+    line[count] = 0;
+    for (SIZE_T i = 0; i < count; i++)
+        if (line[i] == '\r' || line[i] == '\n') line[i] = ' ';
+    KeLog("[app-stdio fd=%llu pid=%u name=%s] %s\n",
+          (unsigned long long)fd, process->ProcessId,
+          process->Name ? process->Name : "?", line);
+}
+
 UINT64 LinuxReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
                       UINT64 buffer, UINT64 length)
 {
+    if (write) linux_trace_stdio(process, fd, buffer, length);
     if (fd < LINUX_MAX_FDS && process->LinuxContext->Files[fd].Used &&
         process->LinuxContext->Files[fd].Kind == LINUX_FD_PROC) {
         LINUX_FD_ENTRY *entry = &process->LinuxContext->Files[fd];
@@ -136,6 +168,7 @@ UINT64 LinuxWritev(PKPROCESS process, UINT64 fd, UINT64 vectors, UINT64 count)
     UINT64 completed = 0;
     for (UINT64 i = 0; i < count; i++) {
         if (!iov[i].Length) continue;
+        linux_trace_stdio(process, fd, iov[i].Base, iov[i].Length);
         if (socket || terminal || pty) {
             UINT64 written = pty ?
                 LinuxPtyReadWrite(process, TRUE, fd, iov[i].Base, iov[i].Length) :

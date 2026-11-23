@@ -25,6 +25,7 @@
 #define LINUX_POLLERR 0x0008u
 #define LINUX_POLLHUP 0x0010u
 #define LINUX_POLLNVAL 0x0020u
+#define LINUX_FIONREAD 0x541bu
 
 /* lwIP 2.2.1 uses a different poll bit ABI than Linux:
  *   lwIP: POLLIN=0x01, POLLOUT=0x02, POLLERR=0x04, POLLNVAL=0x08
@@ -456,6 +457,30 @@ UINT64 LinuxInetReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
     if (staged) ExFreePool(staged);
     LinuxSocketRelease(socket);
     return result;
+}
+
+UINT64 LinuxInetIoctl(PKPROCESS process, UINT64 fd, UINT64 command,
+                      UINT64 argument)
+{
+    if (command != LINUX_FIONREAD) return LinuxError(LINUX_ENOTTY);
+    if (!MmProbeForWrite(argument, sizeof(INT32)))
+        return LinuxError(LINUX_EFAULT);
+    LINUX_SOCKET *socket;
+    UINT64 result = inet_socket_ref(process, fd, &socket);
+    if (result) return result;
+    int available = 0;
+    int status = lwip_ioctl(socket->LwipFd, FIONREAD, &available);
+    int saved_errno = errno;
+    int lwip_fd = socket->LwipFd;
+    LinuxSocketRelease(socket);
+    if (status < 0) {
+        KeLog("[linux-net] FIONREAD failed fd=%d errno=%d\n",
+              lwip_fd, saved_errno);
+        errno = saved_errno;
+        return inet_error();
+    }
+    *(INT32 *)(ULONG_PTR)argument = available < 0 ? 0 : available;
+    return 0;
 }
 
 UINT64 LinuxInetSendToRecvFrom(PKPROCESS process, BOOLEAN write, UINT64 fd,

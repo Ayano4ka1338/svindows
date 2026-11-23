@@ -127,7 +127,7 @@ existing file or device to `0:0` succeeds, while other owners are refused.
 `brk` begins after the highest ELF load segment. `mmap` allocates private
 anonymous pages or copies a readable file into private pages; changes to a
 file mapping do not write back to FAT. A single mapping may span the full
-dedicated 4 GiB virtual address arena. `mprotect`
+user virtual address arena from 4 GiB to 128 TiB. `mprotect`
 supports mapped pages, ELF image pages, and allocated `brk` pages, including
 `PROT_NONE`; `munmap` supports partial unmapping of mmap-owned ranges.
 `MAP_FIXED_NOREPLACE` and `MAP_FIXED` are supported within the arena for

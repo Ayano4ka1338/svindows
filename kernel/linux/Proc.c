@@ -44,6 +44,10 @@ UINT8 LinuxProcPathKind(const char *path)
     if (proc_equal(path, "C:\\proc\\self")) return LINUX_PROC_SELF;
     if (proc_equal(path, "C:\\proc\\self\\status"))
         return LINUX_PROC_STATUS;
+    if (proc_equal(path, "C:\\proc\\self\\stat"))
+        return LINUX_PROC_STAT;
+    if (proc_equal(path, "C:\\proc\\self\\maps"))
+        return LINUX_PROC_MAPS;
     if (proc_equal(path, "C:\\proc\\self\\cmdline"))
         return LINUX_PROC_CMDLINE;
     if (proc_equal(path, "C:\\proc\\self\\exe")) return LINUX_PROC_EXE;
@@ -215,6 +219,47 @@ static UINT64 proc_cpuinfo(char *out, SIZE_T capacity)
     return used;
 }
 
+static UINT64 proc_stat(PKPROCESS process, char *out, SIZE_T capacity)
+{
+    const char *name = process->Name ? process->Name : "?";
+    for (const char *p = name; *p; p++)
+        if (*p == '\\' || *p == '/') name = p + 1;
+    UINT64 stack = process->LinuxContext ?
+        process->LinuxContext->Memory.StackBase +
+            process->LinuxContext->Memory.StackSize - sizeof(UINT64) : 0;
+    int n = RtlFormat(out, capacity,
+        "%u (%s) R 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 "
+        "0 0 0 0 0 %llu 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        process->ProcessId, name, (unsigned long long)stack);
+    return n < 0 ? 0 : ((UINT64)n < capacity ? (UINT64)n : capacity - 1);
+}
+
+static UINT64 proc_maps(PKPROCESS process, char *out, SIZE_T capacity)
+{
+    UINT64 used = 0;
+    if (!process || !process->LinuxContext) return 0;
+    LINUX_MEMORY_CONTEXT *memory = &process->LinuxContext->Memory;
+    if (memory->StackBase && memory->StackSize) {
+        int n = RtlFormat(out, capacity, "%016llx-%016llx rw-p 00000000 00:00 0 [stack]\n",
+            (unsigned long long)memory->StackBase,
+            (unsigned long long)(memory->StackBase + memory->StackSize));
+        if (n < 0 || (SIZE_T)n >= capacity) return n < 0 ? 0 : capacity - 1;
+        used = (UINT64)n;
+    }
+    for (UINT32 i = 0; i < LINUX_MAP_REGIONS; i++) {
+        LINUX_MAP_REGION *region = &memory->Regions[i];
+        if (!region->Base || !region->Size || used >= capacity) continue;
+        int n = RtlFormat(out + used, capacity - (SIZE_T)used,
+            "%016llx-%016llx rw-p 00000000 00:00 0\n",
+            (unsigned long long)region->Base,
+            (unsigned long long)(region->Base + region->Size));
+        if (n < 0 || (SIZE_T)n >= capacity - (SIZE_T)used)
+            return n < 0 ? used : capacity - 1;
+        used += (UINT64)n;
+    }
+    return used;
+}
+
 static UINT64 proc_contents(PKPROCESS process, UINT8 node, char *out,
                             SIZE_T capacity)
 {
@@ -225,6 +270,8 @@ static UINT64 proc_contents(PKPROCESS process, UINT8 node, char *out,
     }
     if (node == LINUX_PROC_MEMINFO) return proc_meminfo(out, capacity);
     if (node == LINUX_PROC_CPUINFO) return proc_cpuinfo(out, capacity);
+    if (node == LINUX_PROC_STAT) return proc_stat(process, out, capacity);
+    if (node == LINUX_PROC_MAPS) return proc_maps(process, out, capacity);
     if (node == LINUX_PROC_CMDLINE) {
         const char *path = process->ImagePath;
         if ((path[0] == 'C' || path[0] == 'c') && path[1] == ':')
@@ -349,18 +396,19 @@ UINT64 LinuxProcGetdents(LINUX_FD_ENTRY *entry, UINT64 buffer, UINT64 length)
         {LINUX_PROC_ROOT, LINUX_PROC_ROOT, LINUX_PROC_SELF,
          LINUX_PROC_VERSION, LINUX_PROC_MEMINFO, LINUX_PROC_CPUINFO};
     static const char *const self_names[] =
-        {".", "..", "status", "cmdline", "exe", "cwd"};
+        {".", "..", "status", "stat", "maps", "cmdline", "exe", "cwd"};
     static const UINT8 self_types[] =
-        {PROC_DT_DIR, PROC_DT_DIR, PROC_DT_REG, PROC_DT_REG,
-         PROC_DT_LNK, PROC_DT_LNK};
+        {PROC_DT_DIR, PROC_DT_DIR, PROC_DT_REG, PROC_DT_REG, PROC_DT_REG,
+         PROC_DT_REG, PROC_DT_LNK, PROC_DT_LNK};
     static const UINT8 self_nodes[] =
         {LINUX_PROC_SELF, LINUX_PROC_ROOT, LINUX_PROC_STATUS,
-         LINUX_PROC_CMDLINE, LINUX_PROC_EXE, LINUX_PROC_CWD};
+         LINUX_PROC_STAT, LINUX_PROC_MAPS, LINUX_PROC_CMDLINE,
+         LINUX_PROC_EXE, LINUX_PROC_CWD};
     BOOLEAN self = LinuxProcPathKind(entry->DirectoryPath) == LINUX_PROC_SELF;
     const char *const *names = self ? self_names : root_names;
     const UINT8 *types = self ? self_types : root_types;
     const UINT8 *nodes = self ? self_nodes : root_nodes;
-    UINT64 count = self ? 6 : 6;
+    UINT64 count = self ? 8 : 6;
     UINT64 written = 0;
     while (entry->Offset < count) {
         UINT64 index = entry->Offset;

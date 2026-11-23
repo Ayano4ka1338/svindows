@@ -1,0 +1,7 @@
+{
+  "java": {
+    "url": "https://cdn.azul.com/zulu/bin/zulu8.98.0.201-ca-jre8.0.514-linux_musl_x64.tar.gz",
+    "sha256": "b61f78ce48c83742d2dcb2c7a0730216b1af7fae7a7f010419ca37a868b77c6f",
+    "directory": "zulu8.98.0.201-ca-jre8.0.514-linux_musl_x64"
+  }
+}

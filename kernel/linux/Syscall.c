@@ -1,6 +1,30 @@
 /* First-stage x86-64 Linux syscall ABI. Linux errors are negative errno. */
 #include "Internal.h"
 #include "SocketPrivate.h"
+#include "SocketInet.h"
+#include <svindows/Hal.h>
+
+static UINT64 linux_sched_affinity(PKPROCESS process, UINT64 pid,
+                                   UINT64 size, UINT64 mask, BOOLEAN set)
+{
+    if (pid && pid != process->ProcessId) return LinuxError(LINUX_ESRCH);
+    if (!size || size > 4096) return LinuxError(LINUX_EINVAL);
+    if (!MmProbeForWrite(mask, size)) return LinuxError(LINUX_EFAULT);
+    UINT8 *bytes = (UINT8 *)(ULONG_PTR)mask;
+    UINT32 processors = HalGetProcessorCount();
+    if (!processors) processors = 1;
+    if (set) {
+        BOOLEAN any_online = FALSE;
+        for (UINT32 cpu = 0; cpu < processors; cpu++)
+            if ((UINT64)cpu < size * 8 &&
+                (bytes[cpu >> 3] & (1u << (cpu & 7)))) any_online = TRUE;
+        return any_online ? 0 : LinuxError(LINUX_EINVAL);
+    }
+    for (UINT64 i = 0; i < size; i++) bytes[i] = 0;
+    for (UINT32 cpu = 0; cpu < processors && (UINT64)cpu < size * 8; cpu++)
+        bytes[cpu >> 3] |= (UINT8)(1u << (cpu & 7));
+    return size;
+}
 
 UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
 {
@@ -37,16 +61,13 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
     case 12: /* brk */
         return LinuxBrk(process, args[0]);
     case 13: /* rt_sigaction */
+        return LinuxSignalAction(process, args);
     case 14: /* rt_sigprocmask */
+        return LinuxSignalMask(thread, args);
     case 15: /* rt_sigreturn */
+        return LinuxSignalReturn(thread);
     case 131: /* sigaltstack */
-        /* Signals are not delivered in Svindows. Accepting the registration
-         * lets a program (Xorg installs handlers for SIGSEGV/SIGBUS/...) finish
-         * its startup instead of aborting on ENOSYS. The action and mask are
-         * discarded; we do not write back any "old" action, which callers here
-         * ignore. A real fault still terminates the process via the kernel
-         * trap path. */
-        return 0;
+        return LinuxSignalAltStack(thread, args);
     case 16: { /* ioctl: requests are 32-bit and may be sign-extended by libc */
         UINT64 command = (UINT32)args[1];
         if (args[0] < LINUX_MAX_FDS &&
@@ -61,6 +82,12 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
             process->LinuxContext->Files[args[0]].Used &&
             process->LinuxContext->Files[args[0]].Kind == LINUX_FD_EVENT)
             return LinuxEventIoctl(process, args[0], command, args[2]);
+        if (args[0] < LINUX_MAX_FDS &&
+            process->LinuxContext->Files[args[0]].Used &&
+            process->LinuxContext->Files[args[0]].Kind == LINUX_FD_SOCKET &&
+            process->LinuxContext->Files[args[0]].Socket &&
+            process->LinuxContext->Files[args[0]].Socket->Family == LINUX_AF_INET)
+            return LinuxInetIoctl(process, args[0], command, args[2]);
         return LinuxFramebufferIoctl(process, args[0], command, args[2]);
     }
     case 17: /* pread64 */
@@ -235,7 +262,12 @@ UINT64 LinuxSystemCallDispatch(UINT64 number, const UINT64 args[6])
     case 186: /* gettid */
         return thread->LinuxThread->Tid;
     case 202: /* futex */
-        return LinuxFutex(process, args[0], args[1], args[2], args[3]);
+        return LinuxFutex(process, args[0], args[1], args[2], args[3],
+                          args[4]);
+    case 203: /* sched_setaffinity */
+        return linux_sched_affinity(process, args[0], args[1], args[2], TRUE);
+    case 204: /* sched_getaffinity */
+        return linux_sched_affinity(process, args[0], args[1], args[2], FALSE);
     case 213: /* epoll_create */
         return args[0] ? LinuxEpollCreate(process, 0) :
                          LinuxError(LINUX_EINVAL);

@@ -15,6 +15,8 @@
 #include <svindows/Mm.h>
 #include <svindows/Ldr.h>
 #include <svindows/Rtl.h>
+#include <svindows/Linux.h>
+#include "../../linux/Internal.h"
 
 static const char *const g_exception_names[32] = {
     "#DE Divide-by-Zero",
@@ -434,6 +436,27 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
 
     /* Deliver first-chance ring-3 exceptions through ntdll. */
     if (frame->vector < 32) {
+        PKTHREAD current = KeGetCurrentThread();
+        if ((frame->cs & 3) == 3 && current && current->Process &&
+            current->Process->LinuxContext) {
+            UINT32 sig = 11; /* SIGSEGV */
+            INT32 code = 1;  /* SEGV_MAPERR */
+            UINT64 address = frame->rip;
+            switch (frame->vector) {
+            case 0: sig = 8; code = 1; break; /* SIGFPE/FPE_INTDIV */
+            case 1: case 3: sig = 5; code = 2; break; /* SIGTRAP */
+            case 6: sig = 4; code = 2; break; /* SIGILL/ILL_ILLOPN */
+            case 14:
+                sig = 11;
+                code = (frame->error_code & 1) ? 2 : 1;
+                address = fault_address;
+                break;
+            case 17: sig = 7; code = 1; address = frame->rsp; break;
+            case 13: sig = 11; code = 128; break; /* SI_KERNEL */
+            default: sig = 11; code = 128; break;
+            }
+            if (LinuxDeliverSyncSignal(frame, sig, code, address)) return;
+        }
         if ((frame->cs & 3) == 3 && dispatch_user_exception(frame))
             return;
         dump_frame(frame, fault_address);

@@ -5,6 +5,7 @@
 #include <svindows/Mm.h>
 
 #define LINUX_EBADF 9
+#define LINUX_ESRCH 3
 #define LINUX_E2BIG 7
 #define LINUX_ECHILD 10
 #define LINUX_ENOTSOCK 88
@@ -66,6 +67,8 @@
 #define LINUX_PROC_CWD 8u
 #define LINUX_PROC_MEMINFO 9u
 #define LINUX_PROC_CPUINFO 10u
+#define LINUX_PROC_STAT 11u
+#define LINUX_PROC_MAPS 12u
 #define LINUX_MAP_OWNED 0u
 #define LINUX_MAP_FRAMEBUFFER 1u
 
@@ -132,6 +135,8 @@ typedef struct _LINUX_MEMORY_CONTEXT {
     UINT64 BrkCurrent;
     UINT64 BrkMapped;
     UINT64 NextMap;
+    UINT64 StackBase;
+    UINT64 StackSize;
     BOOLEAN FramebufferOwner;
     LINUX_MAP_REGION Regions[LINUX_MAP_REGIONS];
 } LINUX_MEMORY_CONTEXT;
@@ -146,6 +151,7 @@ typedef struct _LINUX_PROCESS_CONTEXT {
     UINT32 ProcessGroupId;
     UINT32 Umask;
     BOOLEAN UmaskInitialized;
+    struct { UINT64 Handler, Flags, Restorer, Mask; } SignalActions[65];
     struct {
         HANDLE ProcessHandle;
         ULONG Pid;
@@ -170,7 +176,26 @@ typedef struct _LINUX_THREAD_CONTEXT {
     UINT64 ExecArgument; /* PE entry argument (LDR init block VA) */
     KEVENT FutexEvent;
     UINT64 WaitingFutexAddress;
+    UINT64 SignalMask;
+    UINT64 SignalFrameBase[8];
+    UINT8 SignalReturnPending;
+    UINT8 SignalDepth;
+    UINT8 SignalPad[6];
+    UINT64 SignalReturn[23]; /* Linux x86-64 mcontext gregs order */
+    UINT64 SignalAltStackBase;
+    UINT64 SignalAltStackSize;
+    UINT8 SignalOnAltStack;
+    UINT8 SignalPreviousAltStack[8];
+    UINT32 WaitingFutexBitset;
 } LINUX_THREAD_CONTEXT;
+
+UINT64 LinuxSignalAction(PKPROCESS process, const UINT64 args[6]);
+UINT64 LinuxSignalMask(PKTHREAD thread, const UINT64 args[6]);
+UINT64 LinuxSignalAltStack(PKTHREAD thread, const UINT64 args[6]);
+UINT64 LinuxSignalReturn(PKTHREAD thread);
+UINT64 *LinuxConsumeSignalReturn(PKTHREAD thread);
+BOOLEAN LinuxDeliverSyncSignal(PKTRAP_FRAME frame, UINT32 signal,
+                               INT32 code, UINT64 address);
 
 static inline UINT64 LinuxError(INT32 code)
 {
@@ -210,7 +235,7 @@ UINT64 LinuxWait4(PKPROCESS process, INT64 pid, UINT64 status,
                   UINT64 options, UINT64 usage);
 UINT64 LinuxSetTidAddress(PKTHREAD thread, UINT64 address);
 UINT64 LinuxFutex(PKPROCESS process, UINT64 address, UINT64 operation,
-                  UINT64 value, UINT64 timeout);
+                  UINT64 value, UINT64 timeout, UINT64 bitset);
 UINT64 LinuxFutexWake(PKPROCESS process, UINT64 address, UINT32 maximum);
 NORETURN void LinuxExitGroup(PKTHREAD thread, NTSTATUS exit_status);
 void LinuxInitializeFiles(PKPROCESS process);

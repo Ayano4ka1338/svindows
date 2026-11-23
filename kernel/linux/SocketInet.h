@@ -17,6 +17,8 @@ UINT64 LinuxInetAccept(PKPROCESS process, UINT64 fd, UINT64 address,
                        UINT64 address_length, UINT64 flags);
 UINT64 LinuxInetReadWrite(PKPROCESS process, BOOLEAN write, UINT64 fd,
                           UINT64 buffer, UINT64 length, UINT64 flags);
+UINT64 LinuxInetIoctl(PKPROCESS process, UINT64 fd, UINT64 command,
+                      UINT64 argument);
 UINT64 LinuxInetSendToRecvFrom(PKPROCESS process, BOOLEAN write, UINT64 fd,
                                UINT64 buffer, UINT64 length, UINT64 flags,
                                UINT64 address, UINT64 address_length);

@@ -144,7 +144,8 @@ existing file or device to `0:0` succeeds, while other owners are refused.
 `brk` begins after the highest ELF load segment. `mmap` allocates private
 anonymous pages or copies a readable file into private pages; changes to a
 file mapping do not write back to FAT. Mappings are currently limited to
-64 MiB per call and a dedicated 4 GiB virtual address arena. `mprotect`
+256 MiB per call within a user virtual address arena from 4 GiB to 128 TiB.
+`mprotect`
 supports mapped pages, ELF image pages, and allocated `brk` pages, including
 `PROT_NONE`; `munmap` supports partial unmapping of mmap-owned ranges.
 `MAP_FIXED_NOREPLACE` and `MAP_FIXED` are supported within the arena for
@@ -219,3 +220,13 @@ Xterm starts `/usr/bin/cmd`, a copy of the native `CMD.EXE` image. Its Linux
 stream through the NT File bridge. `cmd` searches C: and `C:\usr\bin`, so it
 can launch both `.exe` and `.elf` programs by name. Linux GUI clients launched
 from this shell inherit `DISPLAY=:0`.
+
+## Minecraft Alpha 1.2.6
+
+The image includes the supplied `user/d/minecraft/client.jar`, Azul Zulu Java
+8u514 for musl, Minecraft's LWJGL libraries, and the Alpine-compatible
+`libXtst.so.6` required by Java AWT. Java is pinned by SHA-256 in
+`tools/minecraft.lock.json` and staged by `tools/StageMinecraft.py`. Start the
+desktop with `startx.elf`, then run `MINECRAFT.BAT` in its terminal. This
+legacy client starts from its built-in desktop `net.minecraft.client.Minecraft`
+entry point, with the bundled LWJGL 2 jars and offline resources.

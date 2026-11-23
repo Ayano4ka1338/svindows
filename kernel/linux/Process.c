@@ -257,6 +257,9 @@ NTSTATUS LinuxCreateInitialThread(PKPROCESS process, const char *name,
     memset(process->LinuxContext, 0, sizeof(*process->LinuxContext));
     process->LinuxContext->SessionId = process->ProcessId;
     process->LinuxContext->ProcessGroupId = process->ProcessId;
+    process->LinuxContext->Memory.StackBase =
+        LINUX_STACK_TOP - LINUX_STACK_PAGES * PAGE_SIZE;
+    process->LinuxContext->Memory.StackSize = LINUX_STACK_PAGES * PAGE_SIZE;
     UINT64 image_end = main_image.ImageEnd;
     if (has_interpreter && interpreter.ImageEnd > image_end)
         image_end = interpreter.ImageEnd;
@@ -307,6 +310,9 @@ NTSTATUS LinuxLoadExecImage(PKPROCESS process, const void *image, SIZE_T size,
         image_end = interpreter.ImageEnd;
     memset(&process->LinuxContext->Memory, 0,
            sizeof(process->LinuxContext->Memory));
+    process->LinuxContext->Memory.StackBase =
+        LINUX_STACK_TOP - LINUX_STACK_PAGES * PAGE_SIZE;
+    process->LinuxContext->Memory.StackSize = LINUX_STACK_PAGES * PAGE_SIZE;
     status = LinuxInitializeMemory(process, image_end);
     if (!NT_SUCCESS(status)) return status;
     *entry_out = has_interpreter ? interpreter.Entry : main_image.Entry;

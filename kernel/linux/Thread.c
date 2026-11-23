@@ -42,6 +42,10 @@ _Static_assert(__builtin_offsetof(LINUX_THREAD_CONTEXT, WindowsExec) == 114,
                "windows exec flag offset");
 _Static_assert(__builtin_offsetof(LINUX_THREAD_CONTEXT, ExecArgument) == 120,
                "windows exec argument offset");
+_Static_assert(__builtin_offsetof(LINUX_THREAD_CONTEXT, SignalReturnPending) == 232,
+               "Linux signal return assembly offset");
+_Static_assert(__builtin_offsetof(LINUX_THREAD_CONTEXT, SignalReturn) == 240,
+               "Linux signal return register array offset");
 
 UINT64 LinuxArchPrctl(PKTHREAD thread, UINT64 command, UINT64 value)
 {

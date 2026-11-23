@@ -8,8 +8,11 @@
 
 #define LINUX_BRK_LIMIT 0x60000000ULL
 #define LINUX_MAP_START 0x100000000ULL
-#define LINUX_MAP_END 0x200000000ULL
-#define LINUX_MAP_MAX_BYTES (64ULL * 1024 * 1024)
+#define LINUX_MAP_END 0x0000800000000000ULL
+/* HotSpot reserves contiguous heap and code-cache ranges substantially larger
+ * than the small desktop clients originally staged here. Keep one mapping
+ * bounded, but allow a Java 8 client to reserve a practical game heap. */
+#define LINUX_MAP_MAX_BYTES (256ULL * 1024 * 1024)
 #define LINUX_PROT_WRITE 2u
 #define LINUX_PROT_EXEC 4u
 #define LINUX_MAP_PRIVATE 2u
@@ -17,6 +20,8 @@
 #define LINUX_MAP_FIXED 0x10u
 #define LINUX_MAP_DENYWRITE 0x800u /* ignored by Linux */
 #define LINUX_MAP_ANONYMOUS 0x20u
+#define LINUX_MAP_NORESERVE 0x4000u /* accepted; pages are still committed */
+#define LINUX_MAP_STACK 0x20000u /* advisory on Linux */
 #define LINUX_MAP_FIXED_NOREPLACE 0x100000u
 
 static UINT64 linux_page_flags(UINT64 protection)
@@ -208,6 +213,7 @@ UINT64 LinuxMmap(PKPROCESS process, const UINT64 args[6])
     }
     if (flags & ~(UINT64)(LINUX_MAP_PRIVATE | LINUX_MAP_SHARED |
                           LINUX_MAP_ANONYMOUS | LINUX_MAP_DENYWRITE |
+                          LINUX_MAP_NORESERVE | LINUX_MAP_STACK |
                           LINUX_MAP_FIXED | LINUX_MAP_FIXED_NOREPLACE))
         return LinuxError(LINUX_EOPNOTSUPP);
     UINT64 map_type = flags & (LINUX_MAP_PRIVATE | LINUX_MAP_SHARED);
