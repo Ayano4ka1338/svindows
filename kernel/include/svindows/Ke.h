@@ -438,6 +438,12 @@ typedef struct _KPRCB {
 
 #define KE_MAXIMUM_PROCESSORS 64u
 
+/* GS-relative entry code and KeGetCurrentThreadFast use these architectural
+ * offsets directly; keep the C layout pinned to the per-CPU ABI. */
+_Static_assert(__builtin_offsetof(KPRCB, CurrentThread) == 0x10,
+               "KPRCB.CurrentThread GS offset changed");
+_Static_assert(__builtin_offsetof(KPRCB, Self) == 0x18,
+               "KPRCB.Self GS offset changed");
 _Static_assert(__builtin_offsetof(KTHREAD, UserRip) == 0xAC0,
                "KTHREAD.UserRip offset changed");
 _Static_assert(__builtin_offsetof(KTHREAD, UserRsp) == 0xAC8,
@@ -538,11 +544,16 @@ PKTHREAD  KeCreateUserThreadForProcessEx(PKPROCESS process, const char *name,
 PKTHREAD  KeGetCurrentThread(void);
 PKPRCB    KeGetCurrentProcessorBlock(void);
 PKPRCB    KeGetProcessorBlock(ULONG processor_number);
-/* Current-thread access is CPU-local; the fast inline accessor keeps the
- * instruction-emulator hot path free of an extra call. */
+/* Read CurrentThread directly through the active kernel GS base. Do not
+ * fetch the PRCB pointer first and dereference it in a second instruction:
+ * a timer interrupt may migrate this thread between those operations, making
+ * the saved PRCB pointer refer to the CPU it just left. A single GS-relative
+ * load always reads the current CPU's thread pointer. */
 static ALWAYS_INLINE PKTHREAD KeGetCurrentThreadFast(void)
 {
-    return KeGetCurrentProcessorBlock()->CurrentThread;
+    PKTHREAD thread;
+    __asm__ volatile("movq %%gs:16, %0" : "=r"(thread) : : "memory");
+    return thread;
 }
 void      KeSetUserFsBase(UINT64 base);
 void      KeSetUserGsBase(UINT64 base);

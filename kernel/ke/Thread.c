@@ -217,7 +217,13 @@ static void KepReapTerminatedThreads(void)
     }
 }
 
-PKTHREAD KeGetCurrentThread(void) { return KeGetCurrentProcessorBlock()->CurrentThread; }
+PKTHREAD KeGetCurrentThread(void)
+{
+    /* Use the same migration-safe, single-instruction GS load as the inline
+     * accessor. Reading PRCB->CurrentThread after returning a PRCB pointer
+     * can observe a different CPU if this thread is preempted and migrated. */
+    return KeGetCurrentThreadFast();
+}
 
 /* Called by native thread services while the syscall has interrupts masked. */
 PKTHREAD KeLookupThreadById(ULONG thread_id)

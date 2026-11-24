@@ -214,7 +214,7 @@ QEMUFLAGS            := -machine $(QEMU_MACHINE) -accel $(QEMU_ACCEL_ARGS) -cpu 
                         -audiodev $(QEMU_AUDIO_BACKEND),id=svaudio0 \
                         -device sb16,audiodev=svaudio0,irq=5,dma=1,dma16=5 \
                         $(QEMU_EXTRA_ARGS)
-.PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check dos-x11-check dos-performance-check win16-agent lwip-port-check network-check feh-path-check feh-fs-check ui-font .FORCE
+.PHONY: all clean iso run run-gui run-net dos-tests dos-vm-check dos-x11-check dos-performance-check win16-agent lwip-port-check network-check feh-path-check feh-fs-check ui-font current-thread-check .FORCE
 
 .FORCE:
 
@@ -603,16 +603,10 @@ $(ALPINE_FEH): tools/StageAlpineFeh.py tools/alpine-feh.lock.json tools/AlpineFe
 $(ALPINE_APK): tools/StageAlpineApk.py tools/alpine-apk.lock.json tools/AlpineFetch.py
 	python3 $< $(BUILD)/alpine-apk
 
-$(MINECRAFT_RUNTIME):
-	@test -f $@ || { echo "offline Alpha 1.2.6 runtime cache is missing: stage it before building" >&2; exit 1; }
-
-$(MINECRAFT): tools/StageMinecraft.py tools/minecraft.lock.json tools/third_party/libXtst.so.6.1.0 user/d/minecraft/client.jar $(MINECRAFT_RUNTIME)
-	python3 $< $(BUILD)/alpine-minecraft
-
 $(DOS_TESTS): tools/BuildDosTests.py
 	python3 $< $(BUILD)/dos-tests
 
-$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(SVINDOWSBOX) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(TASK_SERVICES) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(MINECRAFT) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/minecraft.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
+$(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_BINS) $(SVINDOWSBOX) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(USER32) $(GDI32) $(WINSPOOL) $(COMDLG32) $(UXTHEME) $(COMCTL32) $(SHELL32) $(ADVPACK) $(ACLUI) $(AUTHZ) $(SHLWAPI) $(GDIPLUS) $(OLEAUT32) $(RPCRT4) $(WINMM) $(WINDOWSCODECS) $(IPHLPAPI) $(TASK_SERVICES) $(STARTX) $(ALPINE_XORG) $(ALPINE_FASTFETCH) $(ALPINE_CURL) $(ALPINE_FEH) $(ALPINE_APK) $(wildcard user/d/doom) $(DOOM_FILES) $(DOOM_NESTED_FILES) $(wildcard user/d/windows1) $(wildcard user/d/windows3) $(WINDOWS1_FILES) $(WINDOWS3_FILES) $(WINDOWS7_FILES) $(WINDOWS_FILES) user/d/win.bat user/d/win2.bat user/d/win3.bat user/d/win3x.bat user/d/win7x.bat user/d/minecraft.bat user/d/xwin/XWIN.EXE other/Logo_small.png $(IMAGE_PROGRAM_INPUTS)
 	@mkdir -p $(BUILD)
 # Include the offline Alpha client and Mesa's software OpenGL stack while
 # keeping the initrd small enough for a contiguous Multiboot2 allocation.
@@ -677,11 +671,6 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-curl/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-feh/root/* ::
 	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-apk/root/* ::
-	mmd -i $(INITRD) ::USR/LIB/JVM ::USR/LIB/JVM/ZULU8 ::USR/SHARE/MINECRAFT
-	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/usr/lib/jvm/zulu8/* ::USR/LIB/JVM/ZULU8/
-	mcopy -o -i $(INITRD) $(BUILD)/alpine-minecraft/root/lib/libXtst.so.6 ::LIB/LIBXTST.SO.6
-	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/usr/lib/* ::USR/LIB/
-	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/lib/* ::LIB/
 	mcopy -o -i $(INITRD) user/d/minecraft.bat ::MINECRAFT.BAT
 	# mcopy -s may omit empty source directories; apk needs these parents when
 	# it atomically renames newly installed package files into /usr/bin and
@@ -716,7 +705,6 @@ $(INITRD): Makefile etc/resolv.conf $(DOS_TESTS) $(NET_TOOLS) $(CMD) $(COMMAND_B
 	mmd -i $(INITRD) ::tmp ::temp
 	# Give POSIX programs a real HOME rather than leaving HOME unset.
 	mmd -i $(INITRD) ::home ::home/user ::home/user/.config ::home/user/.config/feh ::home/user/.minecraft
-	mcopy -o -s -i $(INITRD) $(BUILD)/alpine-minecraft/root/home/user/.minecraft/* ::home/user/.minecraft/
 	# Keep the feh smoke-test image in the user's home directory.
 	mcopy -i $(INITRD) other/Logo_small.png ::home/user/LOGO.PNG
 	if [ -n "$(DOOM_FILES)" ]; then \
@@ -752,6 +740,9 @@ dos-x11-check:
 
 dos-performance-check:
 	python3 tools/checks/DosPerformanceChecks.py
+
+current-thread-check:
+	python3 tools/checks/CurrentThreadAccessChecks.py
 
 win16-agent:
 	python3 tools/BuildWin16Agent.py
